@@ -49,7 +49,7 @@ class SafetyControllerTest {
         assertEquals(ConversationPermission.BLOCKED, controller.getPermission(nav(50, ManeuverType.TURN_RIGHT)))
     }
 
-    // ── Complex maneuver priority tests ───────────────────────────────────
+    // ── Complex maneuver priority tests (Phase 1 maneuvers) ──────────────
 
     @Test
     fun `roundabout at 1000m — BLOCKED (complex maneuver overrides distance)`() {
@@ -74,6 +74,55 @@ class SafetyControllerTest {
     @Test
     fun `uturn at 700m — BLOCKED`() {
         assertEquals(ConversationPermission.BLOCKED, controller.getPermission(nav(700, ManeuverType.UTURN)))
+    }
+
+    // ── Phase 2 complex maneuvers: MERGE and FORK ─────────────────────────
+
+    @Test
+    fun `merge at 1500m — BLOCKED (complex, driver must judge moving lane gap)`() {
+        assertEquals(ConversationPermission.BLOCKED, controller.getPermission(nav(1500, ManeuverType.MERGE)))
+    }
+
+    @Test
+    fun `fork at 800m — BLOCKED (complex, two-path decision at speed)`() {
+        assertEquals(ConversationPermission.BLOCKED, controller.getPermission(nav(800, ManeuverType.FORK)))
+    }
+
+    @Test
+    fun `merge at short distance — still BLOCKED`() {
+        assertEquals(ConversationPermission.BLOCKED, controller.getPermission(nav(50, ManeuverType.MERGE)))
+    }
+
+    @Test
+    fun `fork interrupts audio at 900m`() {
+        assertTrue(controller.shouldInterruptAudio(nav(900, ManeuverType.FORK)))
+    }
+
+    @Test
+    fun `merge interrupts audio at 2000m`() {
+        assertTrue(controller.shouldInterruptAudio(nav(2000, ManeuverType.MERGE)))
+    }
+
+    // ── Phase 2 non-complex maneuvers — simple at distance ────────────────
+
+    @Test
+    fun `slight left at 600m — ALLOWED`() {
+        assertEquals(ConversationPermission.ALLOWED, controller.getPermission(nav(600, ManeuverType.SLIGHT_LEFT)))
+    }
+
+    @Test
+    fun `sharp right at 300m — SHORT_ONLY`() {
+        assertEquals(ConversationPermission.SHORT_ONLY, controller.getPermission(nav(300, ManeuverType.SHARP_RIGHT)))
+    }
+
+    @Test
+    fun `arrive maneuver at 0m — BLOCKED by distance`() {
+        assertEquals(ConversationPermission.BLOCKED, controller.getPermission(nav(0, ManeuverType.ARRIVE)))
+    }
+
+    @Test
+    fun `unknown maneuver at 600m — ALLOWED (treated as simple)`() {
+        assertEquals(ConversationPermission.ALLOWED, controller.getPermission(nav(600, ManeuverType.UNKNOWN)))
     }
 
     // ── shouldInterruptAudio tests ────────────────────────────────────────
@@ -107,13 +156,13 @@ class SafetyControllerTest {
 
     @Test
     fun `not navigating — always ALLOWED regardless of distance`() {
-        val state = NavigationState(isNavigating = false, distanceToManeuverMeters = 10)
+        val state = NavigationState(isNavigating = false, distanceToNextManeuverMeters = 10)
         assertEquals(ConversationPermission.ALLOWED, controller.getPermission(state))
     }
 
     @Test
     fun `not navigating — shouldInterruptAudio always false`() {
-        val state = NavigationState(isNavigating = false, distanceToManeuverMeters = 10)
+        val state = NavigationState(isNavigating = false, distanceToNextManeuverMeters = 10)
         assertFalse(controller.shouldInterruptAudio(state))
     }
 
@@ -129,30 +178,25 @@ class SafetyControllerTest {
 
     @Test
     fun `navigation continues independent of AI state — SafetyController has no AI dependency`() {
-        // SafetyController must function without any AI involvement.
-        // Simply verifying it returns correct results with no AI objects injected.
         val state = nav(1000, ManeuverType.STRAIGHT)
         assertEquals(ConversationPermission.ALLOWED, controller.getPermission(state))
     }
 
     @Test
-    fun `standard navigation voice fallback — BLOCKED state does not prevent navigation`() {
-        // When BLOCKED, the AI is silent but navigation must continue unaffected.
-        // SafetyController does not touch NavigationController — this test
-        // confirms BLOCKED is an audio-only decision.
+    fun `BLOCKED state is audio-only — NavigationState data is unchanged`() {
         val state = nav(100, ManeuverType.TURN_RIGHT)
         val permission = controller.getPermission(state)
         assertEquals(ConversationPermission.BLOCKED, permission)
-        // NavigationState itself is unchanged — navigation data is intact.
-        assertEquals(100, state.distanceToManeuverMeters)
-        assertEquals(ManeuverType.TURN_RIGHT, state.nextManeuver)
+        // NavigationState is immutable; BLOCKED does not modify it
+        assertEquals(100, state.distanceToNextManeuverMeters)
+        assertEquals(ManeuverType.TURN_RIGHT, state.maneuverType)
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────
 
     private fun nav(distance: Int, maneuver: ManeuverType) = NavigationState(
         isNavigating = true,
-        distanceToManeuverMeters = distance,
-        nextManeuver = maneuver,
+        distanceToNextManeuverMeters = distance,
+        maneuverType = maneuver,
     )
 }

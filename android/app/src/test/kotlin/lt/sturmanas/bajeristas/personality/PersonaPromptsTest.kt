@@ -93,22 +93,33 @@ class PersonaPromptsTest {
     @Test
     fun `SafetyController returns BLOCKED regardless of SOFT mode`() {
         val controller = SafetyController()
-        val state = NavigationState(isNavigating = true, distanceToManeuverMeters = 100, nextManeuver = ManeuverType.TURN_RIGHT)
-        // Session config has no effect on SafetyController — it only reads NavigationState
+        val state = NavigationState(
+            isNavigating = true,
+            distanceToNextManeuverMeters = 100,
+            maneuverType = ManeuverType.TURN_RIGHT,
+        )
         assertEquals(ConversationPermission.BLOCKED, controller.getPermission(state))
     }
 
     @Test
     fun `SafetyController returns BLOCKED regardless of HARD mode`() {
         val controller = SafetyController()
-        val state = NavigationState(isNavigating = true, distanceToManeuverMeters = 100, nextManeuver = ManeuverType.TURN_RIGHT)
+        val state = NavigationState(
+            isNavigating = true,
+            distanceToNextManeuverMeters = 100,
+            maneuverType = ManeuverType.TURN_RIGHT,
+        )
         assertEquals(ConversationPermission.BLOCKED, controller.getPermission(state))
     }
 
     @Test
     fun `SafetyController returns BLOCKED for roundabout regardless of GROUP mode`() {
         val controller = SafetyController()
-        val state = NavigationState(isNavigating = true, distanceToManeuverMeters = 1500, nextManeuver = ManeuverType.ROUNDABOUT)
+        val state = NavigationState(
+            isNavigating = true,
+            distanceToNextManeuverMeters = 1500,
+            maneuverType = ManeuverType.ROUNDABOUT,
+        )
         assertEquals(ConversationPermission.BLOCKED, controller.getPermission(state))
     }
 

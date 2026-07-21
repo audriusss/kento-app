@@ -1,8 +1,17 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
 }
+
+// Read GOOGLE_MAPS_API_KEY from local.properties (never committed to source control).
+val localProperties = Properties().also { props ->
+    val localFile = rootProject.file("local.properties")
+    if (localFile.exists()) props.load(localFile.inputStream())
+}
+val googleMapsApiKey: String = localProperties.getProperty("GOOGLE_MAPS_API_KEY", "")
 
 android {
     namespace = "lt.sturmanas.bajeristas"
@@ -12,14 +21,15 @@ android {
         applicationId = "lt.sturmanas.bajeristas"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        // Phase 2: add GOOGLE_MAPS_API_KEY=your_key in local.properties,
-        // then uncomment the meta-data block in AndroidManifest.xml.
-        manifestPlaceholders["GOOGLE_MAPS_API_KEY"] = ""
+        // Inject API key into AndroidManifest.xml and BuildConfig.
+        // Stays empty string when local.properties has no key → MockNavigationEngine is used.
+        manifestPlaceholders["GOOGLE_MAPS_API_KEY"] = googleMapsApiKey
+        buildConfigField("String", "GOOGLE_MAPS_API_KEY", "\"$googleMapsApiKey\"")
     }
 
     buildTypes {
@@ -59,13 +69,19 @@ dependencies {
     implementation(libs.androidx.material3)
     implementation(libs.androidx.material.icons.extended)
 
-    // Phase 2: Google Navigation SDK — enable after adding API key
-    // implementation("com.google.android.libraries.navigation:navigation:5.2.2")
+    // Google Navigation SDK 7.8.0
+    // Requires: Navigation SDK enabled in Google Cloud Console + valid API key in local.properties
+    // If local.properties has no key, app falls back to MockNavigationEngine automatically.
+    implementation("com.google.android.libraries.navigation:navigation:7.8.0")
+
+    // Coroutines (for MockNavigationEngine simulation and suspend functions)
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     // Phase 3: OkHttp WebSocket for OpenAI Realtime
     // implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     testImplementation(libs.junit)
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
 
     debugImplementation(libs.androidx.ui.tooling)
 }

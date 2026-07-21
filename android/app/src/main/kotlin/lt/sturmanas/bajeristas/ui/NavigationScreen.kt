@@ -18,66 +18,141 @@ import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import lt.sturmanas.bajeristas.navigation.ManeuverType
+import lt.sturmanas.bajeristas.navigation.NavigationController
 import lt.sturmanas.bajeristas.navigation.NavigationState
 import lt.sturmanas.bajeristas.safety.ConversationPermission
 
 @Composable
 fun NavigationScreen(
     navigationState: NavigationState,
+    navigationController: NavigationController,
     conversationPermission: ConversationPermission,
     aiStatusMessage: String,
     isMuted: Boolean,
     onMicPress: () -> Unit,
-    onMicRelease: () -> Unit,
     onMuteToggle: () -> Unit,
     onEnableStandardVoice: () -> Unit,
     onStopNavigation: () -> Unit,
 ) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val engine = remember { navigationController.engine }
+
     Column(modifier = Modifier.fillMaxSize()) {
 
-        // ── Map area (Phase 2: replace with AndroidView → NavFragment) ────
+        // ── Navigation map — Google Navigation SDK view ────────────────────
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f)
-                .background(Color(0xFFCDE9C5)),
-            contentAlignment = Alignment.Center,
+                .weight(1f),
         ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("🗺", style = MaterialTheme.typography.displayMedium)
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "Google Navigation SDK",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                )
-                Text(
-                    text = "Integruojama 2 fazėje",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF444444),
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "Tikslas: ${navigationState.destination}",
-                    style = MaterialTheme.typography.bodySmall,
-                )
+            AndroidView(
+                factory = { ctx -> navigationController.createNavigationView(ctx) },
+                modifier = Modifier.fillMaxSize(),
+            )
+
+            // Rerouting overlay
+            if (navigationState.isRerouting) {
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 16.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    shape = MaterialTheme.shapes.medium,
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Text("Perskaičiuojamas maršrutas…", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
             }
+
+            // Arrival overlay
+            if (navigationState.hasArrived) {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = Color(0xCC1B6CA8),
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxSize(),
+                        verticalArrangement = Arrangement.Center,
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Text(
+                            "Atvykote!",
+                            style = MaterialTheme.typography.headlineLarge,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Text(
+                            navigationState.destinationName,
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = Color.White,
+                        )
+                    }
+                }
+            }
+        }
+
+        // Forward lifecycle events to NavigationView (required by SDK)
+        DisposableEffect(lifecycleOwner) {
+            val observer = LifecycleEventObserver { _, event ->
+                when (event) {
+                    Lifecycle.Event.ON_RESUME -> engine.onResume()
+                    Lifecycle.Event.ON_PAUSE -> engine.onPause()
+                    Lifecycle.Event.ON_STOP -> engine.onStop()
+                    Lifecycle.Event.ON_DESTROY -> engine.onDestroy()
+                    else -> {}
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
         }
 
         // ── Bottom panel ──────────────────────────────────────────────────
         Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+
+            // Error message banner
+            navigationState.errorMessage?.let { error ->
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 8.dp),
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    shape = MaterialTheme.shapes.small,
+                ) {
+                    Text(
+                        text = error,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                }
+            }
 
             // Maneuver info card
             Card(
@@ -93,43 +168,39 @@ fun NavigationScreen(
                 ) {
                     Column {
                         Text(
-                            text = maneuverLabel(navigationState),
+                            text = maneuverLabel(navigationState.maneuverType),
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                         )
-                        Text(
-                            text = navigationState.currentStreet.ifBlank { "—" },
-                            style = MaterialTheme.typography.bodySmall,
-                        )
+                        val roadInfo = when {
+                            navigationState.nextRoadName.isNotBlank() -> navigationState.nextRoadName
+                            navigationState.currentRoadName.isNotBlank() -> navigationState.currentRoadName
+                            else -> "—"
+                        }
+                        Text(text = roadInfo, style = MaterialTheme.typography.bodySmall)
                     }
                     Column(horizontalAlignment = Alignment.End) {
+                        val dist = navigationState.distanceToNextManeuverMeters
                         Text(
-                            text = "${navigationState.distanceToManeuverMeters} m",
+                            text = if (dist == Int.MAX_VALUE) "—" else "$dist m",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.SemiBold,
                         )
-                        val mins = navigationState.remainingTimeSeconds / 60
-                        Text(
-                            text = "~$mins min",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
+                        val mins = navigationState.remainingDurationSeconds / 60
+                        Text(text = "~$mins min", style = MaterialTheme.typography.bodySmall)
                     }
                 }
             }
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Safety status indicator
+            // Safety / conversation status
             val (permColor, permText) = when (conversationPermission) {
                 ConversationPermission.ALLOWED -> Color(0xFF2E7D32) to "Pokalbis leidžiamas"
                 ConversationPermission.SHORT_ONLY -> Color(0xFFF57F17) to "Tik trumpai — artėja manevras"
                 ConversationPermission.BLOCKED -> Color(0xFFC62828) to "Navigacija turi prioritetą"
             }
-            Text(
-                text = permText,
-                style = MaterialTheme.typography.labelMedium,
-                color = permColor,
-            )
+            Text(text = permText, style = MaterialTheme.typography.labelMedium, color = permColor)
 
             if (aiStatusMessage.isNotBlank()) {
                 Text(
@@ -141,13 +212,12 @@ fun NavigationScreen(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Controls row: mute — mic — stop
+            // Controls row
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                // Mute toggle
                 IconButton(onClick = onMuteToggle) {
                     Icon(
                         imageVector = if (isMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
@@ -157,7 +227,7 @@ fun NavigationScreen(
                     )
                 }
 
-                // Large push-to-talk mic button
+                // Push-to-talk mic button (Phase 3: replace onClick with pointerInput press/release)
                 val micEnabled = conversationPermission != ConversationPermission.BLOCKED && !isMuted
                 Box(
                     modifier = Modifier
@@ -168,8 +238,6 @@ fun NavigationScreen(
                         ),
                     contentAlignment = Alignment.Center,
                 ) {
-                    // Phase 3: replace with pointerInput { detectTapGestures(onPress = …) }
-                    // for true press-and-hold push-to-talk
                     IconButton(
                         onClick = { if (micEnabled) onMicPress() },
                         modifier = Modifier.fillMaxSize(),
@@ -183,7 +251,6 @@ fun NavigationScreen(
                     }
                 }
 
-                // Stop navigation
                 TextButton(onClick = onStopNavigation) {
                     Text("Baigti", color = MaterialTheme.colorScheme.error)
                 }
@@ -202,16 +269,23 @@ fun NavigationScreen(
     }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Label helpers ─────────────────────────────────────────────────────────────
 
-private fun maneuverLabel(state: NavigationState): String = when (state.nextManeuver) {
-    lt.sturmanas.bajeristas.navigation.ManeuverType.NONE -> "Tiesiai"
-    lt.sturmanas.bajeristas.navigation.ManeuverType.STRAIGHT -> "Tiesiai"
-    lt.sturmanas.bajeristas.navigation.ManeuverType.TURN_LEFT -> "← Kairėn"
-    lt.sturmanas.bajeristas.navigation.ManeuverType.TURN_RIGHT -> "→ Dešinėn"
-    lt.sturmanas.bajeristas.navigation.ManeuverType.ROUNDABOUT -> "↻ Žiedas"
-    lt.sturmanas.bajeristas.navigation.ManeuverType.MOTORWAY_EXIT -> "↘ Išvažiavimas"
-    lt.sturmanas.bajeristas.navigation.ManeuverType.LANE_CHANGE -> "⇒ Juostos keitimas"
-    lt.sturmanas.bajeristas.navigation.ManeuverType.COMPLEX_JUNCTION -> "✦ Sudėtinga sankryža"
-    lt.sturmanas.bajeristas.navigation.ManeuverType.UTURN -> "↩ Apsisukimas"
+private fun maneuverLabel(type: ManeuverType): String = when (type) {
+    ManeuverType.NONE, ManeuverType.STRAIGHT -> "Tiesiai"
+    ManeuverType.TURN_LEFT -> "← Kairėn"
+    ManeuverType.TURN_RIGHT -> "→ Dešinėn"
+    ManeuverType.SLIGHT_LEFT -> "↖ Šiek tiek kairėn"
+    ManeuverType.SLIGHT_RIGHT -> "↗ Šiek tiek dešinėn"
+    ManeuverType.SHARP_LEFT -> "↰ Staigiai kairėn"
+    ManeuverType.SHARP_RIGHT -> "↱ Staigiai dešinėn"
+    ManeuverType.UTURN -> "↩ Apsisukimas"
+    ManeuverType.ROUNDABOUT -> "↻ Žiedas"
+    ManeuverType.MOTORWAY_EXIT -> "↘ Išvažiavimas"
+    ManeuverType.LANE_CHANGE -> "⇒ Juostos keitimas"
+    ManeuverType.COMPLEX_JUNCTION -> "✦ Sudėtinga sankryža"
+    ManeuverType.MERGE -> "⇒ Įsijungimas į srautą"
+    ManeuverType.FORK -> "⑂ Kelio šakojimasis"
+    ManeuverType.ARRIVE -> "✓ Atvykote"
+    ManeuverType.UNKNOWN -> "Tiesiai"
 }

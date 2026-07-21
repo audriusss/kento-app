@@ -5,6 +5,8 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- Required by Navigation SDK for background location during active nav -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 
     <application
         android:allowBackup="true"
@@ -13,11 +15,14 @@
         android:supportsRtl="true">
 
         <!--
-            Phase 2: uncomment after adding GOOGLE_MAPS_API_KEY to local.properties
-            <meta-data
-                android:name="com.google.android.geo.API_KEY"
-                android:value="${GOOGLE_MAPS_API_KEY}" />
+            Google Maps / Navigation SDK API key.
+            Populated from local.properties → GOOGLE_MAPS_API_KEY via Gradle.
+            Value is empty string when the key is not configured;
+            the app automatically uses MockNavigationEngine in that case.
         -->
+        <meta-data
+            android:name="com.google.android.geo.API_KEY"
+            android:value="${GOOGLE_MAPS_API_KEY}" />
 
         <activity
             android:name=".MainActivity"

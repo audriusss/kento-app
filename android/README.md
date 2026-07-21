@@ -1,134 +1,189 @@
-# Šturmanas Bajeristas — Android Project
+# Šturmanas Bajeristas — Android App
 
-AI driving companion layered on top of Google Navigation.
-
-**Core principle:** Google decides where to go. The AI only decides how to speak.
-
----
-
-## Phase 1 Status (current)
-
-- ✅ Start screen — destination input, personality selector, humor intensity
-- ✅ Navigation screen — map placeholder, maneuver card, mic button, mute, fallback
-- ✅ `SafetyController` — deterministic distance + maneuver rules, no AI logic
-- ✅ `NavigationController` — mock navigation data (real SDK in Phase 2)
-- ✅ `PersonaPrompts` — Kentas system prompt in Lithuanian
-- ✅ `VoiceSessionController` — stub (Phase 3)
-- ✅ `AudioController` — stub (Phase 3)
-- ✅ Backend — `GET /api/healthz`, `POST /api/realtime-session` placeholder
-
----
-
-## Opening in Android Studio
-
-1. **Clone / download** this repository.
-2. Open **Android Studio** → *File → Open* → select the `android/` folder.
-3. Wait for Gradle sync to complete.
-4. Run on an emulator (API 26+) or physical device.
-
-> The `android/` directory is a self-contained Android Studio project.
-> Do **not** open the repository root — open `android/` specifically.
-
----
-
-## Required API Keys (not needed for Phase 1)
-
-| Phase | Key | Where to add |
-|-------|-----|--------------|
-| 2 | `GOOGLE_MAPS_API_KEY` | `android/local.properties` as `GOOGLE_MAPS_API_KEY=<your_key>` |
-| 3 | `OPENAI_API_KEY` | Replit secret (never in the APK) |
-
-### Getting a Google Maps API key (Phase 2)
-
-1. Go to [Google Cloud Console](https://console.cloud.google.com/).
-2. Create or select a project. Enable billing.
-3. Enable **Navigation SDK for Android** (APIs & Services → Library).
-4. Create an API key (APIs & Services → Credentials).
-5. Restrict the key to your app's package name: `lt.sturmanas.bajeristas`.
-6. Add to `android/local.properties`:
-   ```
-   GOOGLE_MAPS_API_KEY=your_key_here
-   ```
-7. In `AndroidManifest.xml`, uncomment the `<meta-data>` block.
-8. In `app/build.gradle.kts`, uncomment the Navigation SDK dependency.
+AI driving companion ("Kentas") layered on top of Google Navigation. **Google decides where to go; the AI only decides how to speak.**
 
 ---
 
 ## Architecture
 
 ```
-android/app/src/main/kotlin/lt/sturmanas/bajeristas/
-├── MainActivity.kt              Root activity + app-level state
-├── navigation/
-│   ├── NavigationState.kt       Immutable state snapshot (ManeuverType + fields)
-│   └── NavigationController.kt  Owns NavState; Phase 2 wraps Google Nav SDK
-├── safety/
-│   └── SafetyController.kt      Deterministic audio rules (no AI, no network)
-├── personality/
-│   └── PersonaPrompts.kt        System prompts + nav context builder
-├── ui/
-│   ├── StartScreen.kt           Destination input, personality, humor slider
-│   ├── NavigationScreen.kt      Map, maneuver card, mic button, fallback
-│   └── theme/SturmanasTheme.kt  Material3 color scheme
-└── voice/
-    ├── VoiceSessionController.kt  Phase 3: ephemeral token + WebSocket
-    └── AudioController.kt         Phase 3: playback priority logic
+Google Navigation SDK
+        ↓
+NavigationEngine (interface)
+        ↓  GoogleNavigationEngine (real)  /  MockNavigationEngine (dev)
+NavigationController  ←  single source of truth for navigation state
+        ↓
+NavigationState  (immutable snapshot; no AI logic inside)
+        ↓
+SafetyController         PersonaPrompts / SessionConfig
+        ↓                       ↓
+               UI (Compose)
 ```
 
-Backend (runs in Replit):
-```
-artifacts/api-server/src/routes/
-├── health.ts          GET /api/healthz
-└── realtimeSession.ts POST /api/realtime-session  (Phase 3 placeholder)
-```
+**Invariant:** `SafetyController` always runs before any AI audio. `BLOCKED` silences Kentas immediately; Google Navigation voice always has priority.
 
 ---
 
-## SafetyController Rules
+## Phase Status
 
-| Condition | Permission |
-|-----------|-----------|
-| Not navigating | ALLOWED |
-| Complex maneuver (any distance) | BLOCKED |
-| Distance > 500 m | ALLOWED |
-| 200 m < distance ≤ 500 m | SHORT_ONLY |
-| Distance ≤ 200 m | BLOCKED |
-
-Complex maneuvers: `ROUNDABOUT`, `MOTORWAY_EXIT`, `LANE_CHANGE`, `COMPLEX_JUNCTION`, `UTURN`
+| Phase | What | Status |
+|-------|------|--------|
+| 1     | Skeleton, mock navigation, SafetyController, backend stub | ✅ Done |
+| 1.1   | ConversationMode, TripMode, HumorIntensity, HumorFormat, SessionConfig, Start screen UI | ✅ Done |
+| 2     | Google Navigation SDK integration, real maneuver mapping, engine interface | ✅ Done |
+| 3     | VoiceSessionController (OpenAI Realtime), AudioController, ephemeral token | ⏳ Pending |
+| 4     | SafetyController interrupt wired to real AI audio, live safety tests | ⏳ Pending |
 
 ---
 
-## Running the Tests
+## Phase 2 Setup
 
-From Android Studio: right-click `SafetyControllerTest` → *Run*.
+### 1. Prerequisites
 
-From the command line (requires Android SDK installed):
+You need a **Google Cloud project** with **billing enabled** and two APIs active:
+
+| API | Console name |
+|-----|-------------|
+| Maps SDK for Android | `Maps SDK for Android` |
+| Navigation SDK for Android | `Navigation SDK for Android` |
+
+> **Billing note:** The Navigation SDK for Android requires a billable Cloud project. Standard Maps SDK pricing applies to Navigation SDK usage. See [Google Maps Platform pricing](https://mapsplatform.google.com/pricing/).
+
+### 2. Create an API key
+
+1. Go to **APIs & Services → Credentials → Create Credentials → API key**.
+2. Click **Restrict key → Android apps**.
+3. Add a restriction:
+   - **Package name:** `lt.sturmanas.bajeristas`
+   - **SHA-1 certificate fingerprint:** run `./gradlew signingReport` from the `android/` directory.
+4. Under **API restrictions**, select only **Maps SDK for Android** and **Navigation SDK for Android**.
+5. Copy the key.
+
+### 3. Add the key to local.properties
+
+```text
+android/local.properties          ← already in .gitignore; create if missing
+```
+
+```properties
+sdk.dir=/path/to/your/Android/sdk
+GOOGLE_MAPS_API_KEY=AIza...your-key-here
+```
+
+A template is at `android/local.properties.template`.
+
+**Never commit `local.properties` to source control.** The key is read by Gradle and injected into the manifest via `manifestPlaceholders`. It is never hardcoded in Kotlin files.
+
+### 4. Without an API key (Mock mode)
+
+If `local.properties` has no `GOOGLE_MAPS_API_KEY` (or the value is empty), the app compiles and runs normally using **MockNavigationEngine**. The map area shows a green placeholder with the text `[MOCK]`. Navigation state ticks down automatically so you can test all UI states without a key.
+
+No code change is required to switch between real and mock — just add or remove the key and rebuild.
+
+---
+
+## Open and run in Android Studio
+
+1. Open **`android/`** (not the repo root) as a project in Android Studio Hedgehog or newer.
+2. Let Gradle sync. It downloads Navigation SDK 7.8.0 from Google Maven.
+3. Connect a physical Android device (API 26+) or start an emulator.
+4. Run the **`app`** configuration.
+
+> **Physical device recommended.** The Navigation SDK's turn-by-turn UI and GPS integration work best on hardware. Emulators can simulate GPS but lack real maps performance.
+
+---
+
+## Run tests
+
+From the `android/` directory:
+
 ```bash
-cd android
+# All unit tests (JVM, no device required)
 ./gradlew :app:testDebugUnitTest
+
+# With a connected device or emulator
+./gradlew :app:connectedDebugAndroidTest
 ```
 
-Test report: `app/build/reports/tests/testDebugUnitTest/index.html`
+Test results: `android/app/build/reports/tests/testDebugUnitTest/index.html`
+
+### Test categories
+
+| Test class | Executable without device | Notes |
+|------------|--------------------------|-------|
+| `SafetyControllerTest` (28 tests) | ✅ JVM | Pure Kotlin; no Android deps |
+| `PersonaPromptsTest` (18 tests) | ✅ JVM | Pure Kotlin; no Android deps |
+| `NavigationStateTest` (18 tests) | ✅ JVM | Pure Kotlin; MockNavigationEngine state (no View created) |
+| `ManeuverMapperTest` (25 tests) | ✅ JVM (requires SDK jar) | Imports `com.google.android.libraries.navigation.Maneuver`; runs on JVM because `Maneuver` is a plain enum with no Android-runtime dependency |
+
+> If `ManeuverMapperTest` fails with `ClassNotFoundException`, the Navigation SDK jar is not resolvable. Run via Android Studio's instrumented test runner instead.
 
 ---
 
-## Development Phases
+## Known Phase 2 limitations
 
-| Phase | Focus | Status |
-|-------|-------|--------|
-| 1 | Skeleton — screens, SafetyController, mock nav | ✅ Complete |
-| 2 | Google Navigation SDK integration | ⬜ Next |
-| 3 | OpenAI Realtime API voice (Kentas) | ⬜ Planned |
-| 4 | Safety wiring + audio interruption tests | ⬜ Planned |
+| Limitation | Phase |
+|-----------|-------|
+| Microphone button is a placeholder — no audio captured | 3 |
+| Kentas never actually speaks (VoiceSessionController is a stub) | 3 |
+| AI interruption by SafetyController is not wired to real audio yet | 4 |
+| No autocomplete on the destination field — accepts address strings and `lat,lng` | Future |
+| No search history, favourites, or recent destinations | Future |
+| HumorFormat is modelled but not sent to AI | 3 |
+| Background navigation (app minimised) not tested | Future |
 
 ---
 
-## Future Ideas
+## Package layout
 
-> Not implemented in V1. Listed here only.
+```
+lt.sturmanas.bajeristas/
+├── navigation/
+│   ├── ManeuverMapper.kt          Google SDK Maneuver → internal ManeuverType
+│   ├── ManeuverType.kt            Internal enum (14 values)
+│   ├── NavigationController.kt    Single access point for the rest of the app
+│   ├── NavigationEngine.kt        Interface — real vs mock boundary
+│   ├── NavigationState.kt         Immutable snapshot; no AI logic
+│   ├── GoogleNavigationEngine.kt  Real SDK; all SDK objects private here
+│   ├── MockNavigationEngine.kt    Dev fallback; simulates state with coroutine timer
+│   └── LocationPermissionHelper.kt
+├── safety/
+│   ├── SafetyController.kt        Deterministic; no AI; no network
+│   └── ConversationPermission.kt  ALLOWED / SHORT_ONLY / BLOCKED
+├── personality/
+│   ├── ConversationMode.kt        SOFT / HARD
+│   ├── TripMode.kt                SOLO / DUO / GROUP
+│   ├── HumorIntensity.kt          LIGHT / NORMAL / STRONG
+│   ├── HumorFormat.kt             SITUATIONAL / SHORT_JOKE / …
+│   ├── SessionConfig.kt           Immutable config from Start screen
+│   └── PersonaPrompts.kt          All AI prompt text lives here only
+├── voice/
+│   ├── VoiceSessionController.kt  Phase 3 stub — OpenAI Realtime WebSocket
+│   └── AudioController.kt         Phase 3 stub — AudioTrack playback
+└── ui/
+    ├── StartScreen.kt             Destination + personality pickers
+    ├── NavigationScreen.kt        SDK map (AndroidView) + controls
+    └── theme/SturmanasTheme.kt
+```
 
-- Android Auto support
-- Continuous wake-word listening (hands-free)
-- Offline TTS fallback (on-device model)
-- Trip-aware personality adaptation (long motorway vs. city)
-- Multi-language support (add languages without changing architecture)
+---
+
+## API key security summary
+
+| Location | API key present? |
+|----------|-----------------|
+| `local.properties` | ✅ (your machine only; gitignored) |
+| `AndroidManifest.xml` | Via `${GOOGLE_MAPS_API_KEY}` placeholder — value injected by Gradle, not stored in source |
+| `BuildConfig.GOOGLE_MAPS_API_KEY` | Injected at build time; not in source |
+| Kotlin source files | ❌ Never |
+| Git history | ❌ Never (file gitignored) |
+
+---
+
+## Future ideas
+
+- Places Autocomplete on the destination field (Phase 3+ dependency)
+- Waypoints / multi-stop routing
+- Speed camera and hazard alerts via Navigation SDK
+- Wake word detection ("Ei, Kentai") to trigger voice without button press
+- Car mode (Android Auto integration)

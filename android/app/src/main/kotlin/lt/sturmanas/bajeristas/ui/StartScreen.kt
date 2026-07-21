@@ -19,6 +19,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -39,6 +40,10 @@ import lt.sturmanas.bajeristas.personality.TripMode
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StartScreen(
+    /** Non-null if address resolution or permission failed; displayed above the button. */
+    errorMessage: String? = null,
+    /** False while the navigation engine is still initialising. */
+    engineReady: Boolean = true,
     onStartNavigation: (destination: String, config: SessionConfig) -> Unit,
 ) {
     var destination by remember { mutableStateOf("") }
@@ -67,6 +72,22 @@ fun StartScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
+        // Engine not-ready notice (shown while initialising or after permission denial)
+        if (!engineReady) {
+            Spacer(modifier = Modifier.height(12.dp))
+            Surface(
+                color = MaterialTheme.colorScheme.tertiaryContainer,
+                shape = MaterialTheme.shapes.small,
+            ) {
+                Text(
+                    text = "Navigacija inicializuojama…",
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                )
+            }
+        }
+
         Spacer(modifier = Modifier.height(32.dp))
 
         // ── Destination ───────────────────────────────────────────────────
@@ -74,7 +95,7 @@ fun StartScreen(
             value = destination,
             onValueChange = { destination = it },
             label = { Text("Tikslas") },
-            placeholder = { Text("Įveskite adresą…") },
+            placeholder = { Text("Adresas arba platuma,ilguma (pvz. 54.6872,25.2797)") },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
@@ -149,7 +170,24 @@ fun StartScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(36.dp))
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // ── Error banner (address not found, permission denied, etc.) ─────
+        errorMessage?.let { error ->
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.errorContainer,
+                shape = MaterialTheme.shapes.small,
+            ) {
+                Text(
+                    text = error,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                )
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+        }
 
         // ── Start button ──────────────────────────────────────────────────
         Button(
@@ -165,7 +203,7 @@ fun StartScreen(
                 )
             },
             modifier = Modifier.fillMaxWidth(),
-            enabled = destination.isNotBlank(),
+            enabled = destination.isNotBlank() && engineReady,
         ) {
             Text("Pradėti navigaciją", style = MaterialTheme.typography.titleMedium)
         }

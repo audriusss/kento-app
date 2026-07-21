@@ -1,7 +1,21 @@
-# Copy this file to local.properties and fill in your values.
-# local.properties is gitignored — never commit real keys.
+## Šturmanas Bajeristas — local.properties template
+##
+## Copy this file to `local.properties` (already in .gitignore).
+## Fill in the values for your machine and Google Cloud project.
+## Never commit local.properties to source control.
 
-# Phase 2: Enable Google Navigation SDK
-# GOOGLE_MAPS_API_KEY=your_google_maps_api_key_here
+## Android SDK path (set automatically by Android Studio, or set manually)
+sdk.dir=/path/to/android/sdk
 
-sdk.dir=/path/to/your/Android/sdk
+## Google Maps / Navigation SDK API key
+## Required for Phase 2 real navigation. Without this key the app
+## automatically uses MockNavigationEngine (green placeholder map).
+##
+## Setup steps:
+##   1. Create a project in https://console.cloud.google.com/
+##   2. Enable: Maps SDK for Android, Navigation SDK for Android
+##      (Navigation SDK requires billing to be enabled)
+##   3. Create an API key → restrict to "Android apps" + your package name
+##      (lt.sturmanas.bajeristas) + SHA-1 fingerprint
+##   4. Paste the key below
+GOOGLE_MAPS_API_KEY=YOUR_KEY_HERE

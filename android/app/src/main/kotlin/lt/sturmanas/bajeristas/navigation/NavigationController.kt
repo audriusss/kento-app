@@ -1,67 +1,75 @@
 package lt.sturmanas.bajeristas.navigation
 
-import kotlinx.coroutines.flow.MutableStateFlow
+import android.app.Activity
+import android.content.Context
+import android.view.View
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * Single owner of [NavigationState].
+ * Single point of access to navigation for the rest of the application.
  *
- * Phase 1: exposes mock data only — no real SDK calls.
- * Phase 2: will wrap Google Navigation SDK's NavigationApi, RouteCallbacks,
- *           and RoadSnappedLocationProvider. All SDK callbacks will call
- *           [updateState] so the rest of the app stays unchanged.
+ * Delegates all work to [NavigationEngine]. Compose UI, [SafetyController],
+ * and personality code must access navigation only through this class — never
+ * directly from [GoogleNavigationEngine] or [MockNavigationEngine].
  *
- * The AI must never write to this controller; it is read-only from the AI's
- * perspective. Navigation data flows one way: SDK → controller → UI / SafetyController.
+ * Engine selection happens in [MainActivity] based on whether a Google Maps
+ * API key is present in [BuildConfig.GOOGLE_MAPS_API_KEY].
  */
-class NavigationController {
+class NavigationController(val engine: NavigationEngine) {
 
-    private val _state = MutableStateFlow(NavigationState())
-    val state: StateFlow<NavigationState> = _state.asStateFlow()
+    /** Live navigation state. Observe this in Compose via [collectAsStateWithLifecycle]. */
+    val state: StateFlow<NavigationState> = engine.state
 
-    // ── Public API ────────────────────────────────────────────────────────
+    // ── Init ──────────────────────────────────────────────────────────────
 
-    /** Start navigation to [destination] using mock data (Phase 1). */
-    fun startNavigation(destination: String) {
-        _state.value = NavigationState(
-            isNavigating = true,
-            destination = destination,
-            currentStreet = "Gedimino prospektas",
-            nextManeuver = ManeuverType.TURN_RIGHT,
-            distanceToManeuverMeters = 850,
-            remainingTimeSeconds = 720,
-        )
+    /**
+     * Initialise the engine. Must be called once before [startNavigation].
+     * Requires location permission to be granted before calling.
+     */
+    fun initialize(activity: Activity, onReady: () -> Unit, onError: (String) -> Unit) {
+        engine.initialize(activity, onReady, onError)
     }
 
-    /** Stop navigation and reset to idle state. */
+    // ── Navigation control ────────────────────────────────────────────────
+
+    /**
+     * Resolve [destination] and begin navigation.
+     * Must only be called after [onReady] fires from [initialize].
+     */
+    fun startNavigation(context: Context, destination: String, onError: (String) -> Unit) {
+        engine.startNavigation(context, destination, onError)
+    }
+
+    /** Stop navigation and return to idle state. */
     fun stopNavigation() {
-        _state.value = NavigationState()
+        engine.stopNavigation()
     }
 
-    /**
-     * Push a new state snapshot.
-     * Called by SDK callbacks in Phase 2; also used directly in tests.
-     */
-    fun updateState(state: NavigationState) {
-        _state.value = state
-    }
+    // ── Map view ──────────────────────────────────────────────────────────
 
     /**
-     * Enable the standard Google navigation voice guidance.
-     * Phase 1: stub. Phase 2: calls NavigationApi.navigator.setAudioGuidance(…).
+     * Return the native Android [View] that renders the navigation map.
+     * Embed via [androidx.compose.ui.viewinterop.AndroidView] in Compose.
+     * Forward lifecycle events to the engine via [onResume], [onPause], etc.
      */
+    fun createNavigationView(context: Context): View = engine.createNavigationView(context)
+
+    // ── Audio ─────────────────────────────────────────────────────────────
+
+    /** Switch navigation audio to the standard Google voice guidance (emergency fallback). */
     fun enableStandardVoice() {
-        // TODO Phase 2:
-        // NavApi.navigator.setAudioGuidance(NavigationAudioGuidance.VOICE_ALERTS_AND_GUIDANCE)
+        engine.enableStandardVoice()
     }
 
-    /**
-     * Disable the standard Google navigation voice guidance (AI handles speaking).
-     * Phase 1: stub. Phase 2: calls NavigationApi.navigator.setAudioGuidance(…).
-     */
+    /** Silence navigation voice guidance (Kentas handles speaking). */
     fun disableStandardVoice() {
-        // TODO Phase 2:
-        // NavApi.navigator.setAudioGuidance(NavigationAudioGuidance.NO_GUIDANCE)
+        engine.disableStandardVoice()
     }
+
+    // ── Lifecycle — forward from Activity/composable ──────────────────────
+
+    fun onResume() = engine.onResume()
+    fun onPause() = engine.onPause()
+    fun onStop() = engine.onStop()
+    fun onDestroy() = engine.onDestroy()
 }

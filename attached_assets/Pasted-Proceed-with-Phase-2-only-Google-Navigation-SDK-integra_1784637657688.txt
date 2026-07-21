@@ -1,0 +1,250 @@
+Proceed with Phase 2 only: Google Navigation SDK integration.
+
+Do not start Phase 3.
+Do not integrate OpenAI, speech recognition, text-to-speech, or realtime voice.
+Do not add authentication, database, analytics, dashboards, or new backend features.
+
+## Goal
+
+Replace the Phase 1 mock navigation flow with a minimal real Google Navigation SDK integration while preserving the existing architecture:
+
+```text
+Google Navigation SDK
+        ↓
+NavigationController
+        ↓
+NavigationState
+        ↓
+SafetyController
+        ↓
+UI
+```
+
+Google Navigation SDK must remain the only authority for:
+
+* route calculation
+* current location
+* remaining distance
+* remaining time
+* upcoming maneuver
+* rerouting
+* arrival state
+
+Kentas and future AI code must never control the route.
+
+## 1. API key configuration
+
+Use:
+
+```text
+GOOGLE_MAPS_API_KEY
+```
+
+from `android/local.properties`.
+
+Expose it to the manifest through Gradle manifest placeholders.
+
+Do not hardcode the API key in:
+
+* Kotlin files
+* AndroidManifest.xml
+* Gradle source
+* repository files
+
+Keep a safe placeholder or documented setup instruction for developers who do not have a key.
+
+## 2. Google Navigation SDK dependency
+
+Uncomment or add the official current Google Navigation SDK dependency required by the project.
+
+Use the official Google documentation and compatible versions for the existing:
+
+* Kotlin version
+* Android Gradle Plugin
+* compile SDK
+* min SDK
+
+Do not add unrelated Google Maps libraries unless required by Navigation SDK.
+
+## 3. Navigation screen
+
+Replace the map placeholder with the real Navigation SDK map/navigation view.
+
+Preserve the existing controls where practical:
+
+* mute
+* stop navigation
+* microphone placeholder
+* emergency fallback UI
+
+The microphone remains non-functional in Phase 2.
+
+## 4. Destination input
+
+The existing Start screen destination field may remain simple.
+
+Implement the minimum reliable destination resolution supported by the Navigation SDK integration.
+
+Accept either:
+
+* a valid address string
+* latitude and longitude
+
+Do not build autocomplete, search history, favorites, or saved places yet.
+
+If an address cannot be resolved, show a clear Lithuanian error and remain on the Start screen.
+
+## 5. NavigationController
+
+Replace mock navigation updates with real SDK callbacks.
+
+`NavigationController` must expose an immutable `StateFlow<NavigationState>` containing at least:
+
+```text
+isNavigating
+destinationName
+distanceToNextManeuverMeters
+remainingDistanceMeters
+remainingDurationSeconds
+currentRoadName
+nextRoadName
+maneuverType
+isRerouting
+hasArrived
+errorMessage
+```
+
+Keep SDK-specific objects private inside `NavigationController`.
+
+Do not expose Google SDK classes directly to Compose UI, `SafetyController`, personality code, or future AI code.
+
+## 6. Maneuver mapping
+
+Map Google Navigation SDK maneuver values into the existing internal `ManeuverType`.
+
+Support at least:
+
+```text
+STRAIGHT
+TURN_LEFT
+TURN_RIGHT
+SLIGHT_LEFT
+SLIGHT_RIGHT
+SHARP_LEFT
+SHARP_RIGHT
+U_TURN
+ROUNDABOUT
+MERGE
+EXIT
+FORK
+ARRIVE
+UNKNOWN
+```
+
+Unknown or unsupported SDK maneuver values must safely map to `UNKNOWN`.
+
+Do not crash on a new SDK enum value.
+
+## 7. Safety integration
+
+Every real navigation update must be evaluated by the existing `SafetyController`.
+
+Confirm these rules remain deterministic:
+
+* complex maneuver → BLOCKED
+* at or below 200 metres → BLOCKED
+* 201–500 metres → SHORT_ONLY
+* above 500 metres → ALLOWED
+* not navigating → ALLOWED
+
+Navigation safety must override:
+
+* SOFT mode
+* HARD mode
+* SOLO mode
+* DUO mode
+* GROUP mode
+* humor intensity
+
+Do not modify safety thresholds without reporting it.
+
+## 8. Lifecycle and permissions
+
+Handle:
+
+* location permission request
+* permission denial
+* GPS/location unavailable state
+* app pause and resume
+* navigation start
+* navigation stop
+* arrival
+* rerouting
+* SDK initialization failure
+
+Do not allow navigation to remain active after the user presses Stop.
+
+Do not request microphone permission during Phase 2.
+
+## 9. Mock fallback
+
+Keep a clearly separated mock implementation only if it is needed for development without a Navigation SDK key.
+
+Use an interface or implementation boundary such as:
+
+```text
+NavigationEngine
+GoogleNavigationEngine
+MockNavigationEngine
+```
+
+Do not mix mock timers and real SDK callbacks inside the same production class.
+
+The default production path must use the real SDK when configured.
+
+## 10. Tests
+
+Add tests for:
+
+* Google maneuver values mapping to internal `ManeuverType`
+* unknown maneuver mapping to `UNKNOWN`
+* SDK update converted into immutable `NavigationState`
+* navigation stop resets state
+* arrival state
+* rerouting state
+* SafetyController receives the real distance and maneuver values
+* all conversation and trip modes remain subordinate to safety
+* missing API key produces a controlled setup error
+* permission denial produces a controlled UI state
+
+Run every test that the environment supports.
+
+Do not claim Android or SDK tests passed if they could not actually be executed.
+
+## 11. Documentation
+
+Update the Android README with exact setup steps:
+
+1. Required Google Cloud APIs.
+2. Billing requirement, if applicable.
+3. API key creation.
+4. Recommended API key restrictions.
+5. Where to add `GOOGLE_MAPS_API_KEY`.
+6. How to open and run the project in Android Studio.
+7. How to run tests.
+8. Known limitations of Phase 2.
+
+## Completion report
+
+At the end, report:
+
+1. Files added.
+2. Files changed.
+3. Dependency and SDK version used.
+4. Real SDK callbacks integrated.
+5. Permissions implemented.
+6. Tests added.
+7. Tests actually executed.
+8. Tests not executable in Replit.
+9. Any required manual Android Studio steps.
+10. Explicit confirmation that Phase 3 was not started.
