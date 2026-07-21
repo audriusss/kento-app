@@ -1,9 +1,19 @@
 package lt.sturmanas.bajeristas
 
+import android.Manifest
+import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Bundle
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -11,6 +21,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import lt.sturmanas.bajeristas.navigation.GoogleNavigationEngine
 import lt.sturmanas.bajeristas.navigation.LocationPermissionHelper
@@ -117,6 +128,40 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+// ── Voice recognition helper ──────────────────────────────────────────────────
+
+/**
+ * Builds a Lithuanian [RecognizerIntent] and launches it via [launcher].
+ *
+ * Checks [SpeechRecognizer.isRecognitionAvailable] first; calls [onError] with a
+ * Lithuanian message if the device has no recognizer or if the intent cannot be
+ * resolved ([ActivityNotFoundException]).  The caller is responsible for ensuring
+ * the RECORD_AUDIO permission is already granted before calling this function.
+ */
+private fun launchSpeechIntent(
+    context: Context,
+    launcher: ActivityResultLauncher<Intent>,
+    onError: (String) -> Unit,
+) {
+    if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+        onError("Kalbos atpažinimas neprieinamas šiame įrenginyje")
+        return
+    }
+    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE, "lt-LT")
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "lt-LT")
+        putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, "lt-LT")
+        putExtra(RecognizerIntent.EXTRA_PROMPT, "Kalbėkite lietuviškai…")
+        putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+    }
+    try {
+        launcher.launch(intent)
+    } catch (e: ActivityNotFoundException) {
+        onError("Kalbos atpažinimo programa nerasta")
+    }
+}
+
 // ── Root composable ───────────────────────────────────────────────────────────
 
 @Composable
@@ -136,6 +181,37 @@ private fun SturmanasApp(
     var isMuted by remember { mutableStateOf(false) }
     var aiStatusMessage by remember { mutableStateOf("") }
     var startScreenError by remember { mutableStateOf<String?>(null) }
+
+    // ── Voice recognition ─────────────────────────────────────────────────
+    // speechLauncher — handles the result from the system RecognizerIntent dialog.
+    // Recognised text is shown in the existing aiStatusMessage slot in NavigationScreen.
+    val speechLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        aiStatusMessage = when {
+            result.resultCode == Activity.RESULT_OK -> {
+                val text = result.data
+                    ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                    ?.firstOrNull()
+                if (!text.isNullOrBlank()) "\"$text\"" else "Nieko neatpažinta"
+            }
+            // RESULT_CANCELED = user dismissed without speaking; clear quietly.
+            else -> ""
+        }
+    }
+
+    // audioPermLauncher — requests RECORD_AUDIO at runtime (required API 23+).
+    // On grant, immediately launches speech recognition.
+    val audioPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            aiStatusMessage = "Klausau…"
+            launchSpeechIntent(context, speechLauncher) { aiStatusMessage = it }
+        } else {
+            aiStatusMessage = "Mikrofono leidimas atmestas"
+        }
+    }
 
     val permission = safetyController.getPermission(navState)
 
@@ -190,8 +266,16 @@ private fun SturmanasApp(
                 aiStatusMessage = aiStatusMessage,
                 isMuted = isMuted,
                 onMicPress = {
-                    // Phase 3: start AudioRecord → voiceSessionController.sendAudio(…)
-                    aiStatusMessage = "Klausau… (3 fazė)"
+                    if (ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.RECORD_AUDIO,
+                        ) == PackageManager.PERMISSION_GRANTED
+                    ) {
+                        aiStatusMessage = "Klausau…"
+                        launchSpeechIntent(context, speechLauncher) { aiStatusMessage = it }
+                    } else {
+                        audioPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                    }
                 },
                 onMuteToggle = {
                     isMuted = !isMuted
