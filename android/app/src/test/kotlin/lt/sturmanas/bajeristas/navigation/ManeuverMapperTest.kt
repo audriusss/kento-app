@@ -1,6 +1,6 @@
 package lt.sturmanas.bajeristas.navigation
 
-import com.google.android.libraries.navigation.Maneuver
+import com.google.android.libraries.mapsplatform.turnbyturn.model.Maneuver
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Test
@@ -8,23 +8,31 @@ import org.junit.Test
 /**
  * Tests for [ManeuverMapper].
  *
- * These tests import [com.google.android.libraries.navigation.Maneuver] from the Navigation SDK
- * (added as an `implementation` dependency). They compile and run on the JVM as unit tests because
- * [Maneuver] is a plain Kotlin enum with no Android-runtime dependency.
+ * Maneuver is a Java @IntDef annotation from the Navigation SDK 7.8.0 TBT model:
+ *   com.google.android.libraries.mapsplatform.turnbyturn.model.Maneuver
  *
- * If tests fail with ClassNotFoundException, the Navigation SDK is not in the JVM classpath —
- * run them as instrumented tests in Android Studio instead.
+ * Its constants (e.g. Maneuver.STRAIGHT) are plain Int fields, not enum instances.
+ * Every call to [ManeuverMapper.fromSdk] passes an Int — [Maneuver.CONSTANT] resolves
+ * to the integer value at the call site.
+ *
+ * Constants absent from SDK 7.8.0 (tests removed):
+ *   KEEP_LEFT, KEEP_RIGHT, UTURN_LEFT, UTURN_RIGHT
+ *
+ * Null handling is tested via [ManeuverMapper.fromSdkNullable], which is the
+ * null-safe entry point. [ManeuverMapper.fromSdk] only accepts non-null Int.
  */
 class ManeuverMapperTest {
 
-    // ── Null and NONE ─────────────────────────────────────────────────────
+    // ── Null / missing maneuver ───────────────────────────────────────────
 
     @Test
-    fun `null maps to NONE`() {
-        assertEquals(ManeuverType.NONE, ManeuverMapper.fromSdk(null))
+    fun `null maneuver maps to UNKNOWN via fromSdkNullable`() {
+        // Null means the SDK did not supply a maneuver value — treated as UNKNOWN,
+        // not NONE, because NONE is reserved for "not navigating at all".
+        assertEquals(ManeuverType.UNKNOWN, ManeuverMapper.fromSdkNullable(null))
     }
 
-    // ── Simple straight-ahead maneuvers ───────────────────────────────────
+    // ── Straight-ahead ────────────────────────────────────────────────────
 
     @Test
     fun `STRAIGHT maps to STRAIGHT`() {
@@ -58,15 +66,7 @@ class ManeuverMapperTest {
         assertEquals(ManeuverType.SLIGHT_RIGHT, ManeuverMapper.fromSdk(Maneuver.TURN_SLIGHT_RIGHT))
     }
 
-    @Test
-    fun `KEEP_LEFT maps to SLIGHT_LEFT`() {
-        assertEquals(ManeuverType.SLIGHT_LEFT, ManeuverMapper.fromSdk(Maneuver.KEEP_LEFT))
-    }
-
-    @Test
-    fun `KEEP_RIGHT maps to SLIGHT_RIGHT`() {
-        assertEquals(ManeuverType.SLIGHT_RIGHT, ManeuverMapper.fromSdk(Maneuver.KEEP_RIGHT))
-    }
+    // KEEP_LEFT / KEEP_RIGHT removed: constants do not exist in SDK 7.8.0 TBT Maneuver.
 
     @Test
     fun `TURN_SHARP_LEFT maps to SHARP_LEFT`() {
@@ -79,16 +79,8 @@ class ManeuverMapperTest {
     }
 
     // ── U-turns ───────────────────────────────────────────────────────────
-
-    @Test
-    fun `UTURN_LEFT maps to UTURN`() {
-        assertEquals(ManeuverType.UTURN, ManeuverMapper.fromSdk(Maneuver.UTURN_LEFT))
-    }
-
-    @Test
-    fun `UTURN_RIGHT maps to UTURN`() {
-        assertEquals(ManeuverType.UTURN, ManeuverMapper.fromSdk(Maneuver.UTURN_RIGHT))
-    }
+    // UTURN_LEFT / UTURN_RIGHT removed: constants do not exist in SDK 7.8.0 TBT Maneuver.
+    // U-turn intent is expressed by ROUNDABOUT_U_TURN (tested in the roundabout group).
 
     // ── Roundabouts ───────────────────────────────────────────────────────
 
@@ -100,6 +92,21 @@ class ManeuverMapperTest {
     @Test
     fun `ROUNDABOUT_RIGHT maps to ROUNDABOUT`() {
         assertEquals(ManeuverType.ROUNDABOUT, ManeuverMapper.fromSdk(Maneuver.ROUNDABOUT_RIGHT))
+    }
+
+    @Test
+    fun `all roundabout variants map to ROUNDABOUT`() {
+        listOf(
+            Maneuver.ROUNDABOUT_LEFT,
+            Maneuver.ROUNDABOUT_RIGHT,
+            Maneuver.ROUNDABOUT_SHARP_LEFT,
+            Maneuver.ROUNDABOUT_SHARP_RIGHT,
+            Maneuver.ROUNDABOUT_SLIGHT_LEFT,
+            Maneuver.ROUNDABOUT_SLIGHT_RIGHT,
+            Maneuver.ROUNDABOUT_U_TURN,
+        ).forEach { m ->
+            assertEquals("$m should map to ROUNDABOUT", ManeuverType.ROUNDABOUT, ManeuverMapper.fromSdk(m))
+        }
     }
 
     // ── Motorway exits ────────────────────────────────────────────────────
@@ -160,12 +167,11 @@ class ManeuverMapperTest {
         assertEquals(ManeuverType.ARRIVE, ManeuverMapper.fromSdk(Maneuver.DESTINATION_RIGHT))
     }
 
-    // ── Safety-relevant: MERGE and FORK are complex ───────────────────────
+    // ── Safety integration: MERGE and FORK are complex ────────────────────
 
     @Test
     fun `MERGE and FORK are safety-blocked by SafetyController`() {
-        // Confirm ManeuverMapper + SafetyController integration:
-        // MERGE → ManeuverType.MERGE → complex → BLOCKED regardless of distance
+        // ManeuverMapper.fromSdk returns MERGE / FORK → SafetyController marks BLOCKED
         val safety = lt.sturmanas.bajeristas.safety.SafetyController()
         val mergeState = NavigationState(
             isNavigating = true,
@@ -190,12 +196,14 @@ class ManeuverMapperTest {
     // ── Unknown / future SDK value safety ─────────────────────────────────
 
     @Test
-    fun `FERRY maps to COMPLEX_JUNCTION — unusual road type`() {
+    fun `FERRY maps to COMPLEX_JUNCTION`() {
         assertEquals(ManeuverType.COMPLEX_JUNCTION, ManeuverMapper.fromSdk(Maneuver.FERRY))
     }
 
     @Test
-    fun `fromSdkOrdinal with out-of-range ordinal returns UNKNOWN — never throws`() {
+    fun `out-of-range integer returns UNKNOWN — never throws`() {
+        // Maneuver is an @IntDef, not an enum; fromSdkOrdinal passes the int directly.
+        // An integer that matches no Maneuver constant hits else → UNKNOWN.
         assertEquals(ManeuverType.UNKNOWN, ManeuverMapper.fromSdkOrdinal(Int.MAX_VALUE))
     }
 
@@ -205,20 +213,5 @@ class ManeuverMapperTest {
             ManeuverMapper.fromSdk(Maneuver.TURN_LEFT),
             ManeuverMapper.fromSdk(Maneuver.TURN_RIGHT),
         )
-    }
-
-    @Test
-    fun `all roundabout variants map to ROUNDABOUT`() {
-        listOf(
-            Maneuver.ROUNDABOUT_LEFT,
-            Maneuver.ROUNDABOUT_RIGHT,
-            Maneuver.ROUNDABOUT_SHARP_LEFT,
-            Maneuver.ROUNDABOUT_SHARP_RIGHT,
-            Maneuver.ROUNDABOUT_SLIGHT_LEFT,
-            Maneuver.ROUNDABOUT_SLIGHT_RIGHT,
-            Maneuver.ROUNDABOUT_U_TURN,
-        ).forEach { m ->
-            assertEquals("$m should map to ROUNDABOUT", ManeuverType.ROUNDABOUT, ManeuverMapper.fromSdk(m))
-        }
     }
 }

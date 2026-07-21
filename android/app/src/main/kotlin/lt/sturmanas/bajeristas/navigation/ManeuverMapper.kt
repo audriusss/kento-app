@@ -1,38 +1,44 @@
 package lt.sturmanas.bajeristas.navigation
 
-import com.google.android.libraries.navigation.Maneuver
+import com.google.android.libraries.mapsplatform.turnbyturn.model.Maneuver
 
 /**
- * Pure mapping from Google Navigation SDK [Maneuver] values to the internal
+ * Pure mapping from the Navigation SDK 7.8.0 TBT maneuver integer to the internal
  * [ManeuverType] enum.
  *
+ * API facts for com.google.android.libraries.mapsplatform.turnbyturn.model.Maneuver:
+ *  - Maneuver is a Java @IntDef annotation/interface, not an enum or class.
+ *  - Its constants are plain int fields (e.g. Maneuver.STRAIGHT is an Int).
+ *  - Maneuver? and Maneuver.values() do not exist; all parameters are Int.
+ *  - Null or absent maneuver values must be handled by the caller before reaching
+ *    [fromSdk]; use [fromSdkNullable] for a null-safe entry point.
+ *
+ * Constants absent from SDK 7.8.0 TBT Maneuver (removed from this mapper):
+ *  - KEEP_LEFT / KEEP_RIGHT       — do not exist in this package
+ *  - UTURN_LEFT / UTURN_RIGHT     — do not exist in this package
+ *
  * Rules:
- *  - Every known SDK 7.8.0 value must map to a named [ManeuverType].
- *  - Any unknown or future SDK value must map to [ManeuverType.UNKNOWN] — never throw.
+ *  - Every confirmed SDK 7.8.0 constant maps to a named [ManeuverType].
+ *  - Any unrecognised integer maps to [ManeuverType.UNKNOWN] — never throws.
  *  - No business logic here; [SafetyController] decides what to do with the result.
  *
- * SDK 7.8.0 removals vs. original implementation:
- *  - Maneuver.NAME_CHANGE         — does not exist in SDK 7.8.0; was in STRAIGHT group.
- *  - Maneuver.ROUNDABOUT_U_TURN   — does not exist in SDK 7.8.0; was in ROUNDABOUT group.
- *  - Maneuver.OFF_RAMP_UNSPECIFIED — does not exist in SDK 7.8.0; was in MOTORWAY_EXIT group.
- *  - Maneuver.ON_RAMP_UNSPECIFIED  — does not exist in SDK 7.8.0; was in MERGE group.
- *  - Maneuver.MERGE_UNSPECIFIED    — does not exist in SDK 7.8.0; was in MERGE group.
- *  - Maneuver.FERRY_TRAIN          — does not exist in SDK 7.8.0; was in COMPLEX_JUNCTION group.
- *  All of these are safely handled by the else → ManeuverType.UNKNOWN branch.
- *
- * Note: ManeuverMapper.fromSdk() is currently called with ManeuverType.UNKNOWN from
- * GoogleNavigationEngine because navigator.currentStep does not exist in SDK 7.8.0.
- * The mapper is retained for future use once the correct step-info API is confirmed,
- * and for unit-test coverage of the mapping table itself.
+ * Note: [fromSdk] is not called with live SDK data yet because the NavigationEngine
+ * currently sets ManeuverType.UNKNOWN directly (Navigator currentStep API is pending
+ * confirmation). The mapper is retained for when step data becomes available, and for
+ * unit-test coverage of the mapping table itself.
  */
 object ManeuverMapper {
 
     /**
-     * Convert a SDK [Maneuver] to the internal [ManeuverType].
-     * Returns [ManeuverType.UNKNOWN] for any unrecognised value.
+     * Convert a raw SDK maneuver [Int] to the internal [ManeuverType].
+     *
+     * The parameter must be one of the [Maneuver] int constants. Null or missing
+     * values must be resolved by the caller before this is invoked — use
+     * [fromSdkNullable] for the null-safe variant.
+     *
+     * Returns [ManeuverType.UNKNOWN] for any unrecognised integer.
      */
-    fun fromSdk(maneuver: Maneuver?): ManeuverType = when (maneuver) {
-        null -> ManeuverType.NONE
+    fun fromSdk(@Maneuver maneuver: Int): ManeuverType = when (maneuver) {
 
         Maneuver.STRAIGHT,
         Maneuver.DEPART,
@@ -41,20 +47,15 @@ object ManeuverMapper {
         Maneuver.TURN_LEFT -> ManeuverType.TURN_LEFT
         Maneuver.TURN_RIGHT -> ManeuverType.TURN_RIGHT
 
-        Maneuver.TURN_SLIGHT_LEFT,
-        Maneuver.KEEP_LEFT,
-        -> ManeuverType.SLIGHT_LEFT
-
-        Maneuver.TURN_SLIGHT_RIGHT,
-        Maneuver.KEEP_RIGHT,
-        -> ManeuverType.SLIGHT_RIGHT
+        // KEEP_LEFT / KEEP_RIGHT do not exist in SDK 7.8.0 TBT Maneuver.
+        Maneuver.TURN_SLIGHT_LEFT -> ManeuverType.SLIGHT_LEFT
+        Maneuver.TURN_SLIGHT_RIGHT -> ManeuverType.SLIGHT_RIGHT
 
         Maneuver.TURN_SHARP_LEFT -> ManeuverType.SHARP_LEFT
         Maneuver.TURN_SHARP_RIGHT -> ManeuverType.SHARP_RIGHT
 
-        Maneuver.UTURN_LEFT,
-        Maneuver.UTURN_RIGHT,
-        -> ManeuverType.UTURN
+        // UTURN_LEFT / UTURN_RIGHT do not exist in SDK 7.8.0 TBT Maneuver.
+        // U-turn intent arrives via ROUNDABOUT_U_TURN (see below).
 
         Maneuver.ROUNDABOUT_LEFT,
         Maneuver.ROUNDABOUT_RIGHT,
@@ -62,6 +63,7 @@ object ManeuverMapper {
         Maneuver.ROUNDABOUT_SHARP_RIGHT,
         Maneuver.ROUNDABOUT_SLIGHT_LEFT,
         Maneuver.ROUNDABOUT_SLIGHT_RIGHT,
+        Maneuver.ROUNDABOUT_U_TURN,
         -> ManeuverType.ROUNDABOUT
 
         Maneuver.OFF_RAMP_LEFT,
@@ -96,9 +98,17 @@ object ManeuverMapper {
     }
 
     /**
-     * Convenience overload for integer maneuver ordinals, used in tests and
-     * SDK versions that return raw ints instead of enum instances.
+     * Null-safe entry point. A null maneuver (absent from the SDK step) maps to
+     * [ManeuverType.UNKNOWN], consistent with the "unknown / no data" contract.
+     * Use this when the SDK may not supply a maneuver integer.
      */
-    fun fromSdkOrdinal(ordinal: Int): ManeuverType =
-        runCatching { fromSdk(Maneuver.values()[ordinal]) }.getOrDefault(ManeuverType.UNKNOWN)
+    fun fromSdkNullable(maneuver: Int?): ManeuverType =
+        if (maneuver == null) ManeuverType.UNKNOWN else fromSdk(maneuver)
+
+    /**
+     * Test helper: pass an arbitrary integer directly to the mapper.
+     * Since [Maneuver] is an @IntDef (not an enum), the ordinal IS the integer value.
+     * Out-of-range integers safely return [ManeuverType.UNKNOWN] via the else branch.
+     */
+    fun fromSdkOrdinal(ordinal: Int): ManeuverType = fromSdk(ordinal)
 }
