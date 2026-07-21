@@ -54,6 +54,10 @@ class GoogleNavigationEngine : NavigationEngine {
     private var navigationView: NavigationView? = null
     private val ioScope = CoroutineScope(Dispatchers.IO)
 
+    // Guards against double-calling onDestroy (it is invoked from both the
+    // LifecycleEventObserver and onDispose in NavigationScreen).
+    private var isDestroyed = false
+
     // ── NavigationEngine impl ─────────────────────────────────────────────
 
     override fun initialize(activity: Activity, onReady: () -> Unit, onError: (String) -> Unit) {
@@ -135,8 +139,17 @@ class GoogleNavigationEngine : NavigationEngine {
     }
 
     override fun createNavigationView(context: Context): View {
+        // Reset destroy guard so the engine can be reused if navigation
+        // is stopped and restarted within the same process.
+        isDestroyed = false
         return NavigationView(context).also { view ->
             navigationView = view
+            // onCreate must be called here, during composition (inside remember {}
+            // in NavigationScreen), so that navigationView is non-null by the time
+            // DisposableEffect side-effects run and the lifecycle observer replays
+            // ON_START / ON_RESUME. If onCreate were called in the AndroidView
+            // factory (layout time, after side-effects), the replay would fire on a
+            // null view and the view would be stuck in CREATED state forever.
             view.onCreate(null)
         }
     }
@@ -151,6 +164,10 @@ class GoogleNavigationEngine : NavigationEngine {
 
     // ── Lifecycle ─────────────────────────────────────────────────────────
 
+    override fun onStart() {
+        navigationView?.onStart()
+    }
+
     override fun onResume() {
         navigationView?.onResume()
     }
@@ -163,7 +180,20 @@ class GoogleNavigationEngine : NavigationEngine {
         navigationView?.onStop()
     }
 
+    /**
+     * Tears down [NavigationView] and cleans up the [Navigator].
+     *
+     * Called from two places in [NavigationScreen]:
+     *  1. The [LifecycleEventObserver] when the host Activity is destroyed.
+     *  2. The [DisposableEffect] onDispose when the composable leaves composition
+     *     (e.g. user stops navigation while Activity is still alive).
+     *
+     * The [isDestroyed] guard ensures only the first call executes; subsequent
+     * calls are safe no-ops.
+     */
     override fun onDestroy() {
+        if (isDestroyed) return
+        isDestroyed = true
         navigationView?.onDestroy()
         navigator?.cleanup()
         navigationView = null

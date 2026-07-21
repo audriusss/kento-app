@@ -80,9 +80,10 @@ class MockNavigationEngine : NavigationEngine {
     override fun enableStandardVoice() { /* no-op in mock */ }
     override fun disableStandardVoice() { /* no-op in mock */ }
 
-    override fun onResume() { /* no lifecycle state in mock */ }
-    override fun onPause() { /* no lifecycle state in mock */ }
-    override fun onStop() { /* no lifecycle state in mock */ }
+    override fun onStart()   { /* no lifecycle state in mock */ }
+    override fun onResume()  { /* no lifecycle state in mock */ }
+    override fun onPause()   { /* no lifecycle state in mock */ }
+    override fun onStop()    { /* no lifecycle state in mock */ }
     override fun onDestroy() {
         simulationJob?.cancel()
     }

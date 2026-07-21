@@ -63,9 +63,25 @@ interface NavigationEngine {
     fun disableStandardVoice()
 
     // ── Lifecycle — forward from Activity/Composable ────────────────────
+    //
+    // NavigationView requires the full Android lifecycle sequence:
+    //   onCreate → onStart → onResume → onPause → onStop → onDestroy
+    //
+    // onCreate is called inside createNavigationView() (once, at view creation).
+    // onStart through onDestroy are forwarded by NavigationScreen via a
+    // LifecycleEventObserver. onDestroy is also called from onDispose so it fires
+    // even when the composable leaves composition while the Activity is still alive.
+    // Implementations must be idempotent for onDestroy.
 
+    fun onStart()
     fun onResume()
     fun onPause()
     fun onStop()
+
+    /**
+     * Tear down the NavigationView and release SDK resources.
+     * May be called more than once (from both the lifecycle observer and onDispose);
+     * implementations must guard against double-execution.
+     */
     fun onDestroy()
 }

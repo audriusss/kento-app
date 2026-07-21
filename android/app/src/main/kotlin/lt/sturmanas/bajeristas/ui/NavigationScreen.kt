@@ -32,6 +32,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -55,8 +56,57 @@ fun NavigationScreen(
     onEnableStandardVoice: () -> Unit,
     onStopNavigation: () -> Unit,
 ) {
+    val ctx = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val engine = remember { navigationController.engine }
+
+    // Create the NavigationView during composition (inside remember), NOT inside
+    // the AndroidView factory. The factory runs at layout time — after side-effects.
+    // If the view were created in the factory, navigationView would still be null
+    // when DisposableEffect adds the LifecycleObserver and the observer immediately
+    // replays ON_START / ON_RESUME (LifecycleRegistry.addObserver() is synchronous).
+    // Creating it here guarantees the view (and its onCreate call) completes before
+    // any side-effects fire.
+    val navView = remember(engine) { engine.createNavigationView(ctx) }
+
+    // ── NavigationView lifecycle management ───────────────────────────────
+    // NavigationView requires the full Android lifecycle sequence:
+    //   onCreate → onStart → onResume → onPause → onStop → onDestroy
+    //
+    // onCreate is called inside createNavigationView() (above, during composition).
+    // onStart / onResume / onPause / onStop are forwarded by the observer below.
+    // When adding the observer to a RESUMED lifecycle, LifecycleRegistry.sync()
+    // replays ON_START and ON_RESUME synchronously — so the NavView progresses
+    // onCreate → onStart → onResume in the correct order on first composition.
+    //
+    // onDestroy is called from onDispose rather than from the observer so that it
+    // fires both when the composable leaves composition (user stops navigation,
+    // Activity still alive) and when the Activity is destroyed.
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START  -> engine.onStart()
+                Lifecycle.Event.ON_RESUME -> engine.onResume()
+                Lifecycle.Event.ON_PAUSE  -> engine.onPause()
+                Lifecycle.Event.ON_STOP   -> engine.onStop()
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            // Gracefully wind down the NavigationView. The observer has already
+            // called onPause/onStop if the lifecycle progressed through those
+            // states; only call them here if the Activity is still alive (i.e.
+            // they have not been called yet and the view is still running).
+            val state = lifecycleOwner.lifecycle.currentState
+            if (state.isAtLeast(Lifecycle.State.RESUMED)) engine.onPause()
+            if (state.isAtLeast(Lifecycle.State.STARTED)) engine.onStop()
+            // onDestroy is idempotent in GoogleNavigationEngine; safe to call even
+            // if the Activity destruction path already triggered it.
+            engine.onDestroy()
+        }
+    }
 
     Column(modifier = Modifier.fillMaxSize()) {
 
@@ -66,8 +116,9 @@ fun NavigationScreen(
                 .fillMaxWidth()
                 .weight(1f),
         ) {
+            // factory receives the already-created view; it does not create a new one.
             AndroidView(
-                factory = { ctx -> navigationController.createNavigationView(ctx) },
+                factory = { navView },
                 modifier = Modifier.fillMaxSize(),
             )
 
@@ -116,21 +167,6 @@ fun NavigationScreen(
                     }
                 }
             }
-        }
-
-        // Forward lifecycle events to NavigationView (required by SDK)
-        DisposableEffect(lifecycleOwner) {
-            val observer = LifecycleEventObserver { _, event ->
-                when (event) {
-                    Lifecycle.Event.ON_RESUME -> engine.onResume()
-                    Lifecycle.Event.ON_PAUSE -> engine.onPause()
-                    Lifecycle.Event.ON_STOP -> engine.onStop()
-                    Lifecycle.Event.ON_DESTROY -> engine.onDestroy()
-                    else -> {}
-                }
-            }
-            lifecycleOwner.lifecycle.addObserver(observer)
-            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
         }
 
         // ── Bottom panel ──────────────────────────────────────────────────
