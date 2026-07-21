@@ -193,14 +193,25 @@ class PersonaPromptsTest {
     @Test
     fun `navigationContext contains only supplied values`() {
         val ctx = PersonaPrompts.navigationContext(
-            nextManeuver = "Posūkis dešinėn",
+            nextManeuver = "TURN_RIGHT",
             street = "Gedimino pr.",
-            distanceMeters = 350,
-            remainingSeconds = 25,
+            distanceToManeuverMeters = 350,
+            remainingDistanceMeters = 4500,
+            remainingSeconds = 600,
         )
-        assertTrue(ctx.contains("Posūkis dešinėn"))
-        assertTrue(ctx.contains("Gedimino pr."))
-        assertTrue(ctx.contains("350"))
-        assertTrue(ctx.contains("25"))
+        // Maneuver name must be converted to its Lithuanian label, not echoed raw.
+        assertTrue("context must contain the Lithuanian maneuver label",
+            ctx.contains("Sukti dešinėn"))
+        assertTrue("context must contain the street name",
+            ctx.contains("Gedimino pr."))
+        // 350 m < 1000 m → "350 metrų" — the raw number must appear.
+        assertTrue("context must contain formatted maneuver distance",
+            ctx.contains("350"))
+        // 4500 m ≥ 3 km → "apie 4 kilometrus" — "apie 4" must appear.
+        assertTrue("context must contain formatted remaining distance",
+            ctx.contains("apie 4"))
+        // 600 s → 10 minutes.
+        assertTrue("context must contain remaining minutes",
+            ctx.contains("10"))
     }
 }

@@ -1,5 +1,30 @@
 package lt.sturmanas.bajeristas.personality
 
+import kotlin.math.roundToInt
+
+/**
+ * Converts metres to a human-readable Lithuanian distance string.
+ *
+ * Rules:
+ *   - Under 1 km        → whole metres with genitive plural:    "150 metrų"
+ *   - 1 km – under 3 km → one decimal, genitive singular:       "apie 2,3 kilometro"
+ *   - 3 km and above    → nearest whole km, accusative plural:  "apie 4 kilometrus"
+ *
+ * Exposed as [internal] so unit tests in the same module can reach it directly
+ * without going through the full [PersonaPrompts.navigationContext] surface.
+ */
+internal fun formatDistance(meters: Int): String = when {
+    meters < 1000 -> "$meters metrų"
+    meters < 3000 -> {
+        // Round to the nearest 100-metre step, then split whole km and one decimal digit.
+        val tenths = (meters.toDouble() / 100.0).roundToInt()
+        val whole = tenths / 10
+        val decimal = tenths % 10
+        if (decimal == 0) "apie $whole kilometrus" else "apie $whole,$decimal kilometro"
+    }
+    else -> "apie ${(meters.toDouble() / 1000.0).roundToInt()} kilometrus"
+}
+
 /**
  * Builds system prompts and navigation context blocks for the Kentas AI persona.
  *
@@ -166,6 +191,9 @@ object PersonaPrompts {
         - Neskatink pavojingo vairavimo.
         - Nebūk tikrai priešiškas ar grėsmingas.
         - Nekalbink ir neblaškyk vairuotojo sudėtingų manevrų metu.
+        - Navigacijos klausimams (kiek liko, ilgai dar, dar toli, o laiko, kada atvažiuosim)
+          atsakyk TIK navigacijos skaičiais. Jokie pokštai, jokia smulkkalba po atsakymo.
+          Smulkkalba ir pokštai leidžiami TIK kai klausimas nesusijęs su navigacija.
         """.trimIndent()
 
     private fun responseRules(): String =
@@ -231,10 +259,6 @@ object PersonaPrompts {
     }
 
     // ── Formatting helpers ────────────────────────────────────────────────
-
-    /** Converts metres to a human-readable Lithuanian distance string. */
-    private fun formatDistance(meters: Int): String =
-        if (meters < 1000) "${meters}m" else "~${meters / 1000} km"
 
     /**
      * Maps a [ManeuverType] enum name (passed as a plain [String] so that this

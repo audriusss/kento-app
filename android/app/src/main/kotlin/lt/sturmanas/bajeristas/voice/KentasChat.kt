@@ -60,7 +60,10 @@ suspend fun askKentas(
             nextManeuver = navState.maneuverType.name,
             street = street,
             distanceToManeuverMeters = distanceMeters,
-            remainingDistanceMeters = navState.remainingDistanceMeters,
+            // Fall back to the maneuver distance when the SDK has not yet reported
+            // total remaining route distance (MockNavigationEngine always returns 0).
+            remainingDistanceMeters = if (navState.remainingDistanceMeters > 0)
+                navState.remainingDistanceMeters else distanceMeters,
             remainingSeconds = navState.remainingDurationSeconds,
         )
 
