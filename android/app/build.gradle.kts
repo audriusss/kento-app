@@ -13,6 +13,10 @@ val localProperties = Properties().also { props ->
     if (localFile.exists()) props.load(localFile.inputStream())
 }
 val googleMapsApiKey: String = localProperties.getProperty("GOOGLE_MAPS_API_KEY", "")
+// OpenAI API key — must be set in local.properties (never committed to source control).
+// Compiled into BuildConfig.OPENAI_API_KEY. Stays empty string when not set;
+// KentasChat.askKentas() returns a Lithuanian error message in that case.
+val openAiApiKey: String = localProperties.getProperty("OPENAI_API_KEY", "")
 
 android {
     namespace = "lt.sturmanas.bajeristas"
@@ -31,6 +35,7 @@ android {
         // Stays empty string when local.properties has no key → MockNavigationEngine is used.
         manifestPlaceholders["GOOGLE_MAPS_API_KEY"] = googleMapsApiKey
         buildConfigField("String", "GOOGLE_MAPS_API_KEY", "\"$googleMapsApiKey\"")
+        buildConfigField("String", "OPENAI_API_KEY", "\"$openAiApiKey\"")
     }
 
     buildTypes {

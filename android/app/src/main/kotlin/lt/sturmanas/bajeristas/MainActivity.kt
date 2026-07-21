@@ -19,7 +19,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.launch
+import lt.sturmanas.bajeristas.voice.askKentas
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -182,21 +185,37 @@ private fun SturmanasApp(
     var aiStatusMessage by remember { mutableStateOf("") }
     var startScreenError by remember { mutableStateOf<String?>(null) }
 
+    val coroutineScope = rememberCoroutineScope()
+
     // ── Voice recognition ─────────────────────────────────────────────────
     // speechLauncher — handles the result from the system RecognizerIntent dialog.
-    // Recognised text is shown in the existing aiStatusMessage slot in NavigationScreen.
+    // Recognised text is forwarded to askKentas(); the reply appears in aiStatusMessage.
     val speechLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
-        aiStatusMessage = when {
-            result.resultCode == Activity.RESULT_OK -> {
-                val text = result.data
-                    ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-                    ?.firstOrNull()
-                if (!text.isNullOrBlank()) "\"$text\"" else "Nieko neatpažinta"
+        if (result.resultCode == Activity.RESULT_OK) {
+            val text = result.data
+                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+            if (!text.isNullOrBlank()) {
+                // Show "thinking" state immediately, then replace with Kentas's reply.
+                aiStatusMessage = "Kentas galvoja…"
+                coroutineScope.launch {
+                    // Capture current sessionConfig and navState at call time.
+                    // Both are Compose state — values are stable on the main thread here.
+                    aiStatusMessage = askKentas(
+                        userText = text,
+                        config = sessionConfig,
+                        navState = navState,
+                        apiKey = BuildConfig.OPENAI_API_KEY,
+                    )
+                }
+            } else {
+                aiStatusMessage = "Nieko neatpažinta"
             }
+        } else {
             // RESULT_CANCELED = user dismissed without speaking; clear quietly.
-            else -> ""
+            aiStatusMessage = ""
         }
     }
 
