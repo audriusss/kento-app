@@ -1,0 +1,7 @@
+# Copy this file to local.properties and fill in your values.
+# local.properties is gitignored — never commit real keys.
+
+# Phase 2: Enable Google Navigation SDK
+# GOOGLE_MAPS_API_KEY=your_google_maps_api_key_here
+
+sdk.dir=/path/to/your/Android/sdk

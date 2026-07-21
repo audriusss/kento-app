@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Base application theme — no action bar; Compose handles the chrome. -->
+    <style name="Theme.SturmanasBaseristas" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

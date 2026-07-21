@@ -1,6 +1,6 @@
-# [Project name]
+# Šturmanas Bajeristas
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+AI driving companion layered on top of Google Navigation. The AI only decides how to speak — Google decides where to go.
 
 ## Run & Operate
 
@@ -22,23 +22,40 @@ _Replace the heading above with the project's name, and this line with one sente
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `android/` — complete Android Studio project (Kotlin + Jetpack Compose)
+- `android/app/src/main/kotlin/lt/sturmanas/bajeristas/` — all app source
+- `android/app/src/test/` — SafetyController unit tests
+- `artifacts/api-server/src/routes/realtimeSession.ts` — POST /api/realtime-session (Phase 3 placeholder)
+- `android/README.md` — Android-specific setup, architecture, phase checklist
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- **Android project lives in `android/`** — self-contained, open `android/` in Android Studio (not the repo root).
+- **SafetyController is deterministic, no AI** — small Kotlin class with clear distance thresholds; must never depend on AI state.
+- **Backend issues ephemeral tokens** — OpenAI API key stays server-side; Android client uses short-lived tokens (Phase 3).
+- **Navigation is the source of truth** — AI persona prompts explicitly forbid inventing directions; only verified NavigationState values are passed to the AI.
+- **Phase gates are strict** — do not begin Phase 2 until Phase 1 is confirmed working on device.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+- **Start screen**: destination input, personality selector (Kentas fully implemented, others placeholder), humor intensity slider.
+- **Navigation screen**: map (Phase 2), maneuver card, push-to-talk mic, mute AI, emergency fallback to standard nav voice.
+- **SafetyController**: blocks AI audio within 200 m of a maneuver; blocks for all complex maneuvers regardless of distance.
+- **Kentas**: Lithuanian-language humorous co-pilot persona — playful, slightly sarcastic, max 12-word replies.
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- Build in strict phases; do not expand scope beyond the agreed phase.
+- Report format at end of each phase: completed / tested / blocked / next single step.
+- No databases, no auth, no analytics, no extra screens.
+- Android project must remain openable in Android Studio without additional setup.
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- Open `android/` in Android Studio, **not** the repository root.
+- `local.properties` is gitignored — copy from `local.properties.template` and add SDK path + API key.
+- The Google Navigation SDK requires the Navigation SDK specifically enabled in Google Cloud (not just Maps SDK).
+- `OPENAI_API_KEY` is a Replit secret — it must never be added to the Android project.
 
 ## Pointers
 
