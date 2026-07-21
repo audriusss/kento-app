@@ -50,9 +50,21 @@ class DistanceFormatterTest {
     }
 
     @Test
-    fun `1000m is the first value shown as kilometres`() {
-        // 1000 / 100 = 10 tenths → whole=1, decimal=0 → no decimal shown
-        assertEquals("apie 1 kilometrus", formatDistance(1000))
+    fun `1000m uses accusative singular kilometrą`() {
+        // 1000 / 100 = 10 tenths → whole=1, decimal=0 → singular accusative
+        assertEquals("apie 1 kilometrą", formatDistance(1000))
+    }
+
+    @Test
+    fun `1100m uses genitive singular kilometro`() {
+        // 1100 / 100 = 11 tenths → whole=1, decimal=1 → fractional form
+        assertEquals("apie 1,1 kilometro", formatDistance(1100))
+    }
+
+    @Test
+    fun `2000m uses accusative plural kilometrus`() {
+        // 2000 / 100 = 20 tenths → whole=2, decimal=0 → plural accusative
+        assertEquals("apie 2 kilometrus", formatDistance(2000))
     }
 
     @Test

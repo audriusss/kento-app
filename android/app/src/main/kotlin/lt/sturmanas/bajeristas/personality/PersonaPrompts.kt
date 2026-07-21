@@ -20,7 +20,12 @@ internal fun formatDistance(meters: Int): String = when {
         val tenths = (meters.toDouble() / 100.0).roundToInt()
         val whole = tenths / 10
         val decimal = tenths % 10
-        if (decimal == 0) "apie $whole kilometrus" else "apie $whole,$decimal kilometro"
+        if (decimal == 0) {
+            // Lithuanian accusative: 1 → "kilometrą", 2+ → "kilometrus"
+            if (whole == 1) "apie 1 kilometrą" else "apie $whole kilometrus"
+        } else {
+            "apie $whole,$decimal kilometro"
+        }
     }
     else -> "apie ${(meters.toDouble() / 1000.0).roundToInt()} kilometrus"
 }
