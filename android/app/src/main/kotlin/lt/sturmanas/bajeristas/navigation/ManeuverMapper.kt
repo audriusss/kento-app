@@ -57,14 +57,32 @@ object ManeuverMapper {
         // UTURN_LEFT / UTURN_RIGHT do not exist in SDK 7.8.0 TBT Maneuver.
         // U-turn intent arrives via ROUNDABOUT_U_TURN (see below).
 
-        Maneuver.ROUNDABOUT_LEFT,
-        Maneuver.ROUNDABOUT_RIGHT,
-        Maneuver.ROUNDABOUT_SHARP_LEFT,
-        Maneuver.ROUNDABOUT_SHARP_RIGHT,
-        Maneuver.ROUNDABOUT_SLIGHT_LEFT,
-        Maneuver.ROUNDABOUT_SLIGHT_RIGHT,
-        Maneuver.ROUNDABOUT_U_TURN,
-        -> ManeuverType.ROUNDABOUT
+        Maneuver.ROUNDABOUT_CLOCKWISE,
+        Maneuver.ROUNDABOUT_COUNTERCLOCKWISE,
+        Maneuver.ROUNDABOUT_EXIT_CLOCKWISE,
+        Maneuver.ROUNDABOUT_EXIT_COUNTERCLOCKWISE,
+
+        Maneuver.ROUNDABOUT_LEFT_CLOCKWISE,
+        Maneuver.ROUNDABOUT_LEFT_COUNTERCLOCKWISE,
+        Maneuver.ROUNDABOUT_RIGHT_CLOCKWISE,
+        Maneuver.ROUNDABOUT_RIGHT_COUNTERCLOCKWISE,
+
+        Maneuver.ROUNDABOUT_SHARP_LEFT_CLOCKWISE,
+        Maneuver.ROUNDABOUT_SHARP_LEFT_COUNTERCLOCKWISE,
+        Maneuver.ROUNDABOUT_SHARP_RIGHT_CLOCKWISE,
+        Maneuver.ROUNDABOUT_SHARP_RIGHT_COUNTERCLOCKWISE,
+
+        Maneuver.ROUNDABOUT_SLIGHT_LEFT_CLOCKWISE,
+        Maneuver.ROUNDABOUT_SLIGHT_LEFT_COUNTERCLOCKWISE,
+        Maneuver.ROUNDABOUT_SLIGHT_RIGHT_CLOCKWISE,
+        Maneuver.ROUNDABOUT_SLIGHT_RIGHT_COUNTERCLOCKWISE,
+
+        Maneuver.ROUNDABOUT_STRAIGHT_CLOCKWISE,
+        Maneuver.ROUNDABOUT_STRAIGHT_COUNTERCLOCKWISE,
+
+        Maneuver.ROUNDABOUT_U_TURN_CLOCKWISE,
+        Maneuver.ROUNDABOUT_U_TURN_COUNTERCLOCKWISE,
+            -> ManeuverType.ROUNDABOUT
 
         Maneuver.OFF_RAMP_LEFT,
         Maneuver.OFF_RAMP_RIGHT,
@@ -91,7 +109,7 @@ object ManeuverMapper {
         Maneuver.DESTINATION_RIGHT,
         -> ManeuverType.ARRIVE
 
-        Maneuver.FERRY,
+        Maneuver.FERRY_BOAT,
         -> ManeuverType.COMPLEX_JUNCTION
 
         else -> ManeuverType.UNKNOWN

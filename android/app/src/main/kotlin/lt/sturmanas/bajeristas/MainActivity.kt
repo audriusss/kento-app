@@ -58,9 +58,7 @@ class MainActivity : ComponentActivity() {
             initializeNavigation()
         } else {
             permissionState.value = PermissionState.Denied
-            engineError.value =
-                "Vietos leidimas atmestas. Atidarykite nustatymus ir suteikite " +
-                "„Šturmanas Bajeristas" prieigą prie vietos."
+            engineError.value = "Vietos leidimas atmestas. Atidarykite nustatymus ir suteikite „Šturmanas Bajeristas“ prieigą prie vietos."
         }
     }
 
