@@ -17,27 +17,31 @@ private const val MODEL = "gpt-4o-mini"
 private const val MAX_TOKENS = 80
 
 /**
- * Sends [userText] to OpenAI Chat Completions as a single Kentas turn and returns
- * the reply string.
+ * Sends [userText] to OpenAI Chat Completions and returns Kentas's reply.
  *
- * The call is fire-and-forget from the caller's perspective: it never throws — all
- * failures are caught and returned as a Lithuanian-language error string so they can
- * be displayed directly in [aiStatusMessage] without crashing.
+ * [history] — recent (role, content) pairs from [ConversationBuffer] — is spliced
+ * between the system prompt and the current user turn so the model maintains
+ * conversational context across push-to-talk presses within one drive.
+ * Pass [emptyList] (the default) for the very first turn of a drive.
+ *
+ * Never throws — all failures are returned as a Lithuanian error string that is safe
+ * to display directly in [aiStatusMessage] without crashing.
  *
  * Uses [HttpURLConnection] from the Android SDK — no additional Gradle dependency.
  *
  * @param userText  The Lithuanian phrase recognised by SpeechRecognizer.
  * @param config    Session personality config (ConversationMode, TripMode, HumorIntensity…).
- * @param navState  Current navigation state — used to build the navigation context block
- *                  prepended to every user turn so Kentas knows what is happening on the road.
- * @param apiKey    OpenAI API key from [BuildConfig.OPENAI_API_KEY], compiled in from
- *                  local.properties. Must never be hardcoded here or committed to source control.
+ * @param navState  Current navigation state prepended as a context block to each user turn.
+ * @param apiKey    OpenAI API key from [BuildConfig.OPENAI_API_KEY]. Never hardcode.
+ * @param history   Snapshot of [ConversationBuffer.messages], captured on the main thread
+ *                  before this coroutine was launched. Empty list for the first turn.
  */
 suspend fun askKentas(
     userText: String,
     config: SessionConfig,
     navState: NavigationState,
     apiKey: String,
+    history: List<Pair<String, String>> = emptyList(),
 ): String = withContext(Dispatchers.IO) {
 
     if (apiKey.isBlank()) {
@@ -73,6 +77,15 @@ suspend fun askKentas(
                     put("role", "system")
                     put("content", systemPrompt)
                 })
+                // Splice recent history between system prompt and current user turn.
+                // Gives the model conversational context so it can understand follow-up
+                // questions and avoid repeating itself within a single drive.
+                for ((role, content) in history) {
+                    put(JSONObject().apply {
+                        put("role", role)
+                        put("content", content)
+                    })
+                }
                 put(JSONObject().apply {
                     put("role", "user")
                     put("content", userMessage)
