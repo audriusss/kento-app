@@ -55,7 +55,8 @@ suspend fun askKentas(
         val navContext = PersonaPrompts.navigationContext(
             nextManeuver = navState.maneuverType.name,
             street = street,
-            distanceMeters = distanceMeters,
+            distanceToManeuverMeters = distanceMeters,
+            remainingDistanceMeters = navState.remainingDistanceMeters,
             remainingSeconds = navState.remainingDurationSeconds,
         )
 
