@@ -13,14 +13,15 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.RadioButton
-import androidx.compose.material3.Slider
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -30,15 +31,20 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
-import lt.sturmanas.bajeristas.personality.Personality
+import lt.sturmanas.bajeristas.personality.ConversationMode
+import lt.sturmanas.bajeristas.personality.HumorIntensity
+import lt.sturmanas.bajeristas.personality.SessionConfig
+import lt.sturmanas.bajeristas.personality.TripMode
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StartScreen(
-    onStartNavigation: (destination: String, personality: Personality, humorIntensity: Int) -> Unit,
+    onStartNavigation: (destination: String, config: SessionConfig) -> Unit,
 ) {
     var destination by remember { mutableStateOf("") }
-    var selectedPersonality by remember { mutableStateOf(Personality.KENTAS) }
-    var humorIntensity by remember { mutableFloatStateOf(50f) }
+    var conversationMode by remember { mutableStateOf(ConversationMode.SOFT) }
+    var tripMode by remember { mutableStateOf(TripMode.SOLO) }
+    var humorIntensity by remember { mutableStateOf(HumorIntensity.NORMAL) }
     val keyboard = LocalSoftwareKeyboardController.current
 
     Column(
@@ -49,6 +55,7 @@ fun StartScreen(
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        // ── Header ────────────────────────────────────────────────────────
         Text(
             text = "Šturmanas Bajeristas",
             style = MaterialTheme.typography.headlineMedium,
@@ -60,7 +67,7 @@ fun StartScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
-        Spacer(modifier = Modifier.height(40.dp))
+        Spacer(modifier = Modifier.height(32.dp))
 
         // ── Destination ───────────────────────────────────────────────────
         OutlinedTextField(
@@ -74,80 +81,111 @@ fun StartScreen(
             keyboardActions = KeyboardActions(onDone = { keyboard?.hide() }),
         )
 
-        Spacer(modifier = Modifier.height(32.dp))
+        Spacer(modifier = Modifier.height(28.dp))
 
-        // ── Personality selector ──────────────────────────────────────────
-        Text(
-            text = "Asmenybė",
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Spacer(modifier = Modifier.height(4.dp))
-
-        Personality.entries.forEach { personality ->
-            val label = when (personality) {
-                Personality.RAMUS -> "Ramus"
-                Personality.KENTAS -> "Kentas"   // fully implemented
-                Personality.SARKASTISKAS -> "Sarkastiškas"
-                Personality.JUODAS_HUMORAS -> "Juodas humoras"
-            }
-            val subtitle = when (personality) {
-                Personality.KENTAS -> "V1 įgyvendinta"
-                else -> "Netrukus"
-            }
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                RadioButton(
-                    selected = selectedPersonality == personality,
-                    onClick = { selectedPersonality = personality },
+        // ── Conversation mode: Soft / Hard ────────────────────────────────
+        SectionLabel("Kalbėjimo stilius")
+        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+            ConversationMode.entries.forEachIndexed { index, mode ->
+                SegmentedButton(
+                    selected = conversationMode == mode,
+                    onClick = { conversationMode = mode },
+                    shape = SegmentedButtonDefaults.itemShape(index, ConversationMode.entries.size),
+                    label = {
+                        Text(
+                            when (mode) {
+                                ConversationMode.SOFT -> "Soft"
+                                ConversationMode.HARD -> "Hard"
+                            }
+                        )
+                    },
                 )
-                Column {
-                    Text(label, style = MaterialTheme.typography.bodyMedium)
-                    Text(
-                        text = subtitle,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (personality == Personality.KENTAS)
-                            MaterialTheme.colorScheme.primary
-                        else
-                            MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
             }
         }
 
-        Spacer(modifier = Modifier.height(24.dp))
+        Spacer(modifier = Modifier.height(20.dp))
 
-        // ── Humor intensity ───────────────────────────────────────────────
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text("Humoro intensyvumas", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-            Text("${humorIntensity.toInt()}", style = MaterialTheme.typography.bodyMedium)
+        // ── Trip mode: Solo / Duo / Group ─────────────────────────────────
+        SectionLabel("Kelionės režimas")
+        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+            TripMode.entries.forEachIndexed { index, mode ->
+                SegmentedButton(
+                    selected = tripMode == mode,
+                    onClick = { tripMode = mode },
+                    shape = SegmentedButtonDefaults.itemShape(index, TripMode.entries.size),
+                    label = {
+                        Text(
+                            when (mode) {
+                                TripMode.SOLO -> "Solo"
+                                TripMode.DUO -> "Duo"
+                                TripMode.GROUP -> "Grupė"
+                            }
+                        )
+                    },
+                )
+            }
         }
-        Slider(
-            value = humorIntensity,
-            onValueChange = { humorIntensity = it },
-            valueRange = 0f..100f,
-            modifier = Modifier.fillMaxWidth(),
-        )
 
-        Spacer(modifier = Modifier.height(40.dp))
+        Spacer(modifier = Modifier.height(20.dp))
+
+        // ── Humor intensity: Light / Normal / Strong ───────────────────────
+        SectionLabel("Humoro intensyvumas")
+        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+            HumorIntensity.entries.forEachIndexed { index, intensity ->
+                SegmentedButton(
+                    selected = humorIntensity == intensity,
+                    onClick = { humorIntensity = intensity },
+                    shape = SegmentedButtonDefaults.itemShape(index, HumorIntensity.entries.size),
+                    label = {
+                        Text(
+                            when (intensity) {
+                                HumorIntensity.LIGHT -> "Lengvas"
+                                HumorIntensity.NORMAL -> "Normalus"
+                                HumorIntensity.STRONG -> "Stiprus"
+                            }
+                        )
+                    },
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(36.dp))
 
         // ── Start button ──────────────────────────────────────────────────
         Button(
             onClick = {
                 keyboard?.hide()
-                onStartNavigation(destination.trim(), selectedPersonality, humorIntensity.toInt())
+                onStartNavigation(
+                    destination.trim(),
+                    SessionConfig(
+                        conversationMode = conversationMode,
+                        tripMode = tripMode,
+                        humorIntensity = humorIntensity,
+                    ),
+                )
             },
             modifier = Modifier.fillMaxWidth(),
             enabled = destination.isNotBlank(),
         ) {
             Text("Pradėti navigaciją", style = MaterialTheme.typography.titleMedium)
         }
+    }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+@Composable
+private fun SectionLabel(text: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 6.dp),
+        horizontalArrangement = Arrangement.Start,
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+        )
     }
 }

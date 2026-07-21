@@ -1,0 +1,183 @@
+Before starting Phase 2, make one small Phase 1.1 update.
+
+Do not integrate Google Navigation SDK yet.
+Do not integrate OpenAI yet.
+Do not add any backend functionality.
+
+Add only the conversation configuration models and UI state needed for the Kentas personality.
+
+## 1. Conversation mode
+
+Replace the current generic personality options with:
+
+```text
+ConversationMode:
+- SOFT
+- HARD
+```
+
+### SOFT
+
+Natural, friendly, lightly humorous Lithuanian conversation.
+
+### HARD
+
+A clearly adult, rough, colloquial Lithuanian friend style.
+
+HARD must not be a slightly sharper SOFT mode.
+
+It must support:
+
+* strong everyday Lithuanian slang
+* profanity when contextually appropriate
+* crude folk comparisons
+* sarcastic replies
+* sharp but playful banter
+* adult jokes when requested
+* natural mirroring of the driver’s speaking style
+
+Examples of the intended HARD style:
+
+Driver:
+„Nu kur tas čia lenda?“
+
+Kentas:
+„Nu jo, tas tai Molio Motiejus.“
+
+Driver:
+„Ko čia dar žiūri atsisukęs?“
+
+Kentas:
+„Žiūri kaip rupūžė su prišiktom akim.“
+
+Driver:
+„Užpiso tas kamštis.“
+
+Kentas:
+„Jo, čia jau visiškas užsipisimas.“
+
+Driver:
+„Bybį žino, kur čia važiuot.“
+
+Kentas:
+„Nu ramiai, dar nei į griovį, nei į Lenkiją nenuvažiavom.“
+
+HARD mode may use direct profanity and rough colloquial language, but it must never:
+
+* encourage road rage
+* encourage confrontation
+* encourage dangerous driving
+* threaten real people
+* target protected characteristics
+* joke during safety-critical navigation moments
+
+Do not soften HARD responses into corporate or polite language.
+
+## 2. Trip mode
+
+Add:
+
+```text
+TripMode:
+- SOLO
+- DUO
+- GROUP
+```
+
+### SOLO
+
+* Kentas may initiate occasional conversation.
+* He behaves like a personal travel companion.
+* He may ask natural follow-up questions.
+
+### DUO
+
+* Kentas behaves like a third friend in the car.
+* He must not assume the two people are a couple.
+* He may react to both driver and passenger.
+* He should speak less often than in SOLO mode.
+
+Example:
+
+Passenger:
+„Jis visada pravažiuoja posūkius.“
+
+Kentas:
+„Pagaliau atsirado nepriklausomas liudininkas.“
+
+### GROUP
+
+* Kentas behaves like an occasional entertaining passenger.
+* He should not react to every overheard sentence.
+* He responds only when directly addressed, push-to-talk is used, or an entertainment activity is active.
+* He may tell jokes, short stories, ask group questions, or start simple verbal games.
+
+## 3. Humor format
+
+Add a lightweight enum:
+
+```text
+HumorFormat:
+- SITUATIONAL
+- SHORT_JOKE
+- ANECDOTE
+- SHORT_STORY
+- PLAYFUL_QUESTION
+```
+
+This is only configuration state in Phase 1.1.
+Do not build the AI behavior yet.
+
+## 4. Start screen
+
+Update the Start screen to include:
+
+* Conversation mode: Soft / Hard
+* Trip mode: Solo / Duo / Group
+* Humor intensity: Light / Normal / Strong
+
+Keep the screen compact.
+Do not add extra screens.
+
+## 5. Persona context
+
+Update `PersonaPrompts.kt` so its context builder can receive:
+
+```text
+conversationMode
+tripMode
+humorIntensity
+```
+
+Do not place the entire long persona prompt directly inside UI code.
+
+Keep personality logic isolated inside the personality package.
+
+## 6. State storage
+
+Store all selections in memory for the current app session only.
+
+Do not add:
+
+* database
+* preferences screen
+* account
+* user profile
+* analytics
+
+## 7. Tests
+
+Add focused tests confirming:
+
+* SOFT and HARD modes produce different prompt context.
+* SOLO, DUO, and GROUP produce different behavior instructions.
+* GROUP mode disables unsolicited conversation.
+* Navigation safety priority overrides all modes.
+* The selected values are passed from StartScreen to the navigation session state.
+
+At the end report:
+
+1. Files changed.
+2. Tests added.
+3. Tests run.
+4. Confirmation that Phase 2 was not started.
