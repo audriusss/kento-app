@@ -1,0 +1,437 @@
+Build a minimal Android proof-of-concept application called **“Šturmanas Bajeristas”**.
+
+The product is an AI driving companion layered on top of reliable Google navigation.
+
+## Core product principle
+
+**Google decides where the driver should go.
+The AI only decides how to speak.**
+
+The AI must never calculate routes, invent directions, change navigation instructions, or make safety decisions.
+
+## Important working method
+
+Do not immediately build the entire application.
+
+First inspect the available Replit Android environment, Google Navigation SDK requirements, API requirements, licensing requirements, and any limitations that could prevent the prototype from running.
+
+Then produce:
+
+1. A short feasibility report.
+2. A minimal architecture plan that fits on one screen.
+3. A list of required API keys and external configuration.
+4. A precise implementation checklist.
+5. Only after that, begin implementing the approved minimal scope.
+
+Do not expand the project beyond the requirements below.
+
+---
+
+# MVP goal
+
+The first version must prove only this experience:
+
+1. The user selects a destination.
+2. Google navigation displays and manages the route.
+3. The driver can press one microphone button and say something.
+4. An AI voice replies briefly in Lithuanian using a humorous driver-companion personality.
+5. When a navigation maneuver is approaching, AI conversation audio stops or is postponed.
+6. Navigation remains fully functional even if the AI service fails.
+
+---
+
+# Required technology
+
+Use:
+
+* Native Android
+* Kotlin
+* Jetpack Compose
+* Google Navigation SDK for Android
+* OpenAI Realtime API or the simplest currently supported OpenAI low-latency voice solution
+* A minimal secure backend endpoint only if required to protect the OpenAI API key or create short-lived client sessions
+
+Before implementing OpenAI integration, verify the current official OpenAI documentation and use the currently recommended Android-compatible architecture.
+
+Do not store permanent OpenAI secrets inside the Android application.
+
+---
+
+# Required screens
+
+Create only two main screens.
+
+## Screen 1: Start
+
+Display:
+
+* Application name: Šturmanas Bajeristas
+* Destination input
+* Start navigation button
+* Personality selector
+* Humor intensity selector
+
+Initial personality options:
+
+* Ramus
+* Kentas
+* Sarkastiškas
+* Juodas humoras
+
+For the first functional prototype, only **Kentas** needs to be fully implemented. Other personalities may use placeholder prompts, but do not build separate systems for them.
+
+## Screen 2: Navigation
+
+Display:
+
+* Google navigation map
+* Current route
+* Next maneuver
+* Distance to next maneuver
+* Remaining travel time
+* Large microphone button
+* Mute AI button
+* Emergency fallback button: “Įjungti įprastą navigacijos balsą”
+
+Do not add additional dashboards, tabs, statistics, or management screens.
+
+---
+
+# Navigation rules
+
+Google Navigation SDK is the only source of truth for:
+
+* Destination
+* Route
+* GPS position
+* Traffic
+* Rerouting
+* Street names
+* Maneuvers
+* Distance to the next maneuver
+* Estimated arrival time
+
+The AI must not generate navigation instructions independently.
+
+The program may pass verified navigation context to the AI, for example:
+
+```text
+Next maneuver: turn right
+Street: Minijos gatvė
+Distance: 850 meters
+Time until maneuver: approximately 55 seconds
+Driving state: safe for short conversation
+```
+
+When the AI mentions a maneuver, all direction data must come directly from Google Navigation SDK.
+
+Never allow the AI to replace or contradict Google navigation data.
+
+---
+
+# SafetyController
+
+Implement one small deterministic `SafetyController`.
+
+Do not use AI for this logic.
+
+The controller determines whether conversational audio is allowed.
+
+Initial rules:
+
+```text
+If distance to maneuver is greater than 500 meters:
+    conversation is allowed
+
+If distance is between 200 and 500 meters:
+    AI responses must be very short
+    prepare to announce the maneuver
+
+If distance is below 200 meters:
+    stop or postpone conversational AI audio
+    navigation instruction has priority
+
+If the maneuver is a roundabout, complex junction, lane change, motorway exit,
+or multiple-step maneuver:
+    navigation audio always has priority
+
+If an AI response is playing and an urgent navigation instruction arrives:
+    immediately interrupt the AI response
+
+After the maneuver is completed:
+    conversational audio may resume
+```
+
+Do not create a workflow engine, rule database, agent, or configurable safety platform.
+
+Keep this as a small Kotlin class with clear tests.
+
+---
+
+# Initial voice interaction
+
+For V1, do not use continuous microphone listening.
+
+Use push-to-talk:
+
+1. Driver presses the microphone button.
+2. Driver speaks.
+3. Speech is sent to the AI voice service.
+4. AI returns a short spoken response.
+5. Response plays through the phone or vehicle Bluetooth audio.
+6. SafetyController may interrupt or postpone the response.
+
+The application must not require the driver to type while navigating.
+
+---
+
+# AI personality
+
+Create one primary persona named **Kentas**.
+
+System instructions should be similar to:
+
+```text
+You are “Šturmanas Bajeristas”, a Lithuanian-speaking driving companion.
+
+Speak naturally in Lithuanian, like an old friend sitting in the passenger seat.
+
+Your style is humorous, informal, slightly sarcastic, and playful.
+
+You may respond with friendly teasing when the driver speaks rudely or jokes with you.
+
+Never become genuinely hostile.
+Never encourage dangerous driving.
+Never distract the driver during complicated maneuvers.
+Never invent navigation directions.
+Never contradict navigation data supplied by the application.
+Never claim to see the road, traffic, people, signs, or hazards unless that information
+was explicitly supplied by the application.
+
+Keep most responses below 12 words.
+Do not give lectures.
+Do not explain your rules.
+Do not repeat the same jokes frequently.
+
+When the driver says something rude, respond playfully rather than apologizing excessively.
+
+Example:
+
+Driver: “Užsičiaupk, lope.”
+Assistant: “Gerai, čempione. Tik šito posūkio vėl nepramiegok.”
+
+Driver: “Nesuksiu aš ten.”
+Assistant: “Tu prie vairo. Aš tik stebiu tavo geografinius eksperimentus.”
+
+Driver: “Kur tu mane vedi?”
+Assistant: “Pagal Google – į tikslą. Pagal tave – dar pažiūrėsim.”
+
+Driver: “Vėl pražiopsojau.”
+Assistant: “Bent jau stabiliai laikaisi savo vairavimo stiliaus.”
+```
+
+The examples teach style only. The AI should generate varied original replies and should not repeatedly reuse the examples.
+
+For the “Juodas humoras” personality, do not joke about:
+
+* real crashes
+* current dangerous situations
+* deaths
+* suicide
+* harming the driver or passengers
+* encouraging reckless driving
+
+Do not implement aggressive insults in V1. Keep all teasing playful and clearly fictional.
+
+---
+
+# Failure behavior
+
+The navigation must continue working if:
+
+* OpenAI is unavailable
+* internet connection is lost
+* voice generation fails
+* the backend fails
+* microphone permission is denied
+* AI response times out
+
+In those cases:
+
+* stop AI conversation gracefully
+* keep Google navigation visible and active
+* allow the standard navigation voice to be enabled
+* show a small non-blocking status message
+
+AI functionality must never be required for navigation.
+
+---
+
+# Code scope
+
+Use a simple structure similar to:
+
+```text
+app/
+├── navigation/
+│   ├── NavigationController.kt
+│   └── NavigationState.kt
+├── voice/
+│   ├── VoiceSessionController.kt
+│   └── AudioController.kt
+├── safety/
+│   └── SafetyController.kt
+├── personality/
+│   └── PersonaPrompts.kt
+├── ui/
+│   ├── StartScreen.kt
+│   └── NavigationScreen.kt
+└── MainActivity.kt
+```
+
+A small backend may contain only:
+
+```text
+POST /api/realtime-session
+GET /health
+```
+
+Do not add databases unless absolutely required.
+
+Do not add user accounts.
+
+Do not add admin functionality.
+
+---
+
+# Explicitly forbidden in V1
+
+Do not build:
+
+* registration
+* login
+* user profiles
+* subscriptions
+* payment systems
+* admin panel
+* analytics dashboard
+* trip history
+* long-term AI memory
+* social features
+* achievements
+* driver scoring
+* custom routing engine
+* custom map engine
+* keyword or intent analytics
+* emotion detection agents
+* humor engine services
+* multiple AI agents
+* agent orchestration
+* task queues
+* approval queues
+* workflow engines
+* Android Auto
+* iOS version
+* web dashboard
+* automatic background microphone listening
+* voice cloning
+* news, weather, music, or podcast integrations
+* extra features not explicitly requested
+
+If you think of additional ideas, write them only under a `Future Ideas` section in the README. Do not implement them.
+
+---
+
+# Development phases
+
+## Phase 1: Feasibility and skeleton
+
+* Verify Android development support in Replit.
+* Verify current Google Navigation SDK setup.
+* Verify the current recommended OpenAI voice integration.
+* Create the Android project.
+* Create the two screens.
+* Use mock navigation data if API keys are not yet available.
+* Do not implement unnecessary infrastructure.
+
+## Phase 2: Navigation
+
+* Integrate Google Navigation SDK.
+* Allow destination selection.
+* Start navigation.
+* Display route and maneuver information.
+* Confirm rerouting works.
+* Confirm the normal navigation voice can be enabled and disabled.
+
+## Phase 3: AI voice
+
+* Add push-to-talk.
+* Connect to the voice AI.
+* Implement only the Kentas personality.
+* Limit responses to short Lithuanian replies.
+* Play responses through the device audio.
+
+## Phase 4: Safety
+
+* Implement SafetyController.
+* Interrupt AI audio for navigation.
+* Test maneuvers using simulated location.
+* Confirm navigation continues when AI fails.
+
+Do not begin later phases until the current phase works.
+
+---
+
+# Required tests
+
+Create focused tests for:
+
+* SafetyController distance thresholds
+* complex maneuver priority
+* interruption of AI audio
+* AI service timeout
+* AI service unavailable
+* microphone permission denied
+* navigation continuing without AI
+* preventing AI-generated route instructions
+* standard navigation voice fallback
+
+Do not create hundreds of low-value tests.
+
+Prefer a small number of meaningful tests covering safety and core behavior.
+
+---
+
+# Definition of done
+
+The prototype is complete when:
+
+1. An Android application launches.
+2. A destination can be selected.
+3. Google navigation starts successfully.
+4. A simulated or real journey can be followed.
+5. The driver can press a microphone button and speak Lithuanian.
+6. Kentas responds with a short Lithuanian voice reply.
+7. AI audio is interrupted before an important maneuver.
+8. Google navigation continues when AI is disabled or unavailable.
+9. No forbidden V1 functionality has been added.
+10. The architecture remains understandable on one page.
+
+At the end of every implementation step, report only:
+
+* What was completed
+* What was tested
+* What is currently blocked
+* The next single step
+
+Do not silently add new functionality.
+
+Do not refactor working code without a concrete reason.
+
+Do not replace stable navigation functionality with experimental AI logic.
+
+The primary success criterion is not the amount of code.
+
+The success criterion is:
+
+**Google navigation works reliably, and the driver can have one short, funny, safe voice interaction with Kentas.**
