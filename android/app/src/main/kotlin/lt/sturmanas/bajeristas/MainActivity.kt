@@ -131,6 +131,18 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+// ── Voice recognition fallbacks ──────────────────────────────────────────────
+//
+// Shown when SpeechRecognizer returns RESULT_OK but an empty or null transcript.
+// A small rotating list keeps Kentas sounding alive rather than giving a flat error.
+// No API call is made for an empty transcript — these are local strings only.
+private val KENTAS_FALLBACKS = listOf(
+    "Pakartok žmonių kalba.",
+    "Nieko negirdėjau. Ar šneki, ar miegai?",
+    "Ką, ką? Pabandyk dar kartą.",
+    "Girdi mane? Tai aš tavęs negirdėjau.",
+)
+
 // ── Voice recognition helper ──────────────────────────────────────────────────
 
 /**
@@ -198,11 +210,12 @@ private fun SturmanasApp(
                 ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
                 ?.firstOrNull()
             if (!text.isNullOrBlank()) {
-                // Show "thinking" state immediately, then replace with Kentas's reply.
-                aiStatusMessage = "Kentas galvoja…"
+                // Show the recognized phrase while the API call runs (typically 2–5 s).
+                // The driver can confirm what Kentas heard before the reply arrives.
+                aiStatusMessage = "„$text" — Kentas galvoja…"
                 coroutineScope.launch {
-                    // Capture current sessionConfig and navState at call time.
-                    // Both are Compose state — values are stable on the main thread here.
+                    // sessionConfig and navState are Compose state — read fresh on the
+                    // main thread at launch time, before dispatching to IO inside askKentas.
                     aiStatusMessage = askKentas(
                         userText = text,
                         config = sessionConfig,
@@ -211,7 +224,9 @@ private fun SturmanasApp(
                     )
                 }
             } else {
-                aiStatusMessage = "Nieko neatpažinta"
+                // Recognizer returned OK but an empty transcript (mumble, background noise,
+                // silence timeout). Show a rotating Kentas-style fallback — no API call.
+                aiStatusMessage = KENTAS_FALLBACKS.random()
             }
         } else {
             // RESULT_CANCELED = user dismissed without speaking; clear quietly.

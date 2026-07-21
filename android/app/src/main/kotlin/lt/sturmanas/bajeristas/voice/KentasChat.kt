@@ -96,7 +96,9 @@ suspend fun askKentas(
             val responseText = if (responseCode == HttpURLConnection.HTTP_OK) {
                 conn.inputStream.bufferedReader(Charsets.UTF_8).readText()
             } else {
-                val errorBody = conn.errorStream?.bufferedReader(Charsets.UTF_8)?.readText() ?: ""
+                // Drain and discard the error body so the connection can be reused;
+                // the status code alone is enough to produce the right Lithuanian message.
+                conn.errorStream?.use { it.readBytes() }
                 return@withContext when (responseCode) {
                     401 -> "OpenAI: neteisingas API raktas"
                     429 -> "OpenAI: per daug užklausų — bandykite vėliau"
