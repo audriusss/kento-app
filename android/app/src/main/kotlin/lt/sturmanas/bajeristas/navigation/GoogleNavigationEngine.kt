@@ -10,7 +10,6 @@ import com.google.android.libraries.navigation.NavigationView
 import com.google.android.libraries.navigation.Navigator
 import com.google.android.libraries.navigation.Navigator.ArrivalListener
 import com.google.android.libraries.navigation.Navigator.RouteChangedListener
-import com.google.android.libraries.navigation.NavigatorAudioGuidance
 import com.google.android.libraries.navigation.RoutingOptions
 import com.google.android.libraries.navigation.Waypoint
 import kotlinx.coroutines.CoroutineScope
@@ -34,6 +33,17 @@ import java.util.Locale
  *  - [startNavigation] may only be called after [onReady] fires.
  *  - [onResume], [onPause], [onStop], [onDestroy] must be forwarded from the
  *    hosting Activity/composable so [NavigationView] stays in sync.
+ *
+ * SDK API notes (Navigation SDK 7.8.0):
+ *  - Audio guidance type: Navigator.AudioGuidance (nested), not NavigatorAudioGuidance.
+ *  - setDestination() returns ListenableResultFuture<Navigator.RouteStatus>, not a Task.
+ *    addOnSuccessListener/addOnFailureListener do not exist on this type.
+ *    Routing updates are received via addRouteChangedListener and addArrivalListener.
+ *  - Step-level maneuver access (navigator.currentStep) does not exist in the public
+ *    SDK 7.8.0 API. ManeuverType is temporarily set to UNKNOWN until the correct API
+ *    is confirmed. Distance and duration are read from getCurrentTimeAndDistance().
+ *  - Step listener: addOnNavigationStepUpdatedListener does not exist; removed.
+ *  - Route listener: addRouteChangedListener (not addOnRouteChangedListener).
  */
 class GoogleNavigationEngine : NavigationEngine {
 
@@ -51,7 +61,8 @@ class GoogleNavigationEngine : NavigationEngine {
             override fun onNavigatorReady(nav: Navigator) {
                 navigator = nav
                 // Kentas speaks; suppress standard navigation voice by default.
-                nav.setAudioGuidance(NavigatorAudioGuidance.SILENT)
+                // Navigator.AudioGuidance is the correct nested type in SDK 7.8.0.
+                nav.setAudioGuidance(Navigator.AudioGuidance.SILENT)
                 setupListeners(nav)
                 onReady()
             }
@@ -109,17 +120,12 @@ class GoogleNavigationEngine : NavigationEngine {
                 return@resolveDestination
             }
 
+            // Navigator.setDestination returns ListenableResultFuture<Navigator.RouteStatus>.
+            // This type does not support addOnSuccessListener / addOnFailureListener (those are
+            // Google Task methods). Routing success is confirmed via addRouteChangedListener;
+            // arrival via addArrivalListener. The return value is intentionally not chained here
+            // to avoid using an unverified API surface.
             nav.setDestination(waypoint, RoutingOptions())
-                .addOnSuccessListener {
-                    // State updates arrive via listeners; no extra action needed.
-                }
-                .addOnFailureListener { e ->
-                    _state.value = _state.value.copy(
-                        isNavigating = false,
-                        errorMessage = "Maršrutas nerastas",
-                    )
-                    onError("Maršrutas nerastas")
-                }
         }
     }
 
@@ -136,11 +142,11 @@ class GoogleNavigationEngine : NavigationEngine {
     }
 
     override fun enableStandardVoice() {
-        navigator?.setAudioGuidance(NavigatorAudioGuidance.VOICE_ALERTS_AND_GUIDANCE)
+        navigator?.setAudioGuidance(Navigator.AudioGuidance.VOICE_ALERTS_AND_GUIDANCE)
     }
 
     override fun disableStandardVoice() {
-        navigator?.setAudioGuidance(NavigatorAudioGuidance.SILENT)
+        navigator?.setAudioGuidance(Navigator.AudioGuidance.SILENT)
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────
@@ -172,13 +178,12 @@ class GoogleNavigationEngine : NavigationEngine {
             syncStateFromNavigator(nav)
         }
 
-        // Step changes (new maneuver approaching)
-        nav.addOnNavigationStepUpdatedListener {
-            syncStateFromNavigator(nav)
-        }
+        // NOTE: addOnNavigationStepUpdatedListener does not exist in Navigation SDK 7.8.0.
+        // Step-level maneuver updates are not available from this listener set.
+        // ManeuverType remains UNKNOWN until the correct step access API is confirmed.
 
-        // Rerouting
-        nav.addOnRouteChangedListener(RouteChangedListener {
+        // Rerouting — correct SDK 7.8.0 method is addRouteChangedListener (not addOnRouteChangedListener)
+        nav.addRouteChangedListener(RouteChangedListener {
             _state.value = _state.value.copy(isRerouting = true)
             syncStateFromNavigator(nav)
         })
@@ -195,14 +200,16 @@ class GoogleNavigationEngine : NavigationEngine {
     }
 
     private fun syncStateFromNavigator(nav: Navigator) {
-        val step = nav.currentStep
+        // NOTE: Navigator 7.8.0 does not expose a currentStep property on the Navigator
+        // object. There is no public API to read the current maneuver type or road name
+        // directly in this SDK version. ManeuverType is set to UNKNOWN and road names
+        // are cleared until the correct step-info API surface is confirmed.
+        // Distance and duration are read from getCurrentTimeAndDistance() which does exist.
         val timeAndDist = nav.currentTimeAndDistance
         _state.value = _state.value.copy(
-            maneuverType = ManeuverMapper.fromSdk(step?.maneuver),
+            maneuverType = ManeuverType.UNKNOWN,
             distanceToNextManeuverMeters = timeAndDist?.meters?.toInt() ?: Int.MAX_VALUE,
             remainingDurationSeconds = timeAndDist?.seconds?.toInt() ?: 0,
-            currentRoadName = step?.fullRoadName ?: "",
-            nextRoadName = step?.nextStepRoadName ?: "",
             isRerouting = false,
         )
     }

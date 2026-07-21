@@ -1,0 +1,128 @@
+Fix the Phase 2 Google Navigation SDK integration so it compiles against:
+
+com.google.android.libraries.navigation:navigation:7.8.0
+
+Android Studio now compiles the Gradle configuration successfully, but Kotlin compilation reports approximately 55 errors, mainly in:
+
+- GoogleNavigationEngine.kt
+- ManeuverMapper.kt
+
+The current implementation uses nonexistent or outdated Navigation SDK APIs.
+
+Observed errors include:
+
+- Unresolved reference: NavigatorAudioGuidance
+- Unresolved reference: addOnSuccessListener
+- Unresolved reference: addOnNavigationStepUpdatedListener
+- Unresolved reference: addOnRouteChangedListener
+- Unresolved reference: currentStep
+- Cannot infer type for value parameter
+
+Use only the official Navigation SDK 7.8.0 API.
+
+Required corrections:
+
+1. Audio guidance
+
+Replace the invalid import/type:
+
+NavigatorAudioGuidance
+
+with the real nested type/constants:
+
+Navigator.AudioGuidance
+
+Use the actual Navigator audio guidance method supported by SDK 7.8.0.
+
+2. Navigator initialization
+
+Use:
+
+NavigationApi.getNavigator(
+    activity,
+    object : NavigationApi.NavigatorListener {
+        override fun onNavigatorReady(navigator: Navigator) { ... }
+
+        override fun onError(
+            @NavigationApi.ErrorCode errorCode: Int
+        ) { ... }
+    }
+)
+
+Do not use addOnSuccessListener unless the exact SDK return type officially supports it.
+
+3. Listeners
+
+Use the exact SDK 7.8.0 listener methods:
+
+- addArrivalListener(...)
+- addRouteChangedListener(...)
+- addRemainingTimeOrDistanceChangedListener(...)
+
+Do not use:
+
+- addOnRouteChangedListener
+- addOnNavigationStepUpdatedListener
+
+4. Route and maneuver information
+
+There is no navigator.currentStep property in this SDK.
+
+Use the official route/segment/step information available from Navigator 7.8.0.
+
+If real next-maneuver data cannot be reliably obtained through the public SDK API currently used, do not invent an API.
+
+Instead:
+
+- map available official step or route data correctly, or
+- temporarily return ManeuverType.UNKNOWN
+- preserve distance, duration, rerouting, arrival and route state
+- document the limitation clearly
+
+5. Route setup
+
+Inspect the exact return type of Navigator.setDestination(...) in SDK 7.8.0.
+
+Handle it using its actual API.
+
+Do not assume it returns a Google Task unless verified by the SDK signature.
+
+6. ManeuverMapper
+
+Rewrite ManeuverMapper.kt against the actual maneuver type exposed by SDK 7.8.0.
+
+Do not reference enum constants or classes that do not exist.
+
+Unknown values must map safely to ManeuverType.UNKNOWN.
+
+7. Preserve architecture
+
+Do not change:
+
+- NavigationEngine interface unless required for compilation
+- NavigationState public fields
+- SafetyController thresholds
+- UI design
+- personality configuration
+- backend
+- Phase 3 stubs
+
+8. Cleanup
+
+Remove all invalid imports and obsolete listeners.
+
+Ensure every listener that is registered can also be removed during cleanup.
+
+9. Validation
+
+Do a static inspection against official Google Navigation SDK 7.8.0 documentation.
+
+At the end report:
+
+- every invalid API that was replaced
+- exact replacement API
+- files changed
+- any functionality temporarily mapped to UNKNOWN
+- commands to run in Android Studio
+
+Do not claim compilation passed because Replit cannot execute the Android build.

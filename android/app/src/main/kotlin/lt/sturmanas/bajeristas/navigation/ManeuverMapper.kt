@@ -7,9 +7,23 @@ import com.google.android.libraries.navigation.Maneuver
  * [ManeuverType] enum.
  *
  * Rules:
- *  - Every known SDK value must map to a named [ManeuverType].
+ *  - Every known SDK 7.8.0 value must map to a named [ManeuverType].
  *  - Any unknown or future SDK value must map to [ManeuverType.UNKNOWN] — never throw.
  *  - No business logic here; [SafetyController] decides what to do with the result.
+ *
+ * SDK 7.8.0 removals vs. original implementation:
+ *  - Maneuver.NAME_CHANGE         — does not exist in SDK 7.8.0; was in STRAIGHT group.
+ *  - Maneuver.ROUNDABOUT_U_TURN   — does not exist in SDK 7.8.0; was in ROUNDABOUT group.
+ *  - Maneuver.OFF_RAMP_UNSPECIFIED — does not exist in SDK 7.8.0; was in MOTORWAY_EXIT group.
+ *  - Maneuver.ON_RAMP_UNSPECIFIED  — does not exist in SDK 7.8.0; was in MERGE group.
+ *  - Maneuver.MERGE_UNSPECIFIED    — does not exist in SDK 7.8.0; was in MERGE group.
+ *  - Maneuver.FERRY_TRAIN          — does not exist in SDK 7.8.0; was in COMPLEX_JUNCTION group.
+ *  All of these are safely handled by the else → ManeuverType.UNKNOWN branch.
+ *
+ * Note: ManeuverMapper.fromSdk() is currently called with ManeuverType.UNKNOWN from
+ * GoogleNavigationEngine because navigator.currentStep does not exist in SDK 7.8.0.
+ * The mapper is retained for future use once the correct step-info API is confirmed,
+ * and for unit-test coverage of the mapping table itself.
  */
 object ManeuverMapper {
 
@@ -22,7 +36,6 @@ object ManeuverMapper {
 
         Maneuver.STRAIGHT,
         Maneuver.DEPART,
-        Maneuver.NAME_CHANGE,
         -> ManeuverType.STRAIGHT
 
         Maneuver.TURN_LEFT -> ManeuverType.TURN_LEFT
@@ -49,14 +62,12 @@ object ManeuverMapper {
         Maneuver.ROUNDABOUT_SHARP_RIGHT,
         Maneuver.ROUNDABOUT_SLIGHT_LEFT,
         Maneuver.ROUNDABOUT_SLIGHT_RIGHT,
-        Maneuver.ROUNDABOUT_U_TURN,
         -> ManeuverType.ROUNDABOUT
 
         Maneuver.OFF_RAMP_LEFT,
         Maneuver.OFF_RAMP_RIGHT,
         Maneuver.OFF_RAMP_SLIGHT_LEFT,
         Maneuver.OFF_RAMP_SLIGHT_RIGHT,
-        Maneuver.OFF_RAMP_UNSPECIFIED,
         -> ManeuverType.MOTORWAY_EXIT
 
         Maneuver.ON_RAMP_LEFT,
@@ -65,10 +76,8 @@ object ManeuverMapper {
         Maneuver.ON_RAMP_SLIGHT_RIGHT,
         Maneuver.ON_RAMP_SHARP_LEFT,
         Maneuver.ON_RAMP_SHARP_RIGHT,
-        Maneuver.ON_RAMP_UNSPECIFIED,
         Maneuver.MERGE_LEFT,
         Maneuver.MERGE_RIGHT,
-        Maneuver.MERGE_UNSPECIFIED,
         -> ManeuverType.MERGE
 
         Maneuver.FORK_LEFT,
@@ -81,7 +90,6 @@ object ManeuverMapper {
         -> ManeuverType.ARRIVE
 
         Maneuver.FERRY,
-        Maneuver.FERRY_TRAIN,
         -> ManeuverType.COMPLEX_JUNCTION
 
         else -> ManeuverType.UNKNOWN
