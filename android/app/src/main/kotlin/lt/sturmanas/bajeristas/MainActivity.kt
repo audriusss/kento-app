@@ -22,7 +22,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.launch
-import lt.sturmanas.bajeristas.voice.ConversationBuffer
 import lt.sturmanas.bajeristas.voice.askKentas
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
@@ -199,10 +198,6 @@ private fun SturmanasApp(
     var startScreenError by remember { mutableStateOf<String?>(null) }
 
     val coroutineScope = rememberCoroutineScope()
-    // Conversation history for the current drive. Holds the last 5 turns so Kentas
-    // understands follow-up questions and avoids repeating himself. Cleared on every
-    // new drive start and on navigation end — no persistence between drives.
-    val conversationBuffer = remember { ConversationBuffer() }
 
     // ── Voice recognition ─────────────────────────────────────────────────
     // speechLauncher — handles the result from the system RecognizerIntent dialog.
@@ -217,27 +212,16 @@ private fun SturmanasApp(
             if (!text.isNullOrBlank()) {
                 // Show the recognized phrase while the API call runs (typically 2–5 s).
                 // The driver can confirm what Kentas heard before the reply arrives.
-                aiStatusMessage = "„$text" — Kentas galvoja…"
-                // Snapshot history on the main thread before the coroutine starts.
-                // ConversationBuffer must only be accessed from the main thread; the
-                // snapshot is a plain List<> and is safe to read inside the coroutine.
-                val historySnapshot = conversationBuffer.messages
+                aiStatusMessage = "„$text“ — Kentas galvoja…"
                 coroutineScope.launch {
                     // sessionConfig and navState are Compose state — read fresh on the
                     // main thread at launch time, before dispatching to IO inside askKentas.
-                    val reply = askKentas(
+                    aiStatusMessage = askKentas(
                         userText = text,
                         config = sessionConfig,
                         navState = navState,
                         apiKey = BuildConfig.OPENAI_API_KEY,
-                        history = historySnapshot,
                     )
-                    aiStatusMessage = reply
-                    // Record genuine replies only — skip error strings so the model never
-                    // sees a network failure as valid conversational history.
-                    if (!reply.startsWith("OpenAI") && !reply.startsWith("Tinklo klaida")) {
-                        conversationBuffer.addTurn(driverText = text, kentasReply = reply)
-                    }
                 }
             } else {
                 // Recognizer returned OK but an empty transcript (mumble, background noise,
@@ -288,7 +272,6 @@ private fun SturmanasApp(
                     startScreenError = null
                     aiStatusMessage = ""
                     sessionConfig = config
-                    conversationBuffer.clear() // fresh history for each new drive
 
                     if (!engineReady) {
                         startScreenError = engineError ?: "Navigacija neparuošta. Palaukite…"
@@ -352,7 +335,6 @@ private fun SturmanasApp(
                     isMuted = false
                     aiStatusMessage = ""
                     startScreenError = null
-                    conversationBuffer.clear() // discard history when the drive ends
                 },
             )
         }
