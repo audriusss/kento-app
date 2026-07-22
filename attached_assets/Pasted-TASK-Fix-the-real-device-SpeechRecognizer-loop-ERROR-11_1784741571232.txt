@@ -1,0 +1,500 @@
+TASK: Fix the real-device SpeechRecognizer loop. ERROR 11, stuck listening UI, silent failures, and missed commands must be eliminated before any new feature work.
+
+REAL DEVICE SYMPTOMS
+
+Confirmed on a Xiaomi phone:
+
+- Voice destination resolution now works.
+- The route starts successfully.
+- Continuous mode appears active.
+- UI shows:
+  - "Pokalbis leidžiamas"
+  - "Kentas klauso..."
+- But after the first successful command:
+  - Kentas sometimes stops reacting.
+  - The UI may still say that it is listening even though recognition is dead.
+  - Sometimes the UI shows:
+    "Balso atpažinimo klaida (kodas: 11)"
+  - Kentas does not speak any recovery message.
+  - The recognizer may not recover automatically.
+  - The user has to interact manually again.
+
+This is a real-device failure, not a theoretical edge case.
+
+PRIORITY
+
+Do not add new features.
+Do not expand waypoint work.
+Do not redesign the app.
+Do not change Google Navigator lifecycle.
+Do not push automatically.
+
+Fix only the voice recognition session lifecycle and recovery until it is stable.
+
+ROOT GOAL
+
+After the user presses the microphone once:
+
+1. Kentas listens.
+2. User speaks.
+3. Kentas processes the command.
+4. Kentas responds.
+5. After TTS finishes, listening restarts exactly once.
+6. This loop continues reliably.
+7. Any recognizer error recovers predictably.
+8. UI must never claim "Kentas klauso..." unless SpeechRecognizer is genuinely in an active listening session.
+
+PHASE 1 — TRACE THE COMPLETE REAL SESSION LIFECYCLE
+
+Inspect all current code related to:
+
+- SpeechRecognizer creation
+- startListening()
+- stopListening()
+- cancel()
+- destroy()
+- recognizer callbacks
+- TTS completion
+- retry jobs
+- delayed restarts
+- lifecycle callbacks
+- Compose UI session state
+- MainViewModel
+- VoiceSessionController
+- SpeechRecognitionManager
+- TtsManager
+
+Create detailed logging with tag:
+
+KentasSpeechLifecycle
+
+Log every event with:
+
+- timestamp
+- session generation ID
+- recognizer instance ID
+- current voice state
+- continuous mode active true/false
+- isListening true/false
+- isSpeaking true/false
+- retry count
+- pending restart job true/false
+
+Log each call:
+
+- createRecognizer
+- startListening requested
+- startListening accepted
+- startListening rejected
+- stopListening
+- cancel
+- destroy
+- scheduleRestart
+- cancelRestart
+- TTS speak
+- TTS onStart
+- TTS onDone
+- TTS onError
+
+Log each recognizer callback:
+
+- onReadyForSpeech
+- onBeginningOfSpeech
+- onRmsChanged only if rate-limited
+- onEndOfSpeech
+- onPartialResults
+- onResults
+- onError
+- onEvent
+
+Never log API keys or tokens.
+
+PHASE 2 — SINGLE RECOGNIZER SESSION GUARANTEE
+
+Ensure there is only one active recognition session at a time.
+
+Implement a generation/session token.
+
+Example:
+
+private var recognizerGeneration: Long = 0
+private var activeSessionGeneration: Long? = null
+
+Every new start gets a generation ID.
+
+Ignore stale callbacks from an older generation.
+
+Before startListening():
+
+- verify continuous mode is active
+- verify app is foreground
+- verify microphone permission exists
+- verify TTS is not speaking
+- verify no recognition session is active
+- verify no restart is already pending
+- verify recognizer instance exists and is healthy
+
+Do not call startListening() twice for the same generation.
+
+Do not allow overlapping recognizer sessions.
+
+PHASE 3 — CORRECT INTERNAL STATE MODEL
+
+Do not use UI state as proof that recognition is active.
+
+Separate these concepts:
+
+- continuousModeEnabled
+- recognizerSessionActive
+- recognizerReadyForSpeech
+- userCurrentlySpeaking
+- processingCommand
+- ttsSpeaking
+- restartPending
+- recognizerHealthy
+
+Use one authoritative state model.
+
+Suggested states:
+
+Idle
+Starting
+ListeningReady
+UserSpeaking
+WaitingForResult
+Processing
+Speaking
+RestartPending
+Recovering
+PermissionError
+FatalError
+
+Transitions must be explicit.
+
+Important:
+
+The UI text "Kentas klauso..." may only be shown after onReadyForSpeech.
+
+While startListening() has been requested but onReadyForSpeech has not arrived, show:
+
+"Įjungiamas klausymas..."
+
+If onError occurs, leave Listening state immediately.
+
+Never keep UI in Listening after an error callback.
+
+PHASE 4 — ERROR 11 HANDLING
+
+Do not hard-code assumptions without checking Android constants and current platform behavior.
+
+Map the received error code to the actual SpeechRecognizer constant used by the compiled Android SDK.
+
+Log both:
+
+- numeric code
+- symbolic name
+
+For every error code, define explicit behavior.
+
+At minimum handle:
+
+ERROR_AUDIO
+ERROR_CLIENT
+ERROR_INSUFFICIENT_PERMISSIONS
+ERROR_NETWORK
+ERROR_NETWORK_TIMEOUT
+ERROR_NO_MATCH
+ERROR_RECOGNIZER_BUSY
+ERROR_SERVER
+ERROR_SPEECH_TIMEOUT
+ERROR_TOO_MANY_REQUESTS
+ERROR_SERVER_DISCONNECTED
+ERROR_LANGUAGE_NOT_SUPPORTED
+ERROR_LANGUAGE_UNAVAILABLE
+and any code 11 present in the project SDK.
+
+For code 11 specifically:
+
+- immediately mark the current session inactive
+- cancel any pending callbacks/restarts
+- cancel the recognizer safely
+- destroy and recreate the SpeechRecognizer instance if the error indicates a broken session
+- use a bounded backoff
+- restart only if continuous mode remains enabled
+- never leave the UI in Listening
+- never silently stop forever
+
+Recovery sequence:
+
+Error
+→ session inactive
+→ Recovering
+→ cancel
+→ destroy old recognizer if required
+→ recreate recognizer
+→ wait bounded delay
+→ Starting
+→ ListeningReady after onReadyForSpeech
+
+PHASE 5 — BOUNDED RETRY AND BACKOFF
+
+Prevent rapid infinite retry loops.
+
+Suggested retry policy:
+
+- NO_MATCH: 500 ms
+- SPEECH_TIMEOUT: 500 ms
+- RECOGNIZER_BUSY: 800 ms and recreate after repeated occurrence
+- CLIENT: recreate recognizer and retry after 1000 ms
+- SERVER_DISCONNECTED / code 11 if applicable: recreate and retry after 1200 ms
+- NETWORK: 1500–3000 ms
+- TOO_MANY_REQUESTS: longer cooldown, e.g. 5000 ms
+
+Maximum automatic consecutive recovery attempts:
+
+3
+
+After 3 consecutive hard failures:
+
+- stop automatic retry temporarily
+- keep continuous mode visibly enabled only if a manual retry button or toggle can recover
+- show:
+  "Balso atpažinimas laikinai neveikia. Paliesk mikrofoną, kad bandytum dar kartą."
+- do not show "Kentas klauso..."
+
+Reset retry count after a successful onResults or stable onReadyForSpeech session.
+
+PHASE 6 — TTS AND RECOGNIZER COORDINATION
+
+The recognizer must never listen while Kentas is speaking.
+
+Requirements:
+
+- set TTS speaking state synchronously before calling tts.speak()
+- onStart confirms speaking
+- onDone clears speaking
+- onError clears speaking
+- recognizer restart occurs only after onDone/onError
+- add a short post-TTS delay, e.g. 500 ms
+- cancel all older restart jobs before scheduling a new one
+
+Critical rule:
+
+There must be only one restart path.
+
+Do not restart from multiple places such as:
+
+- command handler exit
+- TTS onDone
+- recognizer onResults
+- ViewModel coroutine completion
+
+Choose one central coordinator.
+
+If a command does not produce TTS:
+
+- explicitly notify the coordinator that processing finished
+- schedule one restart
+
+If a command produces TTS:
+
+- TTS onDone is the only restart trigger
+
+PHASE 7 — REMOVE RACE CONDITIONS
+
+Audit for these race conditions:
+
+1. startListening called before old onError finishes
+2. old onResults arrives after a new session starts
+3. delayed restart job runs after the microphone was toggled off
+4. TTS onDone from an old utterance restarts a new disabled session
+5. lifecycle background event races with retry job
+6. recognizer recreated while old callbacks still arrive
+7. Compose recomposition creates duplicate callbacks
+8. SpeechRecognizerManager and VoiceSessionController both independently restart listening
+9. onResults and onError both trigger recovery for the same session
+10. command processing finishes twice
+
+Use generation IDs or atomic guards to make stale callbacks harmless.
+
+PHASE 8 — UI CORRECTION
+
+Current UI is misleading because it can show:
+
+"Pokalbis leidžiamas"
+"Kentas klauso..."
+
+while the recognizer is dead.
+
+Fix UI mapping.
+
+Examples:
+
+continuous mode enabled, starting:
+- "Pokalbis leidžiamas"
+- "Įjungiamas klausymas..."
+
+ready:
+- "Pokalbis leidžiamas"
+- "Kentas klauso..."
+
+processing:
+- "Pokalbis leidžiamas"
+- "Kentas galvoja..."
+
+speaking:
+- "Pokalbis leidžiamas"
+- "Kentas kalba..."
+
+recovering:
+- "Pokalbis leidžiamas"
+- "Atkuriamas balso atpažinimas..."
+
+temporary error:
+- "Pokalbis pristabdytas"
+- actionable error message
+
+disabled:
+- "Pokalbis išjungtas"
+
+Do not display raw code only.
+
+Instead of:
+
+"Balso atpažinimo klaida (kodas: 11)"
+
+show a user-friendly message such as:
+
+"Balso atpažinimas nutrūko. Bandau atkurti..."
+
+Keep the numeric code in logs and optionally a debug-only text.
+
+PHASE 9 — USER FEEDBACK ON ERRORS
+
+Do not make Kentas speak on every harmless timeout.
+
+Rules:
+
+NO_MATCH / SPEECH_TIMEOUT:
+- silent automatic retry
+- no TTS
+
+Recoverable recognizer reset:
+- UI message only:
+  "Atkuriamas balso atpažinimas..."
+
+Repeated hard failure:
+- one concise TTS message:
+  "Balso atpažinimas laikinai neveikia."
+
+Permission error:
+- TTS if possible:
+  "Reikia mikrofono leidimo."
+- show actionable UI
+
+Avoid TTS loops where the error message itself causes another recognizer failure.
+
+PHASE 10 — LIFECYCLE SAFETY
+
+On app background:
+
+- cancel active listening
+- cancel pending restart
+- mark session inactive
+- keep or disable continuous mode according to current intended UX
+- do not restart in background
+
+On foreground:
+
+- do not restart until lifecycle is fully resumed
+- if continuous mode was intentionally kept enabled, restart once
+- otherwise remain idle
+
+Do not destroy Google Navigator.
+
+Do not create duplicate SpeechRecognizer instances on recomposition.
+
+SpeechRecognizer creation and destruction must occur on the main thread.
+
+PHASE 11 — TESTS
+
+Add meaningful tests for the coordinator/state machine.
+
+Required tests:
+
+1. microphone toggle enables Starting
+2. onReadyForSpeech changes Starting → ListeningReady
+3. onResults ends active recognizer session
+4. processing with TTS waits for TTS onDone
+5. processing without TTS schedules exactly one restart
+6. TTS onDone schedules exactly one restart
+7. stale TTS onDone does not restart a disabled session
+8. onError immediately exits Listening state
+9. error code 11 moves to Recovering
+10. code 11 destroys/recreates recognizer when required
+11. retry uses bounded backoff
+12. fourth hard failure does not loop forever
+13. NO_MATCH retries silently
+14. SPEECH_TIMEOUT retries silently
+15. RECOGNIZER_BUSY does not start overlapping sessions
+16. duplicate startListening request is ignored
+17. stale callback generation is ignored
+18. toggle off cancels pending restart
+19. lifecycle background cancels restart
+20. foreground resumes at most once
+21. UI cannot display "Kentas klauso..." before onReadyForSpeech
+22. UI cannot display "Kentas klauso..." after onError
+23. recognizer and TTS are never active simultaneously
+24. successful result resets retry counter
+25. no duplicate recognizer creation
+26. no duplicate restart job
+27. command that speaks restarts only through TTS callback
+28. silent command restarts through coordinator
+29. permission failure disables listening
+30. user-friendly error is produced for repeated failures
+
+Do not write fake tests that only assert constants.
+
+PHASE 12 — BUILD VERIFICATION
+
+Inspect repository structure first.
+
+Run from the directory containing gradlew.
+
+Example:
+
+cd android
+./gradlew :app:compileDebugKotlin
+./gradlew :app:testDebugUnitTest
+
+If gradlew is missing:
+
+- do not create an untracked random wrapper just to claim success
+- do not claim Android build success
+- report exactly what could not be verified
+
+Run a static smart-quote scan on every modified Kotlin file.
+
+DO NOT PUSH AUTOMATICALLY.
+
+Commit locally only after the implementation is complete.
+
+FINAL REPORT
+
+Provide:
+
+1. Exact identified root cause
+2. Meaning of error code 11 in the actual SDK/project
+3. Old broken lifecycle
+4. New lifecycle
+5. Single restart coordinator description
+6. Recognizer recreation policy
+7. Files added
+8. Files modified
+9. Tests added and exact count
+10. Compile result
+11. Unit test result
+12. Real-device test checklist
+13. Known limitations
+14. Local commit hash
+15. Confirmation that nothing was pushed
