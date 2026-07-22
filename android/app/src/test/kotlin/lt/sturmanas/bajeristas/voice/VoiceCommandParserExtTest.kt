@@ -142,6 +142,30 @@ class VoiceCommandParserExtTest {
         assertEquals(1, (cmd as VoiceCommand.SelectCandidate).index)
     }
 
+    @Test fun `antras no-diacritic returns SelectCandidate index 2`() {
+        val cmd = VoiceCommandParser.parse("antras")
+        assertTrue(cmd is VoiceCommand.SelectCandidate)
+        assertEquals(2, (cmd as VoiceCommand.SelectCandidate).index)
+    }
+
+    @Test fun `du returns SelectCandidate index 2`() {
+        val cmd = VoiceCommandParser.parse("du")
+        assertTrue(cmd is VoiceCommand.SelectCandidate)
+        assertEquals(2, (cmd as VoiceCommand.SelectCandidate).index)
+    }
+
+    @Test fun `trys returns SelectCandidate index 3`() {
+        val cmd = VoiceCommandParser.parse("trys")
+        assertTrue(cmd is VoiceCommand.SelectCandidate)
+        assertEquals(3, (cmd as VoiceCommand.SelectCandidate).index)
+    }
+
+    @Test fun `vieną returns SelectCandidate index 1`() {
+        val cmd = VoiceCommandParser.parse("vieną")
+        assertTrue(cmd is VoiceCommand.SelectCandidate)
+        assertEquals(1, (cmd as VoiceCommand.SelectCandidate).index)
+    }
+
     // ── Regression: "kiek liko" must NOT become StartNavigation ──────────
 
     @Test fun `kiek liko returns RemainingDistance not StartNavigation`() {
