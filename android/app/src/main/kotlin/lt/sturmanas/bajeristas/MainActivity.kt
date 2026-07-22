@@ -95,6 +95,11 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         Log.d(FLOW_TAG, "onCreate")
 
+        // Wire VoiceSessionController → ViewModel so existing stop call sites
+        // (onDestroy, StopNavigation, onEnableStandardVoice) still stop the
+        // continuous SR session loop.
+        voiceSessionController.setStopCallback { viewModel.stopContinuousSession() }
+
         if (LocationPermissionHelper.hasLocationPermission(this)) {
             permissionState.value = PermissionState.Granted
             initializeNavigation()
@@ -185,6 +190,9 @@ private fun SturmanasApp(
     // Waypoint state from ViewModel
     val stopovers            by viewModel.stopovers.collectAsStateWithLifecycle()
     val finalDestinationName by viewModel.finalDestinationName.collectAsStateWithLifecycle()
+
+    // Session loop state
+    val continuousSessionActive by viewModel.continuousSessionActive.collectAsStateWithLifecycle()
 
     // Voice status takes priority over generic AI status message in the display.
     val effectiveStatus = voiceStatusText.ifBlank { aiStatusMessage }
@@ -354,6 +362,7 @@ private fun SturmanasApp(
                 engineReady         = engineReady,
                 voiceListeningState = voiceListeningState,
                 voiceStatusText     = voiceStatusText,
+                sessionActive       = continuousSessionActive,
                 onMicPress          = { onMicPress() },
                 onOpenSettings      = { showSettings = true },
                 onStartNavigation   = { destination, config ->
@@ -388,6 +397,7 @@ private fun SturmanasApp(
                 aiStatusMessage      = effectiveStatus,
                 isMuted              = isMuted,
                 voiceListeningState  = voiceListeningState,
+                sessionActive        = continuousSessionActive,
                 stopovers            = stopovers,
                 finalDestinationName = finalDestinationName,
                 onRemoveStopover     = { index -> viewModel.removeStopoverAt(index, isMuted) },

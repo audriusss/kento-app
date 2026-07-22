@@ -21,22 +21,22 @@ class VoiceSessionStateTest {
 
     @Test
     fun `Listening statusText is correct`() {
-        assertEquals("Klausau\u2026", VoiceSessionState.Listening.statusText)
+        assertEquals("Klausau…", VoiceSessionState.Listening.statusText)
     }
 
     @Test
     fun `Processing statusText is correct`() {
-        assertEquals("Atpa\u017Eim\u0173\u2026", VoiceSessionState.Processing.statusText)
+        assertEquals("Atpažįstu…", VoiceSessionState.Processing.statusText)
     }
 
     @Test
     fun `Speaking statusText is correct`() {
-        assertEquals("Kentas kalba\u2026", VoiceSessionState.Speaking.statusText)
+        assertEquals("Kentas kalba…", VoiceSessionState.Speaking.statusText)
     }
 
     @Test
     fun `RestartDelay statusText is correct`() {
-        assertEquals("Laukiu komandos\u2026", VoiceSessionState.RestartDelay.statusText)
+        assertEquals("Laukiu komandos…", VoiceSessionState.RestartDelay.statusText)
     }
 
     @Test

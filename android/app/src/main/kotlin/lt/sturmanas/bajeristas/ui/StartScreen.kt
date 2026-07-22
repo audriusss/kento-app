@@ -55,6 +55,8 @@ fun StartScreen(
     voiceListeningState: VoiceListeningState = VoiceListeningState.IDLE,
     /** Status text shown below the mic button ("Kentas klauso…", "Išgirdau: …", etc.). */
     voiceStatusText: String = "",
+    /** True when the continuous hands-free session loop is active; shows the ring indicator. */
+    sessionActive: Boolean = false,
     /** Called when the user taps the mic button. Caller must check RECORD_AUDIO permission. */
     onMicPress: () -> Unit = {},
     /** Called when the user taps the gear icon to open Settings. */
@@ -136,6 +138,7 @@ fun StartScreen(
                     state = voiceListeningState,
                     statusText = "",
                     enabled = true,
+                    sessionActive = sessionActive,
                     onClick = {
                         keyboard?.hide()
                         onMicPress()

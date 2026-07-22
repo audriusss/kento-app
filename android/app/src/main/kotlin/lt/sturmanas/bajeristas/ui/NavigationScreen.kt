@@ -57,6 +57,8 @@ fun NavigationScreen(
     isMuted: Boolean,
     /** Current speech-recognition state; drives the mic button appearance. */
     voiceListeningState: VoiceListeningState = VoiceListeningState.IDLE,
+    /** True when the continuous hands-free session loop is active; shows the ring indicator. */
+    sessionActive: Boolean = false,
     /** Intermediate stops to show in the route card. Empty = no card rendered. */
     stopovers: List<StopoverEntry> = emptyList(),
     /** Final destination display name. Used in the route card header. */
@@ -328,6 +330,7 @@ fun NavigationScreen(
                     state = if (micEnabled) voiceListeningState else VoiceListeningState.IDLE,
                     statusText = "",   // status shown separately in the aiStatusMessage row above
                     enabled = micEnabled,
+                    sessionActive = sessionActive,
                     onClick = onMicPress,
                     size = 80.dp,
                 )
