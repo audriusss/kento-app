@@ -1,0 +1,70 @@
+Do not push yet.
+
+The task was marked complete without validation. Perform a full verification and correction pass now.
+
+1. Run:
+   git status
+   git diff --stat
+   git diff --name-only
+
+2. Confirm these files were NOT modified:
+   - GoogleNavigationEngine.kt
+   - NavigationController.kt
+   - any Navigator lifecycle code
+
+3. Inspect every newly added and modified Kotlin file for:
+   - missing imports
+   - malformed string literals
+   - unresolved references
+   - wrong Compose state ownership
+   - wrong SharedPreferences context usage
+   - sealed class exhaustiveness errors
+   - test-only dependencies leaking into production
+   - android.util.Log usage in JVM unit tests
+
+4. Check the implementation behavior carefully:
+
+   - "Taikos 61" must resolve using current locality.
+   - Full addresses must remain unchanged.
+   - "Akropolis" must become a place query, not a fake street address.
+   - "artimiausia degalinė" must become a nearby category query.
+   - Existing commands such as "kiek liko" must never be parsed as destinations.
+   - "pirmą", "antrą", "trečią" must only select a candidate when a pending candidate list exists.
+   - "namo" and "į darbą" must fail gracefully when no saved address exists.
+   - Navigation must still use the existing startNavigation flow.
+
+5. Verify that SettingsScreen is actually reachable from StartScreen and that saving home/work addresses persists and reloads correctly.
+
+6. Verify clarification state:
+   - maximum 3 candidates
+   - candidate selection clears pending state
+   - cancel clears pending state
+   - stale candidates cannot be selected later
+   - a normal voice command still works while no clarification is pending
+
+7. Run actual Gradle validation if possible:
+   ./gradlew :app:testDebugUnitTest
+   ./gradlew :app:compileDebugKotlin
+
+If the wrapper is still unavailable, do not claim build success. Instead:
+   - report that local Android Studio build is required
+   - provide the exact files most likely to fail compilation
+   - provide exact local commands or Android Studio actions
+
+8. Run or inspect all tests and report:
+   - exact test count
+   - exact passed/failed count
+   - any tests that were written but not executed
+
+9. Do not mark the task complete again until this verification pass is finished.
+
+10. Do not commit or push.
+
+Final report must include:
+   - files added
+   - files changed
+   - files confirmed untouched
+   - exact validation performed
+   - actual Gradle result, or clearly state it was not run
+   - known risks
+   - git status
