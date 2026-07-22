@@ -1,0 +1,94 @@
+FIX THE CURRENT KOTLIN COMPILE ERRORS ONLY.
+
+Do not refactor anything else.
+Do not add features.
+Do not change voice architecture.
+Do not push automatically.
+
+Confirmed Android Studio compiler errors:
+
+MainViewModel.kt line 311:
+Unresolved label
+
+Current code contains:
+
+return@onRecoverableError
+
+Fix this correctly by either:
+
+1. giving the assigned lambda an explicit label, for example:
+
+speechRecognitionManager.onRecoverableError = recoverableError@ { errorCode ->
+    ...
+    return@recoverableError
+}
+
+or
+
+2. restructuring the branch so no labeled return is needed.
+
+Do not use return@onRecoverableError because that is not a valid lambda label here.
+
+VoiceSessionState.kt errors:
+
+line 96:
+'when' expression must be exhaustive. Add the 'Listening' branch or an 'else' branch.
+
+line 107:
+Syntax error: Expecting an element.
+Unresolved reference 'Listening'.
+Syntax error: Expecting an element.
+
+Inspect VoiceSessionState.kt around lines 85–110.
+
+The state model was changed to include:
+
+Idle
+Starting
+ListeningReady
+UserSpeaking
+Processing
+Speaking
+RestartDelay or RestartPending
+Recovering
+Error states as currently defined
+
+Remove or replace any stale reference to:
+
+VoiceSessionState.Listening
+
+Use the actual current state:
+
+VoiceSessionState.ListeningReady
+
+Ensure every `when` over VoiceSessionState is exhaustive.
+
+Prefer explicit branches for all states rather than hiding missing states behind `else`, unless the `when` is intentionally non-exhaustive.
+
+Also inspect the syntax around line 107 for:
+- duplicate branch
+- missing comma
+- missing arrow
+- stray enum entry
+- malformed line break
+
+After fixing, run:
+
+cd android
+./gradlew :app:compileDebugKotlin
+
+If gradlew is unavailable in Replit, do not claim compile success.
+
+Perform a static scan for:
+- return@onRecoverableError
+- VoiceSessionState.Listening
+- malformed smart quotes in Kotlin strings
+
+Commit locally only.
+
+Final report:
+- exact lines fixed
+- resulting state list
+- compile result
+- local commit hash
+- confirm nothing was pushed
