@@ -1,0 +1,247 @@
+TASK: Add intelligent waypoint management and dynamic route modification by voice.
+
+CURRENT VERIFIED STATE
+
+The app already has:
+
+- Stable Google Navigation SDK integration
+- Working Navigator lifecycle
+- Voice recognition (Lithuanian)
+- Voice destination search
+- DestinationResolver
+- Nearby place search
+- Current-location-aware searches
+- TTS
+- AI chat
+- Voice commands
+- Working navigation on a real Xiaomi phone
+
+DO NOT BREAK
+
+- GoogleNavigationEngine
+- current route guidance
+- voice recognition
+- destination resolver
+- navigation lifecycle
+
+GOAL
+
+Allow Kentas to modify the current route while navigation is already active.
+
+Examples:
+
+"Pakeliui užvažiuok į Lidl."
+
+"Pridėk degalinę."
+
+"Po degalinės važiuojam į Akropolį."
+
+"Išmesk paskutinį sustojimą."
+
+"Rodyk sustojimus."
+
+"Tęsk maršrutą."
+
+"Atšauk paskutinį sustojimą."
+
+------------------------------------------------
+
+IMPLEMENTATION
+
+Create:
+
+navigation/WaypointManager.kt
+
+Responsibilities
+
+- maintain ordered waypoint list
+- current destination
+- optional stopovers
+- remove stop
+- reorder stop
+- clear stopovers
+- expose immutable StateFlow
+
+Do not duplicate NavigationController state.
+
+------------------------------------------------
+
+Voice parser
+
+Add commands:
+
+AddWaypoint(place)
+
+RemoveLastWaypoint
+
+ClearWaypoints
+
+ListWaypoints
+
+ContinueRoute
+
+Examples
+
+"pakeliui užvažiuok į"
+
+"pridėk"
+
+"užsuk į"
+
+"dar važiuojam į"
+
+"po to važiuojam į"
+
+"išmesk paskutinį"
+
+"pašalink paskutinį"
+
+"rodyk sustojimus"
+
+"tęsk maršrutą"
+
+------------------------------------------------
+
+Navigation
+
+Reuse existing DestinationResolver.
+
+Resolve destination.
+
+Insert waypoint.
+
+Recalculate route.
+
+Never destroy Navigator.
+
+------------------------------------------------
+
+If recalculation fails
+
+Keep original route.
+
+Speak:
+
+"Nepavyko pridėti sustojimo. Tęsiame dabartinį maršrutą."
+
+------------------------------------------------
+
+UI
+
+Show route card:
+
+Destination
+
+Stop 1
+
+Stop 2
+
+Stop 3
+
+Current ETA
+
+Remaining distance
+
+Allow removing stop with X button.
+
+------------------------------------------------
+
+TTS
+
+Examples
+
+"Pridėjau Lidl kaip tarpinį sustojimą."
+
+"Liko du sustojimai."
+
+"Pašalinau paskutinį sustojimą."
+
+"Maršrutas perskaičiuotas."
+
+------------------------------------------------
+
+Voice
+
+Examples
+
+"Pakeliui užvažiuok į Lidl."
+
+"Pridėk degalinę."
+
+"Po to važiuojam į Akropolį."
+
+"Išmesk paskutinį sustojimą."
+
+"Tęsk maršrutą."
+
+------------------------------------------------
+
+Logging
+
+KentasWaypoint
+
+Log
+
+current route
+
+waypoint added
+
+waypoint removed
+
+recalculation
+
+failure reason
+
+------------------------------------------------
+
+Tests
+
+Minimum
+
+50 JVM tests
+
+Add waypoint
+
+Remove waypoint
+
+Multiple waypoint ordering
+
+Duplicate waypoint
+
+Nearby place waypoint
+
+Voice parser
+
+Failure recovery
+
+------------------------------------------------
+
+Build
+
+Run
+
+./gradlew :app:compileDebugKotlin
+
+./gradlew :app:testDebugUnitTest
+
+Do not claim build success without actual verification.
+
+Do not push automatically.
+
+FINAL REPORT
+
+Files added
+
+Files modified
+
+Architecture
+
+Voice commands
+
+Route recalculation flow
+
+Test count
+
+Build result
+
+Known limitations

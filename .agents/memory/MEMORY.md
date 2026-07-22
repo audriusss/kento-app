@@ -1,2 +1,3 @@
 - [NavigationEngine lifecycle split](nav-engine-lifecycle.md) — onViewDestroy() vs onDestroy() must never be confused; the split is the fix for the permanent "navigator null" failure after address search errors.
 - [Address resolution strategy](address-resolution.md) — multi-attempt Geocoder + Google Geocoding API HTTP fallback required for Xiaomi/MIUI devices; startGuidance() must be called in RouteChangedListener, never in setDestination().
+- [Waypoint voice command ordering](waypoint-command-ordering.md) — AddWaypoint and waypoint management patterns must be checked before NAV_PREFIX_REGEX and STOP_PATTERNS in VoiceCommandParser.parse().
