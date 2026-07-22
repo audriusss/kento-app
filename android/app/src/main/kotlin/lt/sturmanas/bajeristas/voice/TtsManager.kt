@@ -91,6 +91,10 @@ class TtsManager(context: Context) {
         if (!isReady || !settings.isEnabled) return
         val cleaned = text.trim()
         if (cleaned.isBlank()) return
+        // Set synchronously so callers (e.g. scheduleRestartIfSessionActive) can
+        // check isSpeaking immediately after speak() returns, before onStart fires.
+        // onStart will set it again (no-op); onDone/onError reset it to false.
+        isSpeaking = true
         tts?.speak(cleaned, TextToSpeech.QUEUE_FLUSH, null, UTTERANCE_ID)
     }
 

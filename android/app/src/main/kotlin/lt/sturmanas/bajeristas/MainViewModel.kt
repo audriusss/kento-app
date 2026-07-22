@@ -375,13 +375,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _sessionState.value = VoiceSessionState.RestartDelay
         viewModelScope.launch {
             delay(delayMs)
-            if (_continuousSessionActive.value) {
-                Log.d(TAG, "scheduleSessionRestart: starting SR")
-                sessionRetryCount = 0
-                _sessionState.value = VoiceSessionState.Listening
-                ttsManager.stop()
-                speechRecognitionManager.startListening()
+            if (!_continuousSessionActive.value) return@launch
+            // Safety guard: if TTS started speaking during the delay window (e.g.
+            // another command was processed), do NOT interrupt it. onDone will
+            // call scheduleSessionRestart again when the utterance finishes.
+            if (ttsManager.isSpeaking) {
+                Log.d(TAG, "scheduleSessionRestart: TTS still speaking after delay — deferring to onDone")
+                return@launch
             }
+            Log.d(TAG, "scheduleSessionRestart: starting SR")
+            sessionRetryCount = 0
+            _sessionState.value = VoiceSessionState.Listening
+            ttsManager.stop()
+            speechRecognitionManager.startListening()
         }
     }
 
@@ -455,6 +461,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 viewModelScope.launch {
                     delay(150)
                     speakAndIdle("Balsas įjungtas.", isMuted = false)
+                    // onDone handles restart when TTS succeeds.
+                    // If TTS is disabled or fails, restart manually (isSpeaking=false).
+                    scheduleRestartIfSessionActive()
                 }
                 return
             }
