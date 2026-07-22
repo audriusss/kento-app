@@ -159,6 +159,14 @@ class DestinationResolverTest {
     @Test fun `Maxima returns PlaceSearch`() = runBlocking {
         val result = resolve("Maxima")
         assertTrue(result is DestinationResolution.PlaceSearch)
+        // Unbiased fallback: no locality, no coords → bare brand name
+        assertEquals("Maxima", (result as DestinationResolution.PlaceSearch).query)
+    }
+
+    @Test fun `brand keyword with lat and lng but no locality appends near coords`() = runBlocking {
+        val result = resolve("Maxima", lat = 55.71, lng = 21.13)
+        assertTrue(result is DestinationResolution.PlaceSearch)
+        assertEquals("Maxima near 55.71,21.13", (result as DestinationResolution.PlaceSearch).query)
     }
 
     @Test fun `Lidl returns PlaceSearch`() = runBlocking {
