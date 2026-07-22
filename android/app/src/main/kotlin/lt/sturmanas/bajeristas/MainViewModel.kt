@@ -9,8 +9,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import lt.sturmanas.bajeristas.navigation.CandidatePlace
+import lt.sturmanas.bajeristas.navigation.DestinationResolution
+import lt.sturmanas.bajeristas.navigation.DestinationResolver
 import lt.sturmanas.bajeristas.navigation.NavigationState
 import lt.sturmanas.bajeristas.personality.SessionConfig
+import lt.sturmanas.bajeristas.voice.ClarificationState
+import lt.sturmanas.bajeristas.voice.SavedPlacesRepository
 import lt.sturmanas.bajeristas.voice.SpeechRecognitionManager
 import lt.sturmanas.bajeristas.voice.TtsManager
 import lt.sturmanas.bajeristas.voice.VoiceCommand
@@ -22,31 +27,33 @@ import lt.sturmanas.bajeristas.voice.askKentas
 /**
  * Single ViewModel for the entire app — survives screen rotation.
  *
- * Owns all audio-output ([TtsManager]) and audio-input ([SpeechRecognitionManager])
- * resources that must not be destroyed and recreated on configuration changes.
+ * Owns all audio-output ([TtsManager]), audio-input ([SpeechRecognitionManager]),
+ * and the destination resolver ([DestinationResolver] + [SavedPlacesRepository])
+ * that must not be destroyed and recreated on configuration changes.
  *
  * ## Voice command flow
  *
  * 1. User presses mic → composable calls [onMicPressed] (after RECORD_AUDIO check).
- * 2. [SpeechRecognitionManager] recognizes speech and calls back into this VM.
- * 3. VM stores result in [pendingRecognizedText].
- * 4. [SturmanasApp] LaunchedEffect observes [pendingRecognizedText] and calls
- *    [executeVoiceCommand], passing the current [NavigationState] and [SessionConfig].
- * 5. Non-navigation commands (distance, time, destination, repeat, general question)
+ * 2. [SpeechRecognitionManager] recognizes speech → [pendingRecognizedText] becomes non-null.
+ * 3. [SturmanasApp] LaunchedEffect calls [executeVoiceCommand] with current nav state.
+ * 4. Non-navigation commands (distance, time, destination, repeat, general question)
  *    are handled entirely here — no composable involvement.
- * 6. Navigation-level actions (start/stop nav, mute/unmute) are emitted via
+ * 5. Navigation-level actions (start/stop nav, mute/unmute) are emitted via
  *    [pendingNavAction] and consumed by [SturmanasApp] through a second LaunchedEffect.
+ * 6. For voice-triggered StartNavigation, [DestinationResolver] is called to normalise
+ *    the raw destination text before forwarding to the navigation engine.
  *
  * ## TTS / microphone coordination
  *
  * [onMicPressed] stops TTS before starting the recognizer, preventing Kentas's own
- * voice from being transcribed.  While [voiceListeningState] is LISTENING, the
+ * voice from being transcribed. While [voiceListeningState] is LISTENING, the
  * composable disables outgoing TTS announcements via the [isSpeechBlocked] flag.
  */
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
-        private const val TAG = "KentasVoice"
+        private const val TAG      = "KentasVoice"
+        private const val DEST_TAG = "KentasDestination"
     }
 
     // ── Audio output ──────────────────────────────────────────────────────
@@ -58,6 +65,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val speechRecognitionManager = SpeechRecognitionManager(application)
 
+    // ── Saved places ──────────────────────────────────────────────────────
+
+    private val savedPlacesRepository = SavedPlacesRepository(application)
+
+    private val _homeAddress = MutableStateFlow(savedPlacesRepository.getHomeAddress() ?: "")
+    /** Currently saved home address. Empty string if not configured. */
+    val homeAddress: StateFlow<String> = _homeAddress.asStateFlow()
+
+    private val _workAddress = MutableStateFlow(savedPlacesRepository.getWorkAddress() ?: "")
+    /** Currently saved work address. Empty string if not configured. */
+    val workAddress: StateFlow<String> = _workAddress.asStateFlow()
+
     // ── Voice state ───────────────────────────────────────────────────────
 
     private val _voiceListeningState = MutableStateFlow(VoiceListeningState.IDLE)
@@ -65,44 +84,50 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val voiceListeningState: StateFlow<VoiceListeningState> = _voiceListeningState.asStateFlow()
 
     private val _voiceStatusText = MutableStateFlow("")
-    /** "Kentas klauso…" / "Išgirdau: …" / error messages. Displayed below the mic button. */
+    /** "Kentas klauso…" / "Kentas ieško vietos…" / "Išgirdau: …" / error messages. */
     val voiceStatusText: StateFlow<String> = _voiceStatusText.asStateFlow()
+
+    private val _isSolvingDestination = MutableStateFlow(false)
+    /** True while [DestinationResolver] is resolving a voice destination. */
+    val isSolvingDestination: StateFlow<Boolean> = _isSolvingDestination.asStateFlow()
 
     // ── Pending recognized text ───────────────────────────────────────────
 
+    private val _pendingRecognizedText = MutableStateFlow<String?>(null)
     /**
      * Non-null when the recognizer has a final result ready to process.
-     *
-     * [SturmanasApp] observes this; when non-null it calls [executeVoiceCommand]
-     * passing the current [NavigationState] and [SessionConfig], then calls
-     * [clearPendingRecognizedText].  This two-step design lets the VM own command
-     * execution while the composable provides the nav state it cannot see directly.
+     * [SturmanasApp] observes this; when non-null calls [executeVoiceCommand],
+     * then calls [clearPendingRecognizedText].
      */
-    private val _pendingRecognizedText = MutableStateFlow<String?>(null)
     val pendingRecognizedText: StateFlow<String?> = _pendingRecognizedText.asStateFlow()
 
     // ── Pending navigation action ─────────────────────────────────────────
 
-    /**
-     * Non-null when a voice command requires a composable-level state change
-     * (isNavigating, isMuted).  [SturmanasApp] observes this, acts on it via
-     * its existing lambdas, then calls [clearPendingNavAction].
-     */
     private val _pendingNavAction = MutableStateFlow<VoiceNavAction?>(null)
+    /**
+     * Non-null when a voice command requires a composable-level state change.
+     * [SturmanasApp] observes this, acts on it, then calls [clearPendingNavAction].
+     */
     val pendingNavAction: StateFlow<VoiceNavAction?> = _pendingNavAction.asStateFlow()
+
+    // ── Clarification state ───────────────────────────────────────────────
+
+    private val _pendingClarification = MutableStateFlow<ClarificationState?>(null)
+    /**
+     * Non-null when the destination resolver could not pick a single result and needs
+     * the user to choose. [SturmanasApp] presents a dialog with up to 3 options.
+     * The user may tap a button ([onClarificationAnswer]) or speak an ordinal
+     * ("pirmą", "antrą", "trečią") which routes through [executeVoiceCommand].
+     */
+    val pendingClarification: StateFlow<ClarificationState?> = _pendingClarification.asStateFlow()
 
     // ── Latest spoken instruction (for RepeatInstruction command) ─────────
 
-    /**
-     * The last maneuver instruction spoken by Kentas.
-     * Updated via [recordSpokenInstruction] from the maneuver LaunchedEffect
-     * in [SturmanasApp] just before [ttsManager].speak is called.
-     */
     private var latestInstruction: String = ""
 
     // ── True while microphone is listening ────────────────────────────────
 
-    /** True while LISTENING — blocks new TTS maneuver announcements that would feed back. */
+    /** True while LISTENING — blocks new TTS maneuver announcements. */
     val isSpeechBlocked: Boolean
         get() = _voiceListeningState.value == VoiceListeningState.LISTENING
 
@@ -140,23 +165,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         speechRecognitionManager.onListeningStopped = {
             Log.d(TAG, "SR: stopped")
-            // Only revert to IDLE if we haven't already moved to PROCESSING.
             if (_voiceListeningState.value == VoiceListeningState.LISTENING) {
                 _voiceListeningState.value = VoiceListeningState.IDLE
             }
         }
     }
 
-    // ── Public API ────────────────────────────────────────────────────────
+    // ── Public API — Mic ──────────────────────────────────────────────────
 
     /**
      * Called when the user taps the mic button.
-     *
-     * Stops TTS first — prevents Kentas from recognising its own speech.
-     * Then starts the [SpeechRecognitionManager].
-     *
+     * Stops TTS first to prevent Kentas from recognising its own speech.
      * Must be called on the Main thread (SpeechRecognizer requirement).
-     * The composable checks RECORD_AUDIO permission before calling this.
      */
     fun onMicPressed() {
         Log.d("KentasFlow", "mic button pressed — stopping TTS, starting SR")
@@ -165,18 +185,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         speechRecognitionManager.startListening()
     }
 
+    // ── Public API — Command execution ────────────────────────────────────
+
     /**
      * Parse [text] (final SR output) and execute the resulting [VoiceCommand].
      *
-     * Non-navigation commands are handled entirely here (TTS response).
+     * Non-navigation commands are handled entirely here via TTS response.
      * Navigation commands emit a [VoiceNavAction] via [pendingNavAction].
      *
-     * Call [clearPendingRecognizedText] immediately after calling this.
+     * For [VoiceCommand.StartNavigation], calls [DestinationResolver.resolve] to
+     * normalise the raw destination before forwarding to the navigation engine.
      *
-     * @param text          Recognized Lithuanian text from [SpeechRecognitionManager].
-     * @param navState      Current navigation state — read for distance/time/destination.
-     * @param sessionConfig Current session config — passed to OpenAI for persona.
-     * @param isMuted       If true, do not speak TTS responses for this command.
+     * Call [clearPendingRecognizedText] immediately after calling this.
      */
     fun executeVoiceCommand(
         text: String,
@@ -190,77 +210,89 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         when (command) {
             is VoiceCommand.RemainingDistance -> {
-                Log.d("KentasFlow", "command execution: RemainingDistance (${navState.remainingDistanceMeters} m)")
+                Log.d("KentasFlow", "command: RemainingDistance (${navState.remainingDistanceMeters} m)")
                 val msg = buildDistanceResponse(navState.remainingDistanceMeters)
-                Log.d("KentasFlow", "command result: '$msg'")
                 speakAndIdle(msg, isMuted)
             }
 
             is VoiceCommand.RemainingTime -> {
-                Log.d("KentasFlow", "command execution: RemainingTime (${navState.remainingDurationSeconds} s)")
+                Log.d("KentasFlow", "command: RemainingTime (${navState.remainingDurationSeconds} s)")
                 val msg = buildTimeResponse(navState.remainingDurationSeconds)
-                Log.d("KentasFlow", "command result: '$msg'")
                 speakAndIdle(msg, isMuted)
             }
 
             is VoiceCommand.DestinationInfo -> {
-                Log.d("KentasFlow", "command execution: DestinationInfo")
+                Log.d("KentasFlow", "command: DestinationInfo")
                 val dest = navState.resolvedAddress.ifBlank { navState.destinationName }
                 val msg = if (dest.isBlank()) "Šiuo metu maršrutas nepasirinktas."
                           else "Važiuojame į $dest."
-                Log.d("KentasFlow", "command result: '$msg'")
                 speakAndIdle(msg, isMuted)
             }
 
             is VoiceCommand.RepeatInstruction -> {
-                Log.d("KentasFlow", "command execution: RepeatInstruction latestInstruction='$latestInstruction'")
+                Log.d("KentasFlow", "command: RepeatInstruction latestInstruction='$latestInstruction'")
                 val msg = if (latestInstruction.isBlank())
                     "Dar neturiu nurodymo, kurį galėčiau pakartoti."
                 else
                     latestInstruction
-                Log.d("KentasFlow", "command result: '$msg'")
                 speakAndIdle(msg, isMuted)
             }
 
             is VoiceCommand.MuteVoice -> {
-                Log.d("KentasFlow", "command execution: MuteVoice")
+                Log.d("KentasFlow", "command: MuteVoice")
                 ttsManager.stop()
                 _voiceListeningState.value = VoiceListeningState.IDLE
                 _voiceStatusText.value = ""
-                // Do not speak confirmation — that would contradict muting.
                 _pendingNavAction.value = VoiceNavAction.Mute
                 return
             }
 
             is VoiceCommand.UnmuteVoice -> {
-                Log.d("KentasFlow", "command execution: UnmuteVoice")
+                Log.d("KentasFlow", "command: UnmuteVoice")
                 _pendingNavAction.value = VoiceNavAction.Unmute
-                // Speak confirmation after the composable has cleared isMuted (~1 recompose cycle).
                 viewModelScope.launch {
                     delay(150)
-                    Log.d("KentasFlow", "command result: Balsas įjungtas.")
                     speakAndIdle("Balsas įjungtas.", isMuted = false)
                 }
                 return
             }
 
             is VoiceCommand.StopNavigation -> {
-                Log.d("KentasFlow", "command execution: StopNavigation")
+                Log.d("KentasFlow", "command: StopNavigation")
                 speakAndIdle("Navigacija sustabdyta.", isMuted)
                 _pendingNavAction.value = VoiceNavAction.StopNavigation
                 return
             }
 
             is VoiceCommand.StartNavigation -> {
-                Log.d("KentasFlow", "command execution: StartNavigation dest='${command.destination}'")
-                _voiceListeningState.value = VoiceListeningState.IDLE
-                _voiceStatusText.value = ""
-                _pendingNavAction.value = VoiceNavAction.StartNavigation(command.destination)
+                Log.d("KentasFlow", "command: StartNavigation dest='${command.destination}'")
+                _isSolvingDestination.value = true
+                _voiceListeningState.value = VoiceListeningState.PROCESSING
+                _voiceStatusText.value = "Kentas ieško vietos…"
+                viewModelScope.launch {
+                    resolveAndNavigate(command.destination, isMuted)
+                }
+                return
+            }
+
+            is VoiceCommand.SelectCandidate -> {
+                Log.d("KentasFlow", "command: SelectCandidate(${command.index})")
+                val clarif = _pendingClarification.value
+                if (clarif == null) {
+                    speakAndIdle("Nėra ko rinktis.", isMuted)
+                } else {
+                    val candidate = clarif.candidates.getOrNull(command.index - 1)
+                    if (candidate == null) {
+                        speakAndIdle("Tokio varianto nėra. Pasakykite: pirmą, antrą, ar trečią.", isMuted)
+                    } else {
+                        acceptCandidate(candidate, isMuted)
+                    }
+                }
                 return
             }
 
             is VoiceCommand.GeneralQuestion -> {
-                Log.d("KentasFlow", "command execution: GeneralQuestion → OpenAI '${command.text}'")
+                Log.d("KentasFlow", "command: GeneralQuestion → OpenAI '${command.text}'")
                 _voiceListeningState.value = VoiceListeningState.PROCESSING
                 viewModelScope.launch {
                     val reply = askKentas(
@@ -269,17 +301,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         navState = navState,
                         apiKey = BuildConfig.OPENAI_API_KEY,
                     )
-                    Log.d("KentasFlow", "command result: OpenAI='$reply'")
+                    Log.d("KentasFlow", "OpenAI reply: '$reply'")
                     _voiceStatusText.value = reply
                     _voiceListeningState.value = VoiceListeningState.IDLE
                     if (!isMuted) ttsManager.speak(reply)
                     scheduleStatusClear(6_000)
                 }
-                return  // coroutine handles status clear
+                return
             }
 
             is VoiceCommand.Unknown -> {
-                Log.d("KentasFlow", "command execution: Unknown '${command.text}'")
+                Log.d("KentasFlow", "command: Unknown '${command.text}'")
                 _voiceListeningState.value = VoiceListeningState.IDLE
                 _voiceStatusText.value = "Komandos neišgirdau."
             }
@@ -288,9 +320,53 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         scheduleStatusClear(4_000)
     }
 
+    // ── Public API — Clarification ────────────────────────────────────────
+
+    /**
+     * Called when the user taps a candidate button in the clarification dialog.
+     * [index] is 1-based.
+     */
+    fun onClarificationAnswer(index: Int) {
+        val clarif = _pendingClarification.value ?: return
+        val candidate = clarif.candidates.getOrNull(index - 1) ?: return
+        acceptCandidate(candidate, isMuted = false)
+    }
+
+    /** Dismiss the clarification dialog without starting navigation. */
+    fun cancelClarification() {
+        Log.d(DEST_TAG, "cancelClarification")
+        _pendingClarification.value = null
+        _voiceListeningState.value = VoiceListeningState.IDLE
+        _voiceStatusText.value = ""
+    }
+
+    // ── Public API — Saved places ─────────────────────────────────────────
+
+    fun setHomeAddress(addr: String) {
+        savedPlacesRepository.setHomeAddress(addr)
+        _homeAddress.value = addr.trim()
+    }
+
+    fun clearHomeAddress() {
+        savedPlacesRepository.clearHomeAddress()
+        _homeAddress.value = ""
+    }
+
+    fun setWorkAddress(addr: String) {
+        savedPlacesRepository.setWorkAddress(addr)
+        _workAddress.value = addr.trim()
+    }
+
+    fun clearWorkAddress() {
+        savedPlacesRepository.clearWorkAddress()
+        _workAddress.value = ""
+    }
+
+    // ── Public API — Misc ─────────────────────────────────────────────────
+
     /**
      * Store the instruction that was just spoken, for [VoiceCommand.RepeatInstruction].
-     * Called from [SturmanasApp]'s maneuver announcement [LaunchedEffect] before speaking.
+     * Called from [SturmanasApp]'s maneuver announcement LaunchedEffect before speaking.
      */
     fun recordSpokenInstruction(instruction: String) {
         if (instruction.isNotBlank()) {
@@ -316,6 +392,99 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // ── Private helpers ───────────────────────────────────────────────────
+
+    /**
+     * Call [DestinationResolver], then either navigate, ask for clarification, or
+     * speak a failure message. Called from [executeVoiceCommand] inside a coroutine.
+     */
+    private suspend fun resolveAndNavigate(rawDestination: String, isMuted: Boolean) {
+        Log.d(DEST_TAG, "resolveAndNavigate: raw='$rawDestination'")
+        val savedPlaces = savedPlacesRepository.getAll()
+        val resolution = DestinationResolver.resolve(
+            rawText = rawDestination,
+            currentLat = null,        // Phase 3: obtain from NavigationState or LocationProvider
+            currentLng = null,
+            currentLocality = null,   // Phase 3: reverse geocode current location
+            savedPlaces = savedPlaces,
+        )
+
+        Log.d(DEST_TAG, "resolution: ${resolution::class.simpleName}")
+        _isSolvingDestination.value = false
+
+        when (resolution) {
+            is DestinationResolution.ExactAddress -> {
+                Log.d(DEST_TAG, "ExactAddress: '${resolution.query}'")
+                _voiceListeningState.value = VoiceListeningState.IDLE
+                _voiceStatusText.value = "Rasta: ${resolution.query}"
+                if (!isMuted) ttsManager.speak("Keliaujame į ${resolution.query}.")
+                _pendingNavAction.value = VoiceNavAction.StartNavigation(resolution.query)
+                scheduleStatusClear(5_000)
+            }
+
+            is DestinationResolution.PlaceSearch -> {
+                Log.d(DEST_TAG, "PlaceSearch: '${resolution.query}'")
+                _voiceListeningState.value = VoiceListeningState.IDLE
+                _voiceStatusText.value = "Kentas ieško: ${resolution.query}"
+                // PlaceSearch query is forwarded to the existing geocoding flow.
+                // GoogleNavigationEngine.resolveAddress() handles the actual lookup.
+                _pendingNavAction.value = VoiceNavAction.StartNavigation(resolution.query)
+                scheduleStatusClear(5_000)
+            }
+
+            is DestinationResolution.SavedPlace -> {
+                Log.d(DEST_TAG, "SavedPlace: '${resolution.name}' → '${resolution.address}'")
+                _voiceListeningState.value = VoiceListeningState.IDLE
+                _voiceStatusText.value = "Rasta: ${resolution.name}"
+                if (!isMuted) ttsManager.speak("Keliaujame ${resolution.name.lowercase()}.")
+                _pendingNavAction.value = VoiceNavAction.StartNavigation(resolution.address)
+                scheduleStatusClear(5_000)
+            }
+
+            is DestinationResolution.NeedsClarification -> {
+                Log.d(DEST_TAG, "NeedsClarification: ${resolution.suggestions.size} candidates")
+                _voiceListeningState.value = VoiceListeningState.IDLE
+                _pendingClarification.value = ClarificationState(
+                    originalText = resolution.originalText,
+                    candidates = resolution.suggestions,
+                )
+                val msg = buildClarificationMessage(resolution.suggestions)
+                _voiceStatusText.value = "Radau kelis variantus"
+                if (!isMuted) ttsManager.speak(msg)
+                // Status cleared when user picks or cancels.
+            }
+
+            is DestinationResolution.Failure -> {
+                Log.d(DEST_TAG, "Failure: '${resolution.message}'")
+                _voiceListeningState.value = VoiceListeningState.ERROR
+                _voiceStatusText.value = resolution.message
+                if (!isMuted) ttsManager.speak(resolution.message)
+                scheduleStatusClear(6_000)
+            }
+        }
+    }
+
+    private fun acceptCandidate(candidate: CandidatePlace, isMuted: Boolean) {
+        Log.d(DEST_TAG, "acceptCandidate: '${candidate.name}' → '${candidate.address}'")
+        _pendingClarification.value = null
+        _voiceListeningState.value = VoiceListeningState.IDLE
+        _voiceStatusText.value = "Pasirinkta: ${candidate.name}"
+        if (!isMuted) ttsManager.speak("Gerai, važiuojame į ${candidate.name}.")
+        _pendingNavAction.value = VoiceNavAction.StartNavigation(candidate.address)
+        scheduleStatusClear(5_000)
+    }
+
+    private fun buildClarificationMessage(candidates: List<CandidatePlace>): String {
+        val sb = StringBuilder("Radau kelis variantus. Kurį renkamės? ")
+        candidates.take(3).forEachIndexed { i, c ->
+            val ordinal = when (i) { 0 -> "Pirmas"; 1 -> "Antras"; else -> "Trečias" }
+            val dist = c.distanceMeters?.let { m ->
+                if (m < 1000) " (${m} m)" else " (${m / 1000} km)"
+            } ?: ""
+            sb.append("$ordinal: ${c.name}$dist. ")
+        }
+        sb.append("Pasakykite: pirmą, antrą, ar trečią.")
+        return sb.toString().trim()
+    }
 
     private fun speakAndIdle(msg: String, isMuted: Boolean) {
         _voiceListeningState.value = VoiceListeningState.IDLE
@@ -356,14 +525,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun kilometraiForm(n: Int): String = when {
-        n % 10 == 1 && n % 100 != 11                    -> "kilometras"
-        n % 10 in 2..9 && n % 100 !in 11..19            -> "kilometrai"
-        else                                              -> "kilometrų"
+        n % 10 == 1 && n % 100 != 11         -> "kilometras"
+        n % 10 in 2..9 && n % 100 !in 11..19 -> "kilometrai"
+        else                                   -> "kilometrų"
     }
 
     private fun minutesForm(n: Int): String = when {
-        n % 10 == 1 && n % 100 != 11                    -> "minutės"
-        n % 10 in 2..9 && n % 100 !in 11..19            -> "minučių"
-        else                                              -> "minučių"
+        n % 10 == 1 && n % 100 != 11         -> "minutės"
+        else                                   -> "minučių"
     }
 }

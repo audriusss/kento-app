@@ -39,8 +39,19 @@ sealed class VoiceCommand {
      * "Važiuojam į Taikos prospektą 61, Klaipėda."
      * [destination] is extracted verbatim from the original input after the
      * trigger prefix — Lithuanian characters and capitalisation are preserved.
+     *
+     * The destination string is passed to [DestinationResolver] for normalisation
+     * before being forwarded to [NavigationController.startNavigation].
      */
     data class StartNavigation(val destination: String) : VoiceCommand()
+
+    /**
+     * User selected a candidate from an active clarification dialog.
+     * [index] is 1-based (1 = first option, 2 = second, 3 = third).
+     *
+     * Triggered by: "pirmą", "antrą", "trečią" (and no-diacritic variants).
+     */
+    data class SelectCandidate(val index: Int) : VoiceCommand()
 
     /**
      * Recognised speech that does not match any deterministic pattern.
@@ -60,30 +71,43 @@ sealed class VoiceCommand {
  * ## Normalisation pipeline (applied before all pattern matching)
  * 1. Trim leading/trailing whitespace.
  * 2. Lowercase the whole string.
- * 3. Remove trailing punctuation (. , ! ? ; :).
+ * 3. Replace punctuation (. , ! ? ; :) with a space.
  * 4. Collapse consecutive whitespace to a single space.
  *
  * Lithuanian characters (ą č ę ė į š ų ū ž) are preserved as-is; the
- * patterns in this file also use them.  SpeechRecognizer occasionally omits
- * diacritics, so every pattern list also includes a no-diacritic alternative.
+ * patterns in this file also include no-diacritic alternatives for
+ * SpeechRecognizer accuracy on devices without a Lithuanian model.
  *
- * ## Matching order (most-specific first)
- * 1. [VoiceCommand.StartNavigation] — destination prefix, must come first so
- *    e.g. "važiuojam į Kauną" is not swallowed by a RemainingDistance check.
- * 2. Remaining distance / time / destination / repeat / mute / unmute / stop.
- * 3. Blank → [VoiceCommand.Unknown].
- * 4. Everything else → [VoiceCommand.GeneralQuestion].
+ * ## Matching order (most-specific first — do NOT reorder)
+ * 1. [VoiceCommand.StartNavigation] — destination prefix regex (anchored `^`).
+ * 2. [VoiceCommand.SelectCandidate] — ordinal words for disambiguation.
+ * 3. Remaining distance / time / destination / repeat / mute / unmute / stop.
+ * 4. Blank → [VoiceCommand.Unknown].
+ * 5. Everything else → [VoiceCommand.GeneralQuestion].
  */
 object VoiceCommandParser {
 
     private const val TAG = "KentasVoice"
 
     // ── StartNavigation prefixes ───────────────────────────────────────────
-    // Regex matches the trigger phrase + optional whitespace at start of input.
-    // IGNORE_CASE is redundant after lowercasing, but included as a safety net.
+    // More-specific alternatives MUST come before their shorter substrings in
+    // the alternation so the regex engine picks the right one.
+    // e.g. "rask\s+kelią\s+į" must precede "rask\s+".
     private val NAV_PREFIX_REGEX = Regex(
-        """^(važiuojam\s+į|važiuojame\s+į|naviguok\s+į|naviguokime\s+į|rask\s+kelią\s+į|rodyk\s+kelią\s+į|maršrutas\s+į|keliaujam\s+į|keliaujame\s+į|eik\s+į|vyk\s+į)\s*""",
+        """^(rask\s+kelią\s+į|rodyk\s+kelią\s+į|važiuojam\s+į|važiuojame\s+į|naviguok\s+į|naviguokime\s+į|maršrutas\s+į|keliaujam\s+į|keliaujame\s+į|eik\s+į|vyk\s+į|nuvežk\s+į|nuvešk\s+į|vežk\s+į|rask\s+|rodyk\s+|artimiausia\s+|artimiausias\s+|artimiausią\s+|važiuojam\s+|į\s+)\s*""",
         RegexOption.IGNORE_CASE,
+    )
+
+    // ── SelectCandidate ordinals ───────────────────────────────────────────
+    // Matched on the normalised string (exact equality or starts-with).
+    // 1-based: index 1 = first candidate, etc.
+    private val ORDINAL_MAP = mapOf(
+        "pirmą"   to 1, "pirma"   to 1, "pirmas"   to 1,
+        "vieną"   to 1, "vienas"  to 1,
+        "antrą"   to 2, "antra"   to 2, "antras"   to 2,
+        "du"      to 2,
+        "trečią"  to 3, "trecia"  to 3, "trecias"  to 3,
+        "trys"    to 3,
     )
 
     // ── Pattern tables (all lowercase with Lithuanian chars) ───────────────
@@ -218,7 +242,7 @@ object VoiceCommandParser {
         val normalized = normalize(trimmed)
         Log.d(TAG, "parse: raw='$trimmed' normalized='$normalized'")
 
-        // ── 1. StartNavigation — must be checked first ─────────────────────
+        // ── 1. StartNavigation — checked first (anchored prefix regex) ─────
         val navMatch = NAV_PREFIX_REGEX.find(trimmed)
         if (navMatch != null) {
             val dest = trimmed.substring(navMatch.value.length).trim().trimEnd('.', ',', '!', '?')
@@ -228,16 +252,26 @@ object VoiceCommandParser {
             }
         }
 
-        // ── 2. Deterministic keyword patterns ─────────────────────────────
-        if (matchesAny(normalized, DISTANCE_PATTERNS)) return VoiceCommand.RemainingDistance
-        if (matchesAny(normalized, TIME_PATTERNS))     return VoiceCommand.RemainingTime
-        if (matchesAny(normalized, DESTINATION_PATTERNS)) return VoiceCommand.DestinationInfo
-        if (matchesAny(normalized, REPEAT_PATTERNS))   return VoiceCommand.RepeatInstruction
-        if (matchesAny(normalized, MUTE_PATTERNS))     return VoiceCommand.MuteVoice
-        if (matchesAny(normalized, UNMUTE_PATTERNS))   return VoiceCommand.UnmuteVoice
-        if (matchesAny(normalized, STOP_PATTERNS))     return VoiceCommand.StopNavigation
+        // ── 2. SelectCandidate ordinals ────────────────────────────────────
+        // Exact match or starts-with (e.g. "pirmą variantą" → index 1).
+        val ordinalIndex = ORDINAL_MAP.entries.firstOrNull { (k, _) ->
+            normalized == k || normalized.startsWith("$k ")
+        }?.value
+        if (ordinalIndex != null) {
+            Log.d(TAG, "parse: SelectCandidate($ordinalIndex)")
+            return VoiceCommand.SelectCandidate(ordinalIndex)
+        }
 
-        // ── 3. Fallthrough — forward to OpenAI ────────────────────────────
+        // ── 3. Deterministic keyword patterns ─────────────────────────────
+        if (matchesAny(normalized, DISTANCE_PATTERNS))    return VoiceCommand.RemainingDistance
+        if (matchesAny(normalized, TIME_PATTERNS))        return VoiceCommand.RemainingTime
+        if (matchesAny(normalized, DESTINATION_PATTERNS)) return VoiceCommand.DestinationInfo
+        if (matchesAny(normalized, REPEAT_PATTERNS))      return VoiceCommand.RepeatInstruction
+        if (matchesAny(normalized, MUTE_PATTERNS))        return VoiceCommand.MuteVoice
+        if (matchesAny(normalized, UNMUTE_PATTERNS))      return VoiceCommand.UnmuteVoice
+        if (matchesAny(normalized, STOP_PATTERNS))        return VoiceCommand.StopNavigation
+
+        // ── 4. Fallthrough — forward to OpenAI ────────────────────────────
         Log.d(TAG, "parse: no pattern matched → GeneralQuestion")
         return VoiceCommand.GeneralQuestion(trimmed)
     }
@@ -246,15 +280,14 @@ object VoiceCommandParser {
 
     /**
      * True if [text] contains or equals any of the [patterns].
-     * Matching is substring-based so partial phrases also fire (e.g. "kiek liko?" matches
-     * the pattern "kiek liko" after punctuation removal).
+     * Matching is substring-based so partial phrases also fire.
      */
     internal fun matchesAny(text: String, patterns: List<String>): Boolean =
         patterns.any { text.contains(it) }
 
     /**
      * Normalise for pattern matching:
-     * lowercase → strip trailing punctuation → collapse whitespace.
+     * lowercase → replace punctuation with space → collapse whitespace.
      * Lithuanian characters (ą č ę ė į š ų ū ž) are preserved.
      */
     internal fun normalize(input: String): String =
