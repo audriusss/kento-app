@@ -1,0 +1,438 @@
+TASK: Stabilize voice UX and short destination resolution before adding any new features.
+
+IMPORTANT
+
+Do not add new product features.
+
+Do not expand waypoint functionality.
+
+Do not redesign the app.
+
+Do not push automatically.
+
+The current priority is fixing two real-device problems:
+
+1. The user must press the microphone button again after every Kentas response.
+2. Short destination phrases such as "Taikos 61" or "Akropolis" do not reliably start navigation.
+
+The app must become usable hands-free and short destination input must work reliably before any waypoint work continues.
+
+CURRENT VERIFIED STATE
+
+The app currently has:
+
+- Kotlin
+- Jetpack Compose
+- Google Navigation SDK
+- Google Maps SDK
+- Lithuanian speech recognition
+- Android TTS
+- OpenAI chat
+- working route creation with full addresses
+- working commands such as:
+  - "kiek liko važiuoti?"
+  - "pakartok nurodymą"
+  - "sustabdyk navigaciją"
+- DestinationResolver
+- nearby place search
+- current-location-aware search
+- a local waypoint commit may exist, but waypoint functionality is NOT the priority
+
+DO NOT BREAK
+
+- GoogleNavigationEngine lifecycle
+- Navigator instance lifecycle
+- current working full-address navigation
+- current TTS
+- current route guidance
+- existing working voice commands
+- existing tests
+- app startup
+
+PHASE 1 — DIAGNOSE SHORT DESTINATION FAILURE
+
+Trace the complete real execution flow for these inputs:
+
+- "Taikos 61"
+- "važiuojam į Taikos 61"
+- "Akropolis"
+- "važiuojam į Akropolį"
+- "Lidl"
+- "degalinė"
+
+Document the exact runtime path:
+
+SpeechRecognizer
+→ recognized text
+→ VoiceCommandParser
+→ MainActivity or ViewModel handler
+→ DestinationResolver
+→ place/address result
+→ route creation
+
+Find where short destination text is being lost, rejected, transformed incorrectly, or routed to AI chat instead of navigation.
+
+Do not assume DestinationResolver is connected correctly just because the class exists.
+
+Add targeted logging with tag:
+
+KentasVoiceFlow
+
+Log:
+
+- raw recognized text
+- normalized text
+- parsed command
+- extracted destination query
+- resolver strategy selected
+- resolver result
+- coordinates/place ID if found
+- route request result
+- failure reason
+- whether the text was incorrectly sent to AI chat
+
+Never log API keys, tokens, or sensitive credentials.
+
+PHASE 2 — FIX SHORT DESTINATION RESOLUTION
+
+Required behavior:
+
+"Taikos 61"
+→ attempt navigation destination resolution
+
+"važiuojam į Taikos 61"
+→ attempt navigation destination resolution
+
+"Akropolis"
+→ resolve as a place near the current region or location
+
+"važiuojam į Akropolį"
+→ resolve as a place
+
+"Lidl"
+→ resolve nearby relevant place
+
+"degalinė"
+→ resolve nearest or relevant nearby fuel station
+
+Resolution priority should be explicit and deterministic:
+
+1. Known voice command
+2. Navigation phrase with extracted destination
+3. Plain short destination candidate
+4. Nearby category/place candidate
+5. AI chat fallback only when the input is clearly conversational
+
+Do not send plausible destination text to AI chat before destination resolution is attempted.
+
+Implement a conservative destination-candidate classifier.
+
+Examples that should be treated as destination candidates:
+
+- street name plus number
+- one or several words matching a place/business name
+- common POI category
+- phrases beginning with:
+  - "važiuojam į"
+  - "važiuok į"
+  - "naviguok į"
+  - "rask"
+  - "rodyk kelią į"
+
+Examples that should remain AI chat:
+
+- "kas tu esi?"
+- "papasakok anekdotą"
+- "koks oras?"
+- "ką manai apie..."
+- "paaiškink..."
+
+Preserve Lithuanian letters and normalize safely.
+
+Do not remove address numbers.
+
+Do not over-strip destination text.
+
+Handle Lithuanian grammatical forms where practical, but do not invent a large NLP system.
+
+If multiple places match:
+
+- prefer proximity to current location
+- prefer exact or strong name match
+- ask a short clarification only when ambiguity is meaningful
+
+Example:
+
+"Radau kelis Akropolius. Kurį pasirinkti?"
+
+If no result is found, say:
+
+"Nepavyko rasti tikslo. Pasakyk miestą arba tikslesnį adresą."
+
+PHASE 3 — HANDS-FREE CONVERSATION MODE
+
+Current bad flow:
+
+press microphone
+→ user speaks
+→ Kentas responds
+→ user must press microphone again
+
+Replace this with an explicit continuous driving conversation mode.
+
+Required UX:
+
+The user presses the microphone once to activate Kentas listening mode.
+
+After activation:
+
+- Kentas listens
+- the user speaks
+- command is processed
+- Kentas speaks a response
+- after TTS finishes, speech recognition starts again automatically
+- the loop continues until the user explicitly stops listening
+
+The microphone button should act as a toggle:
+
+OFF
+→ one press enables continuous listening mode
+
+ON
+→ one press disables continuous listening mode
+
+Show clear UI state:
+
+- "Kentas išjungtas"
+- "Klausau..."
+- "Atpažįstu..."
+- "Kentas galvoja..."
+- "Kentas kalba..."
+- "Laukiu komandos..."
+
+Do not restart speech recognition while TTS is still speaking.
+
+Do not allow recognizer and TTS to capture each other.
+
+Implement a proper state machine, not scattered booleans.
+
+Suggested states:
+
+Idle
+Listening
+Processing
+Speaking
+RestartDelay
+Error
+
+Create a single source of truth for voice session state.
+
+For example:
+
+voice/VoiceSessionState.kt
+voice/VoiceSessionController.kt
+
+Use StateFlow or an equivalent existing project pattern.
+
+Required loop:
+
+Idle
+→ user enables mode
+→ Listening
+→ speech result
+→ Processing
+→ Speaking
+→ TTS completion callback
+→ short safe delay
+→ Listening
+
+Stop conditions:
+
+- user taps microphone toggle off
+- user says:
+  - "Kentai, nustok klausyti"
+  - "išjunk mikrofoną"
+  - "baik klausytis"
+- app goes to background
+- permission is revoked
+- unrecoverable recognizer error
+
+Navigation stop must NOT automatically disable Kentas listening mode unless that is already intentional UX.
+
+PHASE 4 — SPEECH RECOGNIZER ERROR RECOVERY
+
+Handle common Android SpeechRecognizer errors without trapping the app in a broken state.
+
+Examples:
+
+- ERROR_NO_MATCH
+- ERROR_SPEECH_TIMEOUT
+- ERROR_NETWORK
+- ERROR_RECOGNIZER_BUSY
+- ERROR_CLIENT
+- ERROR_INSUFFICIENT_PERMISSIONS
+
+Expected behavior in continuous mode:
+
+NO_MATCH or SPEECH_TIMEOUT
+→ silently retry after a small delay
+
+RECOGNIZER_BUSY
+→ cleanly cancel/reset and retry once
+
+NETWORK
+→ announce a concise message only when useful, then allow retry
+
+PERMISSION
+→ stop listening mode and show actionable UI message
+
+Prevent rapid infinite restart loops.
+
+Use bounded retry/backoff.
+
+PHASE 5 — TTS COORDINATION
+
+Use TTS utterance progress callbacks.
+
+The recognizer may restart only after onDone or a handled onError callback.
+
+Do not estimate TTS completion using fixed timers alone.
+
+A small post-TTS delay is allowed to prevent the recognizer from hearing the speaker output.
+
+Example delay:
+
+300–700 ms
+
+Keep it configurable as a constant.
+
+If TTS is interrupted, the voice session state must recover predictably.
+
+PHASE 6 — LIFECYCLE SAFETY
+
+Continuous listening must respect Android lifecycle.
+
+On app background or screen disposal:
+
+- stop listening
+- cancel pending restart jobs
+- do not leak SpeechRecognizer
+- do not destroy Google Navigator
+- do not create duplicate recognizer instances
+
+On returning to foreground:
+
+- do not silently reactivate the microphone unless the existing product behavior explicitly preserves active mode
+- restore a clear safe state
+
+PHASE 7 — UI
+
+Update the microphone UI so the user understands whether continuous mode is active.
+
+Requirements:
+
+- visible ON/OFF state
+- animated listening indicator only while actively listening
+- speaking indicator while Kentas talks
+- one tap toggles the session
+- no need to tap after each answer
+
+Do not create a large redesign.
+
+Keep current Compose style.
+
+PHASE 8 — TESTS
+
+Add focused JVM tests where possible.
+
+Minimum required categories:
+
+Voice command routing:
+- "Taikos 61" becomes destination candidate
+- "važiuojam į Taikos 61" becomes navigation
+- "Akropolis" becomes destination candidate
+- "važiuojam į Akropolį" becomes navigation
+- "degalinė" becomes nearby destination/category
+- conversational questions remain AI chat
+- address numbers are preserved
+- Lithuanian characters are preserved
+
+Voice state machine:
+- enable mode starts listening
+- speech result moves Listening → Processing
+- response moves Processing → Speaking
+- TTS completion moves Speaking → RestartDelay → Listening
+- toggle off ends in Idle
+- no-match retries safely
+- recognizer busy resets safely
+- permission error ends session
+- no restart while speaking
+- no duplicate restart jobs
+- stop voice command disables session
+
+Regression tests:
+- "atšauk paskutinį" remains waypoint removal if waypoint code exists
+- "rodyk sustojimus" remains waypoint listing
+- "važiuojam į X" remains normal destination navigation
+- "sustabdyk navigaciją" stops navigation, not voice listening
+- full address navigation still works
+
+Do not inflate the test count with meaningless duplicated assertions.
+
+PHASE 9 — STATIC SAFETY CHECK
+
+Before finishing, scan every modified Kotlin file for malformed quote characters inside string literals.
+
+Avoid repeating the previous smart-quote bug.
+
+Inside Kotlin source strings, use ASCII quotes and escaping:
+
+\"text\"
+
+Do not place typographic closing quotes directly where they can terminate Kotlin strings.
+
+PHASE 10 — BUILD AND VERIFICATION
+
+First inspect the repository structure.
+
+The Android project may be inside:
+
+android/
+
+Run Gradle from the directory that actually contains gradlew.
+
+Examples:
+
+cd android
+./gradlew :app:compileDebugKotlin
+./gradlew :app:testDebugUnitTest
+
+If gradlew truly does not exist, do not claim the build passed.
+
+Report exactly what was and was not verified.
+
+Do not use kotlinc alone as proof that the Android project builds.
+
+DO NOT PUSH AUTOMATICALLY.
+
+Commit locally only after implementation and verification.
+
+FINAL REPORT
+
+Provide:
+
+1. Root cause of short destination failure
+2. Exact old runtime flow
+3. Exact corrected runtime flow
+4. Files added
+5. Files modified
+6. Voice state machine description
+7. TTS and recognizer coordination
+8. Destination classification logic
+9. Test names and count
+10. Compile result
+11. Unit test result
+12. Real-device scenarios the user must test
+13. Known limitations
+14. Local commit hash
+15. Confirmation that nothing was pushed
