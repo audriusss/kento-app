@@ -340,9 +340,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Restart listening if the session is active and TTS is not currently speaking.
+     *
+     * Two restart paths exist for the continuous session loop:
+     * 1. **TTS path**: when [ttsManager.speak] is called, [ttsManager.onDone] fires
+     *    at utterance end and calls [scheduleSessionRestart] automatically.
+     * 2. **Silent path** (this function): when a command produces no TTS — because
+     *    [isMuted]=true, or the command type never speaks — [ttsManager.onDone] is
+     *    never invoked. This function handles that case explicitly.
+     *
+     * Must be called at the end of every command execution path that exits
+     * [executeVoiceCommand] or an async coroutine that processes a command.
+     * Safe to call multiple times: [_continuousSessionActive] guards all paths.
+     */
+    private fun scheduleRestartIfSessionActive(delayMs: Long = 300L) {
+        if (!_continuousSessionActive.value) return
+        if (ttsManager.isSpeaking) {
+            // TTS is playing — onDone will trigger the restart when it finishes.
+            Log.d(TAG, "scheduleRestartIfSessionActive: TTS speaking → onDone will restart")
+            return
+        }
+        Log.d(TAG, "scheduleRestartIfSessionActive: no TTS → scheduling restart in ${delayMs}ms")
+        scheduleSessionRestart(delayMs)
+    }
+
+    /**
      * Schedule a listening restart after [delayMs] milliseconds.
      * No-op if the session has been stopped in the meantime.
-     * Must only be called from [ttsManager.onDone] or the error-retry path.
+     * Called by [ttsManager.onDone] and [scheduleRestartIfSessionActive].
      */
     private fun scheduleSessionRestart(delayMs: Long) {
         if (!_continuousSessionActive.value) return
@@ -419,6 +444,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _voiceListeningState.value = VoiceListeningState.IDLE
                 _voiceStatusText.value = ""
                 _pendingNavAction.value = VoiceNavAction.Mute
+                // No TTS produced — restart manually so the loop continues while muted.
+                scheduleRestartIfSessionActive()
                 return
             }
 
@@ -472,6 +499,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         acceptCandidate(candidate, isMuted)
                     }
                 }
+                // acceptCandidate / speakAndIdle may or may not speak; guard both paths.
+                scheduleRestartIfSessionActive()
                 return
             }
 
@@ -563,6 +592,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _voiceListeningState.value = VoiceListeningState.IDLE
                     if (!isMuted) ttsManager.speak(reply)
                     scheduleStatusClear(6_000)
+                    // Restart: if not muted, onDone handles it; if muted, restart manually.
+                    scheduleRestartIfSessionActive()
                 }
                 return
             }
@@ -575,6 +606,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         scheduleStatusClear(4_000)
+        // Covers all synchronous commands that fall through here (Distance, Time,
+        // DestinationInfo, Repeat, waypoint management, Unknown). If TTS is speaking,
+        // onDone handles restart; otherwise restarts immediately (e.g. isMuted=true).
+        scheduleRestartIfSessionActive()
     }
 
     // ── Public API — Clarification ────────────────────────────────────────
@@ -786,6 +821,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 scheduleStatusClear(6_000)
             }
         }
+        // If muted (or PlaceSearch which never speaks), onDone won't fire — restart manually.
+        scheduleRestartIfSessionActive()
     }
 
     /**
@@ -833,6 +870,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _voiceStatusText.value = msg
             if (!isMuted) ttsManager.speak(msg)
             scheduleStatusClear(5_000)
+            scheduleRestartIfSessionActive()
             return
         }
 
@@ -842,6 +880,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _voiceStatusText.value = msg
             if (!isMuted) ttsManager.speak(msg)
             scheduleStatusClear(4_000)
+            scheduleRestartIfSessionActive()
             return
         }
 
@@ -858,6 +897,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _pendingNavAction.value = VoiceNavAction.StartNavigation(nextTarget.resolvedQuery)
         }
         scheduleStatusClear(5_000)
+        // If muted, onDone won't fire — restart the session loop manually.
+        scheduleRestartIfSessionActive()
     }
 
     private fun acceptCandidate(candidate: CandidatePlace, isMuted: Boolean) {
