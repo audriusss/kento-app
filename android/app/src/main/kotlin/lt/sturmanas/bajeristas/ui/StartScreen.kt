@@ -36,6 +36,8 @@ import lt.sturmanas.bajeristas.personality.ConversationMode
 import lt.sturmanas.bajeristas.personality.HumorIntensity
 import lt.sturmanas.bajeristas.personality.SessionConfig
 import lt.sturmanas.bajeristas.personality.TripMode
+import lt.sturmanas.bajeristas.voice.VoiceListeningState
+import lt.sturmanas.bajeristas.ui.MicButton
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -44,6 +46,12 @@ fun StartScreen(
     errorMessage: String? = null,
     /** False while the navigation engine is still initialising. */
     engineReady: Boolean = true,
+    /** Current speech-recognition state; drives the mic button appearance. */
+    voiceListeningState: VoiceListeningState = VoiceListeningState.IDLE,
+    /** Status text shown below the mic button ("Kentas klauso…", "Išgirdau: …", etc.). */
+    voiceStatusText: String = "",
+    /** Called when the user taps the mic button. Caller must check RECORD_AUDIO permission. */
+    onMicPress: () -> Unit = {},
     onStartNavigation: (destination: String, config: SessionConfig) -> Unit,
 ) {
     var destination by remember { mutableStateOf("") }
@@ -90,7 +98,7 @@ fun StartScreen(
 
         Spacer(modifier = Modifier.height(32.dp))
 
-        // ── Destination ───────────────────────────────────────────────────
+        // ── Destination field ─────────────────────────────────────────────
         OutlinedTextField(
             value = destination,
             onValueChange = { destination = it },
@@ -101,6 +109,47 @@ fun StartScreen(
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
             keyboardActions = KeyboardActions(onDone = { keyboard?.hide() }),
         )
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // ── Voice input row ────────────────────────────────────────────────
+        // The driver can say the destination instead of typing.
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "arba",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(end = 12.dp),
+            )
+            MicButton(
+                state = voiceListeningState,
+                statusText = "",
+                enabled = true,
+                onClick = {
+                    keyboard?.hide()
+                    onMicPress()
+                },
+                size = 48.dp,
+            )
+        }
+
+        // Voice status text (partial results, "Išgirdau: …", errors)
+        if (voiceStatusText.isNotBlank()) {
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = voiceStatusText,
+                style = MaterialTheme.typography.bodySmall,
+                color = when (voiceListeningState) {
+                    VoiceListeningState.ERROR -> MaterialTheme.colorScheme.error
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
 
         Spacer(modifier = Modifier.height(28.dp))
 

@@ -1,50 +1,38 @@
 package lt.sturmanas.bajeristas
 
 import android.Manifest
-import android.app.Activity
-import android.content.ActivityNotFoundException
-import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
 import android.util.Log
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import kotlinx.coroutines.launch
-import lt.sturmanas.bajeristas.navigation.ManeuverType
-import lt.sturmanas.bajeristas.navigation.NavigationState
-import lt.sturmanas.bajeristas.personality.formatDistance
-import lt.sturmanas.bajeristas.voice.TtsManager
-import lt.sturmanas.bajeristas.voice.askKentas
-import androidx.activity.viewModels
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import lt.sturmanas.bajeristas.navigation.GoogleNavigationEngine
 import lt.sturmanas.bajeristas.navigation.LocationPermissionHelper
+import lt.sturmanas.bajeristas.navigation.ManeuverType
 import lt.sturmanas.bajeristas.navigation.MockNavigationEngine
 import lt.sturmanas.bajeristas.navigation.NavigationController
 import lt.sturmanas.bajeristas.navigation.NavigationPhase
-import lt.sturmanas.bajeristas.personality.PersonaPrompts
+import lt.sturmanas.bajeristas.navigation.NavigationState
 import lt.sturmanas.bajeristas.personality.SessionConfig
+import lt.sturmanas.bajeristas.personality.formatDistance
 import lt.sturmanas.bajeristas.safety.SafetyController
 import lt.sturmanas.bajeristas.ui.NavigationScreen
 import lt.sturmanas.bajeristas.ui.StartScreen
 import lt.sturmanas.bajeristas.ui.theme.SturmanasTheme
 import lt.sturmanas.bajeristas.voice.AudioController
+import lt.sturmanas.bajeristas.voice.VoiceNavAction
 import lt.sturmanas.bajeristas.voice.VoiceSessionController
 
 class MainActivity : ComponentActivity() {
@@ -69,7 +57,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // Survives screen rotation — holds TtsManager so TTS is not restarted on every rotation.
+    // Survives screen rotation — holds TtsManager and SpeechRecognitionManager.
     private val viewModel: MainViewModel by viewModels()
 
     private val navigationController by lazy { NavigationController(engine) }
@@ -91,7 +79,7 @@ class MainActivity : ComponentActivity() {
             initializeNavigation()
         } else {
             permissionState.value = PermissionState.Denied
-            engineError.value = "Vietos leidimas atmestas. Atidarykite nustatymus ir suteikite „Šturmanas Bajeristas“ prieigą prie vietos."
+            engineError.value = "Vietos leidimas atmestas. Atidarykite nustatymus ir suteikite „Šturmanas Bajeristas" prieigą prie vietos."
         }
     }
 
@@ -117,7 +105,7 @@ class MainActivity : ComponentActivity() {
                     safetyController = safetyController,
                     voiceSessionController = voiceSessionController,
                     audioController = audioController,
-                    ttsManager = viewModel.ttsManager,
+                    viewModel = viewModel,
                     engineReady = engineReady.value,
                     engineError = engineError.value,
                     permissionDenied = permissionState.value == PermissionState.Denied,
@@ -159,52 +147,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// ── Voice recognition fallbacks ──────────────────────────────────────────────
-//
-// Shown when SpeechRecognizer returns RESULT_OK but an empty or null transcript.
-// A small rotating list keeps Kentas sounding alive rather than giving a flat error.
-// No API call is made for an empty transcript — these are local strings only.
-private val KENTAS_FALLBACKS = listOf(
-    "Pakartok žmonių kalba.",
-    "Nieko negirdėjau. Ar šneki, ar miegai?",
-    "Ką, ką? Pabandyk dar kartą.",
-    "Girdi mane? Tai aš tavęs negirdėjau.",
-)
-
-// ── Voice recognition helper ──────────────────────────────────────────────────
-
-/**
- * Builds a Lithuanian [RecognizerIntent] and launches it via [launcher].
- *
- * Checks [SpeechRecognizer.isRecognitionAvailable] first; calls [onError] with a
- * Lithuanian message if the device has no recognizer or if the intent cannot be
- * resolved ([ActivityNotFoundException]).  The caller is responsible for ensuring
- * the RECORD_AUDIO permission is already granted before calling this function.
- */
-private fun launchSpeechIntent(
-    context: Context,
-    launcher: ActivityResultLauncher<Intent>,
-    onError: (String) -> Unit,
-) {
-    if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-        onError("Kalbos atpažinimas neprieinamas šiame įrenginyje")
-        return
-    }
-    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-        putExtra(RecognizerIntent.EXTRA_LANGUAGE, "lt-LT")
-        putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "lt-LT")
-        putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, "lt-LT")
-        putExtra(RecognizerIntent.EXTRA_PROMPT, "Kalbėkite lietuviškai…")
-        putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-    }
-    try {
-        launcher.launch(intent)
-    } catch (e: ActivityNotFoundException) {
-        onError("Kalbos atpažinimo programa nerasta")
-    }
-}
-
 // ── Root composable ───────────────────────────────────────────────────────────
 
 @Composable
@@ -213,7 +155,7 @@ private fun SturmanasApp(
     safetyController: SafetyController,
     voiceSessionController: VoiceSessionController,
     audioController: AudioController,
-    ttsManager: TtsManager,
+    viewModel: MainViewModel,
     engineReady: Boolean,
     engineError: String?,
     permissionDenied: Boolean,
@@ -226,59 +168,108 @@ private fun SturmanasApp(
     var aiStatusMessage by remember { mutableStateOf("") }
     var startScreenError by remember { mutableStateOf<String?>(null) }
 
-    val coroutineScope = rememberCoroutineScope()
+    // Voice state from ViewModel
+    val voiceListeningState by viewModel.voiceListeningState.collectAsStateWithLifecycle()
+    val voiceStatusText by viewModel.voiceStatusText.collectAsStateWithLifecycle()
+    val pendingRecognizedText by viewModel.pendingRecognizedText.collectAsStateWithLifecycle()
+    val pendingNavAction by viewModel.pendingNavAction.collectAsStateWithLifecycle()
 
-    // ── Voice recognition ─────────────────────────────────────────────────
-    // speechLauncher — handles the result from the system RecognizerIntent dialog.
-    // Recognised text is forwarded to askKentas(); the reply appears in aiStatusMessage.
-    val speechLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult(),
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            val text = result.data
-                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-                ?.firstOrNull()
-            if (!text.isNullOrBlank()) {
-                // Show the recognized phrase while the API call runs (typically 2–5 s).
-                // The driver can confirm what Kentas heard before the reply arrives.
-                aiStatusMessage = "„$text“ — Kentas galvoja…"
-                coroutineScope.launch {
-                    // sessionConfig and navState are Compose state — read fresh on the
-                    // main thread at launch time, before dispatching to IO inside askKentas.
-                    val reply = askKentas(
-                        userText = text,
-                        config = sessionConfig,
-                        navState = navState,
-                        apiKey = BuildConfig.OPENAI_API_KEY,
-                    )
-                    aiStatusMessage = reply
-                    // Speak the reply — stop any navigation announcement already playing.
-                    if (!isMuted) ttsManager.speak(reply)
-                }
-            } else {
-                // Recognizer returned OK but an empty transcript (mumble, background noise,
-                // silence timeout). Show a rotating Kentas-style fallback — no API call.
-                val fallback = KENTAS_FALLBACKS.random()
-                aiStatusMessage = fallback
-                if (!isMuted) ttsManager.speak(fallback)
-            }
+    // Voice status takes priority over generic AI status message in the display.
+    val effectiveStatus = voiceStatusText.ifBlank { aiStatusMessage }
+
+    // ── RECORD_AUDIO permission launcher ──────────────────────────────────
+    // Requests the mic permission at runtime (API 23+).
+    // On grant, immediately starts the SpeechRecognitionManager.
+    val audioPermLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        Log.d(MainActivity.FLOW_TAG, "RECORD_AUDIO permission result: granted=$granted")
+        if (granted) {
+            viewModel.onMicPressed()
         } else {
-            // RESULT_CANCELED = user dismissed without speaking; clear quietly.
-            aiStatusMessage = ""
+            aiStatusMessage = "Norint naudoti balso komandas, reikia suteikti mikrofono leidimą."
         }
     }
 
-    // audioPermLauncher — requests RECORD_AUDIO at runtime (required API 23+).
-    // On grant, immediately launches speech recognition.
-    val audioPermLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        if (granted) {
-            aiStatusMessage = "Klausau…"
-            launchSpeechIntent(context, speechLauncher) { aiStatusMessage = it }
+    // Helper called by both screens' mic button.
+    fun onMicPress() {
+        Log.d(MainActivity.FLOW_TAG, "mic press — checking RECORD_AUDIO permission")
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
+            == PackageManager.PERMISSION_GRANTED
+        ) {
+            viewModel.onMicPressed()
         } else {
-            aiStatusMessage = "Mikrofono leidimas atmestas"
+            audioPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
+    }
+
+    // ── Voice recognition result handler ──────────────────────────────────
+    // When SpeechRecognitionManager delivers a final result, pendingRecognizedText
+    // becomes non-null. We pass current nav state and session config to the ViewModel
+    // so it can execute the command. Execution logic lives in the ViewModel, not here.
+    LaunchedEffect(pendingRecognizedText) {
+        val text = pendingRecognizedText ?: return@LaunchedEffect
+        Log.d(MainActivity.FLOW_TAG, "pendingRecognizedText: '$text' — executing command")
+        viewModel.executeVoiceCommand(
+            text = text,
+            navState = navState,
+            sessionConfig = sessionConfig,
+            isMuted = isMuted,
+        )
+        viewModel.clearPendingRecognizedText()
+    }
+
+    // ── Voice navigation action handler ───────────────────────────────────
+    // ViewModel emits VoiceNavAction for commands that need composable-level state
+    // changes (isNavigating, isMuted) that the ViewModel cannot modify directly.
+    LaunchedEffect(pendingNavAction) {
+        val action = pendingNavAction ?: return@LaunchedEffect
+        Log.d(MainActivity.FLOW_TAG, "pendingNavAction: ${action::class.simpleName}")
+        when (action) {
+            is VoiceNavAction.StopNavigation -> {
+                navigationController.stopNavigation()
+                voiceSessionController.stopSession()
+                audioController.release()
+                viewModel.ttsManager.stop()
+                isNavigating = false
+                isMuted = false
+                aiStatusMessage = ""
+                startScreenError = null
+            }
+            is VoiceNavAction.StartNavigation -> {
+                startScreenError = null
+                aiStatusMessage = ""
+                if (!engineReady) {
+                    startScreenError = engineError ?: "Navigacija neparuošta. Palaukite…"
+                } else {
+                    Log.d(MainActivity.FLOW_TAG, "voice StartNavigation: dest='${action.destination}'")
+                    isNavigating = true
+                    navigationController.startNavigation(
+                        context = context,
+                        destination = action.destination,
+                        onError = { msg ->
+                            Log.e(MainActivity.FLOW_TAG, "voice startNavigation onError: $msg")
+                            isNavigating = false
+                            startScreenError = msg
+                            if (!isMuted) {
+                                viewModel.ttsManager.speak(
+                                    "Nepavyko rasti arba apskaičiuoti maršruto. Patikrinkite adresą."
+                                )
+                            }
+                        },
+                    )
+                }
+            }
+            is VoiceNavAction.Mute -> {
+                isMuted = true
+                aiStatusMessage = "AI nutildytas"
+            }
+            is VoiceNavAction.Unmute -> {
+                isMuted = false
+                aiStatusMessage = ""
+            }
+        }
+        viewModel.clearPendingNavAction()
     }
 
     val permission = safetyController.getPermission(navState)
@@ -287,10 +278,10 @@ private fun SturmanasApp(
     // TTS is checked independently because AudioController is a Phase 1 stub
     // (isAiPlaying is always false until Phase 3 PCM playback is wired up).
     if (safetyController.shouldInterruptAudio(navState) &&
-        (audioController.isAiPlaying || ttsManager.isSpeaking)
+        (audioController.isAiPlaying || viewModel.ttsManager.isSpeaking)
     ) {
         audioController.interruptAiAudio()
-        ttsManager.stop()
+        viewModel.ttsManager.stop()
         aiStatusMessage = "Navigacija perėmė garsą"
     }
 
@@ -315,21 +306,24 @@ private fun SturmanasApp(
         .takeIf { it != Int.MAX_VALUE } ?: 0
 
     LaunchedEffect(maneuverDist) {
+        // Do not speak while mic is listening — prevents feedback loop.
         if (isMuted || !navState.isNavigating || maneuverDist <= 0) return@LaunchedEffect
+        if (viewModel.isSpeechBlocked) return@LaunchedEffect
         val threshold = listOf(500, 200, 50).firstOrNull { t ->
             maneuverDist <= t && t !in announcedThresholds
         } ?: return@LaunchedEffect
         announcedThresholds.add(threshold)
         val instruction = buildNavInstruction(navState, maneuverDist)
-        if (instruction.isNotBlank()) ttsManager.speak(instruction)
+        if (instruction.isNotBlank()) {
+            viewModel.recordSpokenInstruction(instruction)   // store for RepeatInstruction
+            viewModel.ttsManager.speak(instruction)
+        }
     }
 
     // ── Route-start TTS confirmation ──────────────────────────────────────
     // Fires once when the navigation phase transitions to NAVIGATING (route ready,
     // guidance started). Uses the resolved address from navState so the spoken name
     // matches what the geocoder returned, not the raw typed string.
-    // previousPhase tracks the prior value so we only speak on the transition edge,
-    // not every recomposition while the phase remains NAVIGATING.
     var previousPhase by remember { mutableStateOf(NavigationPhase.IDLE) }
     LaunchedEffect(navState.phase) {
         if (navState.phase == NavigationPhase.NAVIGATING &&
@@ -337,13 +331,13 @@ private fun SturmanasApp(
         ) {
             if (!isMuted) {
                 val dest = navState.resolvedAddress.ifBlank { navState.destinationName }.ifBlank { "tikslą" }
-                ttsManager.speak("Maršrutas į $dest paruoštas. Pradedame kelionę.")
+                viewModel.ttsManager.speak("Maršrutas į $dest paruoštas. Pradedame kelionę.")
             }
         }
         previousPhase = navState.phase
     }
 
-    // Propagate navState error back to start screen if navigation is not yet active
+    // Propagate navState error back to start screen if navigation is not yet active.
     if (!isNavigating && navState.errorMessage != null) {
         startScreenError = navState.errorMessage
     }
@@ -356,6 +350,9 @@ private fun SturmanasApp(
             StartScreen(
                 errorMessage = displayError,
                 engineReady = engineReady,
+                voiceListeningState = voiceListeningState,
+                voiceStatusText = voiceStatusText,
+                onMicPress = { onMicPress() },
                 onStartNavigation = { destination, config ->
                     Log.d(MainActivity.FLOW_TAG, "navigation button pressed: destination='$destination' engineReady=$engineReady isNavigating=$isNavigating")
                     startScreenError = null
@@ -380,9 +377,8 @@ private fun SturmanasApp(
                             Log.e(MainActivity.FLOW_TAG, "startNavigation onError: $msg → isNavigating false")
                             isNavigating = false
                             startScreenError = msg
-                            // Speak the failure reason so the driver doesn't have to look at the screen.
                             if (!isMuted) {
-                                ttsManager.speak(
+                                viewModel.ttsManager.speak(
                                     "Nepavyko rasti arba apskaičiuoti maršruto. Patikrinkite adresą."
                                 )
                             }
@@ -398,25 +394,15 @@ private fun SturmanasApp(
                 navigationState = navState,
                 navigationController = navigationController,
                 conversationPermission = permission,
-                aiStatusMessage = aiStatusMessage,
+                aiStatusMessage = effectiveStatus,
                 isMuted = isMuted,
-                onMicPress = {
-                    if (ContextCompat.checkSelfPermission(
-                            context,
-                            Manifest.permission.RECORD_AUDIO,
-                        ) == PackageManager.PERMISSION_GRANTED
-                    ) {
-                        aiStatusMessage = "Klausau…"
-                        launchSpeechIntent(context, speechLauncher) { aiStatusMessage = it }
-                    } else {
-                        audioPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                    }
-                },
+                voiceListeningState = voiceListeningState,
+                onMicPress = { onMicPress() },
                 onMuteToggle = {
                     isMuted = !isMuted
                     if (isMuted) {
                         audioController.interruptAiAudio()
-                        ttsManager.stop()
+                        viewModel.ttsManager.stop()
                         aiStatusMessage = "AI nutildytas"
                     } else {
                         aiStatusMessage = ""
@@ -434,7 +420,7 @@ private fun SturmanasApp(
                     navigationController.stopNavigation()
                     voiceSessionController.stopSession()
                     audioController.release()
-                    ttsManager.stop()
+                    viewModel.ttsManager.stop()
                     isNavigating = false
                     isMuted = false
                     aiStatusMessage = ""
@@ -460,21 +446,29 @@ private fun buildNavInstruction(navState: NavigationState, distanceMeters: Int):
     val action = when (navState.maneuverType) {
         ManeuverType.TURN_LEFT        -> "sukite kairėn"
         ManeuverType.TURN_RIGHT       -> "sukite dešinėn"
-        ManeuverType.SLIGHT_LEFT      -> "lenkite kairėn"
-        ManeuverType.SLIGHT_RIGHT     -> "lenkite dešinėn"
+        ManeuverType.SLIGHT_LEFT      -> "šiek tiek kairėn"
+        ManeuverType.SLIGHT_RIGHT     -> "šiek tiek dešinėn"
         ManeuverType.SHARP_LEFT       -> "staigiai kairėn"
         ManeuverType.SHARP_RIGHT      -> "staigiai dešinėn"
         ManeuverType.UTURN            -> "apsisukite"
         ManeuverType.ROUNDABOUT       -> "įvažiuokite į žiedą"
         ManeuverType.MOTORWAY_EXIT    -> "važiuokite į išvažiavimą"
-        ManeuverType.LANE_CHANGE      -> "keiskite juostą"
-        ManeuverType.COMPLEX_JUNCTION -> "atidžiai į sankryžą"
-        ManeuverType.MERGE            -> "įsijunkite į srautą"
-        ManeuverType.FORK             -> "laikykitės kelio šakos"
-        ManeuverType.ARRIVE           -> return "Atvykote į tikslą."
-        else                          -> return ""  // NONE, STRAIGHT, UNKNOWN
+        ManeuverType.ARRIVE           -> return "Atvykote į tikslą!"
+        ManeuverType.NONE,
+        ManeuverType.STRAIGHT,
+        ManeuverType.UNKNOWN,
+        ManeuverType.LANE_CHANGE,
+        ManeuverType.COMPLEX_JUNCTION,
+        ManeuverType.MERGE,
+        ManeuverType.FORK             -> return ""
     }
-    val street = navState.nextRoadName.ifBlank { "" }
-    val prefix = if (distanceMeters <= 50) "Dabar" else "Po ${formatDistance(distanceMeters)}"
-    return if (street.isNotBlank()) "$prefix, $action į $street." else "$prefix, $action."
+
+    val road = navState.nextRoadName.ifBlank { navState.currentRoadName }
+    val roadSuffix = if (road.isNotBlank()) " į $road" else ""
+
+    return if (distanceMeters <= 50) {
+        "Dabar $action$roadSuffix."
+    } else {
+        "Po ${formatDistance(distanceMeters)} $action$roadSuffix."
+    }
 }

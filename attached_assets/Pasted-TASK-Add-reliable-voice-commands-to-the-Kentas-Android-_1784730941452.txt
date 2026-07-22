@@ -1,0 +1,437 @@
+TASK: Add reliable voice commands to the Kentas Android navigation app.
+
+CURRENT WORKING STATE
+
+The app already has:
+
+- Google Navigation SDK
+- Working address search
+- Working route creation
+- Working startGuidance()
+- Working navigation on a real Xiaomi phone
+- OpenAI chat
+- TextToSpeech through TtsManager
+- NavigationController / NavigationEngine architecture
+- Stable GoogleNavigationEngine lifecycle
+- Git repository is clean and synced
+
+IMPORTANT
+
+Do not rewrite the working navigation architecture.
+Do not break address search, route rendering, startGuidance, TTS, or engine lifecycle.
+
+GOAL
+
+Allow the driver to speak commands to Kentas while navigating.
+
+The user should be able to press a microphone button and say commands such as:
+
+- „Kiek liko važiuoti?“
+- „Kiek kilometrų liko?“
+- „Kada atvyksime?“
+- „Kur važiuojame?“
+- „Pakartok nurodymą.“
+- „Nutildyk balsą.“
+- „Įjunk balsą.“
+- „Sustabdyk navigaciją.“
+- „Atšaukti maršrutą.“
+- „Važiuojam į Taikos prospektą 61, Klaipėda.“
+- „Rask kelią į Vilniaus gatvę 1, Vilnius.“
+
+IMPLEMENTATION REQUIREMENTS
+
+1. Speech recognition
+
+Use Android SpeechRecognizer.
+
+Create a reusable component:
+
+voice/SpeechRecognitionManager.kt
+
+Responsibilities:
+
+- initialize SpeechRecognizer safely
+- use application context where appropriate
+- expose listening state
+- start listening
+- stop listening
+- cancel listening
+- release resources
+- return recognized Lithuanian text
+- return understandable error messages
+
+Recognition language:
+
+lt-LT
+
+Recognition intent settings:
+
+- RecognizerIntent.ACTION_RECOGNIZE_SPEECH
+- LANGUAGE_MODEL_FREE_FORM
+- EXTRA_LANGUAGE = "lt-LT"
+- EXTRA_LANGUAGE_PREFERENCE = "lt-LT"
+- EXTRA_PARTIAL_RESULTS = true
+- EXTRA_MAX_RESULTS = 3
+
+2. Permissions
+
+Add and handle:
+
+android.permission.RECORD_AUDIO
+
+Request permission at runtime.
+
+If permission is denied, show:
+
+„Norint naudoti balso komandas, reikia suteikti mikrofono leidimą.“
+
+Do not crash when permission is missing.
+
+3. UI
+
+Add a microphone button to the existing UI.
+
+The microphone button must be available:
+
+- on the start screen
+- during active navigation
+
+States:
+
+- idle microphone icon
+- listening state
+- processing state
+- error state
+
+While listening, display:
+
+„Kentas klauso…“
+
+When speech is recognized, display:
+
+„Išgirdau: <recognized text>“
+
+Do not create a completely new screen.
+Integrate into the current Compose UI.
+
+4. Command parser
+
+Create:
+
+voice/VoiceCommandParser.kt
+
+Use deterministic local parsing before sending anything to OpenAI.
+
+Create sealed class or equivalent:
+
+VoiceCommand
+
+Suggested commands:
+
+- RemainingDistance
+- RemainingTime
+- DestinationInfo
+- RepeatInstruction
+- MuteVoice
+- UnmuteVoice
+- StopNavigation
+- StartNavigation(destination: String)
+- GeneralQuestion(text: String)
+- Unknown(text: String)
+
+Normalize input:
+
+- lowercase
+- trim
+- remove duplicated spaces
+- tolerate Lithuanian letter variations
+- tolerate punctuation
+- accept several common phrases for every command
+
+Examples:
+
+RemainingDistance:
+- „kiek liko“
+- „kiek kilometrų liko“
+- „koks likęs atstumas“
+- „dar toli“
+
+RemainingTime:
+- „kiek laiko liko“
+- „kada atvyksime“
+- „kada būsim“
+- „koks atvykimo laikas“
+
+StopNavigation:
+- „sustabdyk navigaciją“
+- „atšauk maršrutą“
+- „baik navigaciją“
+- „nebevažiuojam“
+
+MuteVoice:
+- „nutildyk balsą“
+- „nekalbėk“
+- „išjunk balsą“
+
+UnmuteVoice:
+- „įjunk balsą“
+- „kalbėk“
+- „garsą įjunk“
+
+StartNavigation:
+Recognize phrases beginning with:
+
+- „važiuojam į“
+- „naviguok į“
+- „rask kelią į“
+- „rodyk kelią į“
+- „maršrutas į“
+
+Everything after the phrase is the destination.
+
+5. Command execution
+
+Create a central command handler in MainViewModel or another stable ViewModel-owned component.
+
+Do not execute navigation commands directly inside a composable.
+
+Command behavior:
+
+RemainingDistance:
+- read the current remaining distance from navigation state
+- respond in natural Lithuanian
+- speak the response through TtsManager
+
+Examples:
+- „Liko maždaug 4 kilometrai.“
+- „Liko apie 700 metrų.“
+
+RemainingTime:
+- read remaining duration
+- produce natural Lithuanian response
+- speak it
+
+Examples:
+- „Liko apie 12 minučių.“
+- „Atvyksime maždaug po 35 minučių.“
+
+DestinationInfo:
+- speak current destination name
+- if no active destination, say:
+  „Šiuo metu maršrutas nepasirinktas.“
+
+RepeatInstruction:
+- repeat the most recent navigation instruction if available
+- otherwise say:
+  „Dar neturiu nurodymo, kurį galėčiau pakartoti.“
+
+MuteVoice:
+- update existing TTS mute setting
+- immediately stop current speech
+- show confirmation visually
+- do not speak confirmation after muting
+
+UnmuteVoice:
+- enable TTS
+- speak:
+  „Balsas įjungtas.“
+
+StopNavigation:
+- stop guidance through NavigationController
+- return UI to the start state safely
+- do not destroy the Navigator
+- speak:
+  „Navigacija sustabdyta.“
+
+StartNavigation(destination):
+- validate destination is not blank
+- use the existing working navigation start flow
+- preserve the current address resolver
+- do not duplicate GoogleNavigationEngine logic
+- display and speak an understandable error if navigation fails
+
+GeneralQuestion:
+- send the recognized text through the existing OpenAI chat flow
+- speak the AI response through the existing TtsManager
+- do not block the main thread
+
+6. Navigation state
+
+Expose the data required for voice responses:
+
+- remainingDistanceMeters
+- remainingTimeSeconds or equivalent
+- currentDestinationName
+- latestNavigationInstruction
+- isGuidanceActive
+
+Use the existing NavigationState if possible.
+
+Do not create duplicate navigation state in multiple classes.
+
+7. TTS and microphone coordination
+
+Prevent Kentas from recognizing its own speech.
+
+Before starting SpeechRecognizer:
+
+- stop current TTS speech
+
+While microphone is listening:
+
+- do not start new TTS speech
+
+After recognition completes:
+
+- execute command
+- then allow TTS response
+
+Prevent repeated commands caused by duplicate final recognition callbacks.
+
+8. Lifecycle safety
+
+SpeechRecognizer must:
+
+- not be recreated on every Compose recomposition
+- live in a ViewModel or stable lifecycle owner
+- be destroyed only when genuinely no longer needed
+- not retain an Activity reference
+- handle Activity pause/resume safely
+- cancel active listening during teardown
+
+Do not repeat the previous navigation lifecycle mistake.
+
+9. Error handling
+
+Map SpeechRecognizer errors to Lithuanian messages.
+
+Examples:
+
+ERROR_NO_MATCH:
+„Nieko aiškiai neišgirdau. Pabandykite dar kartą.“
+
+ERROR_SPEECH_TIMEOUT:
+„Nieko neišgirdau.“
+
+ERROR_NETWORK:
+„Balso atpažinimui nepavyko prisijungti prie interneto.“
+
+ERROR_AUDIO:
+„Nepavyko naudoti mikrofono.“
+
+ERROR_RECOGNIZER_BUSY:
+Cancel and allow retry without crashing.
+
+Log the numeric error code.
+
+10. Logging
+
+Use consistent tags:
+
+KentasVoice
+KentasFlow
+
+Log:
+
+- microphone button pressed
+- permission state
+- listening started
+- partial recognition
+- final recognition
+- parsed command type
+- command execution
+- command result
+- SpeechRecognizer error
+- TTS stopped before listening
+- duplicate callback ignored
+
+Do not log API keys or secrets.
+
+11. Tests
+
+Add unit tests for VoiceCommandParser.
+
+Minimum cases:
+
+- remaining distance phrases
+- remaining time phrases
+- stop navigation phrases
+- mute/unmute phrases
+- repeat instruction phrases
+- start navigation destination extraction
+- uppercase input
+- punctuation
+- duplicate spaces
+- Lithuanian characters
+- unknown/general question
+- blank input
+
+At least 25 parser test cases.
+
+12. Manual real-device acceptance test
+
+Test on the connected Xiaomi phone:
+
+A. No active route:
+- Press microphone
+- Say „Važiuojam į Taikos prospektą 61, Klaipėda“
+- Route must be created and guidance started
+
+B. During navigation:
+- „Kiek liko važiuoti?“
+- Kentas answers using current navigation state
+
+C. During navigation:
+- „Kada atvyksime?“
+- Kentas answers with remaining time
+
+D. During navigation:
+- „Pakartok nurodymą.“
+- Kentas repeats latest instruction
+
+E. During navigation:
+- „Nutildyk balsą.“
+- Speech stops and mute state updates
+
+F. Then:
+- „Įjunk balsą.“
+- Kentas says „Balsas įjungtas.“
+
+G. During navigation:
+- „Sustabdyk navigaciją.“
+- Guidance stops without Navigator destruction
+
+13. Build verification
+
+Run:
+
+./gradlew :app:testDebugUnitTest
+./gradlew :app:compileDebugKotlin
+
+Do not commit or push until both succeed.
+
+14. Git safety
+
+Before changes:
+
+git status
+
+After implementation:
+
+git diff --stat
+git status
+
+Do not push automatically.
+
+FINAL REPORT
+
+Report:
+
+- architecture used
+- files added
+- files changed
+- supported Lithuanian commands
+- parser test count and result
+- compile result
+- any manual phone test still required
+- any known Android/Xiaomi limitation

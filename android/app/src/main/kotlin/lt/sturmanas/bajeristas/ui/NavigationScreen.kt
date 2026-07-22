@@ -1,6 +1,5 @@
 package lt.sturmanas.bajeristas.ui
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,9 +10,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Card
@@ -44,6 +41,8 @@ import lt.sturmanas.bajeristas.navigation.NavigationController
 import lt.sturmanas.bajeristas.navigation.NavigationPhase
 import lt.sturmanas.bajeristas.navigation.NavigationState
 import lt.sturmanas.bajeristas.safety.ConversationPermission
+import lt.sturmanas.bajeristas.voice.VoiceListeningState
+import lt.sturmanas.bajeristas.ui.MicButton
 
 @Composable
 fun NavigationScreen(
@@ -52,6 +51,8 @@ fun NavigationScreen(
     conversationPermission: ConversationPermission,
     aiStatusMessage: String,
     isMuted: Boolean,
+    /** Current speech-recognition state; drives the mic button appearance. */
+    voiceListeningState: VoiceListeningState = VoiceListeningState.IDLE,
     onMicPress: () -> Unit,
     onMuteToggle: () -> Unit,
     onEnableStandardVoice: () -> Unit,
@@ -295,29 +296,14 @@ fun NavigationScreen(
                     )
                 }
 
-                // Push-to-talk mic button (Phase 3: replace onClick with pointerInput press/release)
                 val micEnabled = conversationPermission != ConversationPermission.BLOCKED && !isMuted
-                Box(
-                    modifier = Modifier
-                        .size(80.dp)
-                        .background(
-                            color = if (micEnabled) MaterialTheme.colorScheme.primary else Color.Gray,
-                            shape = CircleShape,
-                        ),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    IconButton(
-                        onClick = { if (micEnabled) onMicPress() },
-                        modifier = Modifier.fillMaxSize(),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Mic,
-                            contentDescription = "Kalbėti",
-                            tint = Color.White,
-                            modifier = Modifier.size(36.dp),
-                        )
-                    }
-                }
+                MicButton(
+                    state = if (micEnabled) voiceListeningState else VoiceListeningState.IDLE,
+                    statusText = "",   // status shown separately in the aiStatusMessage row above
+                    enabled = micEnabled,
+                    onClick = onMicPress,
+                    size = 80.dp,
+                )
 
                 TextButton(onClick = onStopNavigation) {
                     Text("Baigti", color = MaterialTheme.colorScheme.error)
