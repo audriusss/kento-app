@@ -13,6 +13,10 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Locale
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.sin
+import kotlin.math.sqrt
 
 /**
  * Provides the device's current location and reverse-geocoded locality name.
@@ -53,6 +57,12 @@ object LocationProvider {
     /** Minimum distance before a location update callback is triggered (100 m). */
     private const val UPDATE_MIN_DISTANCE_M = 100f
 
+    /** How long a cached locality result is considered fresh (5 minutes). */
+    private const val LOCALITY_CACHE_TTL_MS = 5 * 60 * 1_000L
+
+    /** Distance threshold beyond which the locality cache is invalidated (~500 m). */
+    private const val LOCALITY_CACHE_MAX_DISTANCE_M = 500.0
+
     /**
      * The most recent location fix delivered by [startUpdates].
      * Null until the first update arrives or when [stopUpdates] clears it.
@@ -62,6 +72,23 @@ object LocationProvider {
         private set
 
     private var locationListener: LocationListener? = null
+
+    // ── Locality cache ─────────────────────────────────────────────────────
+
+    /**
+     * Cached result of the last successful reverse-geocode call.
+     * Invalidated when the device moves > [LOCALITY_CACHE_MAX_DISTANCE_M] or
+     * when the entry is older than [LOCALITY_CACHE_TTL_MS].
+     */
+    private data class LocalityCache(
+        val lat: Double,
+        val lng: Double,
+        val locality: String?,
+        val timestampMs: Long,
+    )
+
+    @Volatile
+    private var localityCache: LocalityCache? = null
 
     // ── Continuous-update API ──────────────────────────────────────────────
 
@@ -141,7 +168,7 @@ object LocationProvider {
     }
 
     /**
-     * Stops location updates and clears [cachedLocation].
+     * Stops location updates and clears [cachedLocation] and the locality cache.
      * Call from [ViewModel.onCleared] to release the system resource.
      */
     fun stopUpdates(context: Context) {
@@ -152,6 +179,7 @@ object LocationProvider {
         }
         locationListener = null
         cachedLocation = null
+        localityCache = null
     }
 
     // ── One-shot API ───────────────────────────────────────────────────────
@@ -184,8 +212,8 @@ object LocationProvider {
             val ageMs = System.currentTimeMillis() - location.time
             Log.d(TAG, "Got location: lat=$lat lng=$lng provider=${location.provider} age=${ageMs}ms")
 
-            val locality = reverseGeocodeLocality(context, lat, lng)
-            Log.d(TAG, "Reverse-geocoded locality: '$locality'")
+            val locality = getCachedOrFetchLocality(context, lat, lng)
+            Log.d(TAG, "Locality (cached or fresh): '$locality'")
 
             Triple(lat, lng, locality)
         }
@@ -217,6 +245,52 @@ object LocationProvider {
                 null
             }
         }
+    }
+
+    /**
+     * Returns a cached locality if the cache is still fresh and the device hasn't
+     * moved significantly; otherwise fetches a fresh value via [reverseGeocodeLocality]
+     * and stores it in [localityCache].
+     *
+     * Cache is valid when:
+     *  - age < [LOCALITY_CACHE_TTL_MS] (5 minutes), AND
+     *  - Haversine distance from cached position < [LOCALITY_CACHE_MAX_DISTANCE_M] (500 m).
+     */
+    private suspend fun getCachedOrFetchLocality(
+        context: Context,
+        lat: Double,
+        lng: Double,
+    ): String? {
+        val cache = localityCache
+        val nowMs = System.currentTimeMillis()
+
+        if (cache != null) {
+            val ageMs = nowMs - cache.timestampMs
+            val distanceM = haversineDistanceM(cache.lat, cache.lng, lat, lng)
+            if (ageMs < LOCALITY_CACHE_TTL_MS && distanceM < LOCALITY_CACHE_MAX_DISTANCE_M) {
+                Log.d(TAG, "Locality cache hit: '${cache.locality}' age=${ageMs}ms dist=${distanceM.toInt()}m")
+                return cache.locality
+            }
+            Log.d(TAG, "Locality cache miss: age=${ageMs}ms dist=${distanceM.toInt()}m — fetching fresh")
+        }
+
+        val locality = reverseGeocodeLocality(context, lat, lng)
+        localityCache = LocalityCache(lat = lat, lng = lng, locality = locality, timestampMs = nowMs)
+        return locality
+    }
+
+    /**
+     * Approximate straight-line distance in metres between two WGS-84 coordinates
+     * using the Haversine formula. Accurate enough for the 500 m invalidation threshold.
+     */
+    private fun haversineDistanceM(lat1: Double, lng1: Double, lat2: Double, lng2: Double): Double {
+        val earthRadiusM = 6_371_000.0
+        val dLat = Math.toRadians(lat2 - lat1)
+        val dLng = Math.toRadians(lng2 - lng1)
+        val a = sin(dLat / 2) * sin(dLat / 2) +
+                cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) *
+                sin(dLng / 2) * sin(dLng / 2)
+        return earthRadiusM * 2 * atan2(sqrt(a), sqrt(1 - a))
     }
 
     /**
