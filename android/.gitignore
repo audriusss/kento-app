@@ -9,3 +9,4 @@
 .cxx
 *.jks
 *.keystore
+app/build/
