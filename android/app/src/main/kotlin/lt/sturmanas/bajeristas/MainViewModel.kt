@@ -137,6 +137,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     init {
         speechRecognitionManager.initialize()
         setupRecognitionCallbacks()
+        startLocationUpdates()
+    }
+
+    // ── Location caching ──────────────────────────────────────────────────
+
+    /**
+     * Starts continuous location updates so [resolveAndNavigate] can read a cached
+     * fix immediately, even on the very first voice command after a cold launch.
+     *
+     * The update interval is coarse (every 30 s / 100 m) — enough to keep
+     * [LocationProvider.cachedLocation] fresh without draining the battery.
+     *
+     * Failure (no permission, no provider) is silent: [LocationProvider.cachedLocation]
+     * stays null and [resolveAndNavigate] degrades to an unbiased search gracefully.
+     */
+    private fun startLocationUpdates() {
+        try {
+            LocationProvider.startUpdates(getApplication())
+            Log.d(TAG, "Location updates started")
+        } catch (e: Exception) {
+            // Defensive: permission not yet granted at ViewModel creation time.
+            Log.w(TAG, "startLocationUpdates failed: ${e.message}")
+        }
     }
 
     private fun setupRecognitionCallbacks() {
@@ -388,6 +411,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
+        LocationProvider.stopUpdates(getApplication())
         speechRecognitionManager.release()
         ttsManager.release()
     }
@@ -402,10 +426,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         Log.d(DEST_TAG, "resolveAndNavigate: raw='$rawDestination'")
         val savedPlaces = savedPlacesRepository.getAll()
 
-        // Fetch the device's best last-known location so DestinationResolver can bias
-        // searches to within ~20 km of the user (e.g. "artimiausia degalinė" finds a
-        // petrol station near the current position rather than anywhere in the country).
-        // All three values gracefully degrade to null when no fix is available yet.
+        // Read the continuously-updated cached fix. getCurrentLocation() now checks
+        // LocationProvider.cachedLocation first, so this returns immediately when
+        // startLocationUpdates() has already received a fix — no blocking GPS call.
+        // All three values degrade to null gracefully when no fix is available yet.
         val (currentLat, currentLng, currentLocality) =
             LocationProvider.getCurrentLocation(getApplication())
         Log.d(DEST_TAG, "location: lat=$currentLat lng=$currentLng locality='$currentLocality'")
