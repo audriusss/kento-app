@@ -1,0 +1,285 @@
+TASK: Improve voice destination understanding without breaking the working navigation flow.
+
+CURRENT VERIFIED STATE
+
+The Android app now works on a real Xiaomi phone:
+
+- Lithuanian speech recognition works
+- spoken full addresses start navigation
+- remaining distance voice command works
+- repeat instruction works
+- stop navigation works
+- Google Navigation SDK route flow works
+- Navigator lifecycle is stable
+
+IMPORTANT
+
+Do not rewrite the navigation engine.
+Do not modify the working Navigator lifecycle.
+Do not break full-address voice navigation.
+
+GOAL
+
+Allow users to speak shorter and more natural destination phrases instead of requiring a complete postal address.
+
+Examples that should work:
+
+- „Važiuojam į Taikos 61.“
+- „Į Taikos prospektą 61.“
+- „Rask Akropolį.“
+- „Važiuojam į Klaipėdos Akropolį.“
+- „Rask artimiausią Maximą.“
+- „Važiuojam į centrą.“
+- „Važiuojam namo.“
+- „Važiuojam į darbą.“
+- „Artimiausia degalinė.“
+- „Rask kavos.“
+- „Rask parkingą.“
+
+IMPLEMENTATION
+
+1. Create a destination resolution layer
+
+Add:
+
+navigation/DestinationResolver.kt
+
+It must convert natural Lithuanian destination text into the best possible navigation query.
+
+Input:
+
+- recognized voice text
+- current device latitude and longitude if available
+- current city or locality if available
+- optional saved places
+
+Output sealed class:
+
+DestinationResolution
+
+- ExactAddress(query)
+- PlaceSearch(query)
+- SavedPlace(name, address)
+- NeedsClarification(originalText, suggestions)
+- Failure(message)
+
+2. Normalize Lithuanian address phrases
+
+Support common abbreviations and natural forms:
+
+- „Taikos 61“ → „Taikos prospektas 61“
+- „Minijos 12“ → „Minijos gatvė 12“
+- „H. Manto 20“ → preserve correctly
+- „Klaipėdos Akropolis“ → place search
+- „centras“ → city centre near current location
+
+Do not blindly append „Lietuva“ before trying local context.
+
+Resolution order:
+
+A. Saved place aliases
+B. Obvious address
+C. Local address with current city
+D. Named place / POI search
+E. Google Geocoding or Places fallback
+F. Clarification
+
+3. Add local city context
+
+When the user says:
+
+- „Taikos 61“
+- „Akropolis“
+- „centras“
+
+prefer results near the current location.
+
+Use current location to bias geocoding/place search.
+
+If the app knows the current city is Klaipėda, first try:
+
+- „Taikos prospektas 61, Klaipėda“
+- „Akropolis, Klaipėda“
+- „Klaipėdos centras“
+
+Do not hardcode Klaipėda as the only city.
+Derive locality from current location when possible.
+
+4. Place and category commands
+
+Recognize POI/category phrases:
+
+- degalinė
+- kavinė
+- restoranas
+- parduotuvė
+- Maxima
+- Lidl
+- Rimi
+- parkingas
+- automobilių stovėjimo aikštelė
+- vaistinė
+- ligoninė
+- bankomatas
+
+Support:
+
+- „artimiausia degalinė“
+- „rask kavos“
+- „rask parkingą“
+- „važiuojam į Lidl“
+
+Use a nearby-place or text-search flow biased by current location.
+
+If multiple relevant results exist, do not silently choose a distant result.
+
+5. Clarification flow
+
+When several destinations are plausible, Kentas must ask a short question.
+
+Examples:
+
+„Radau kelis variantus. Kurį renkamės?“
+
+Show up to 3 choices:
+
+- name
+- short address
+- distance from current location
+
+Allow the user to answer by voice:
+
+- „pirmą“
+- „antrą“
+- „trečią“
+- place name fragment
+
+Add a pending destination choice state in the ViewModel.
+
+Do not send clarification selection to OpenAI.
+
+6. Saved places
+
+Add simple saved aliases:
+
+- namai
+- namo
+- darbas
+- į darbą
+
+Store addresses using DataStore or the existing settings storage.
+
+If no address is configured, say:
+
+„Namų adresas dar nenustatytas.“
+
+Add a minimal settings UI for:
+
+- Home address
+- Work address
+
+Do not require account login.
+
+7. Voice parser changes
+
+Expand StartNavigation recognition to accept:
+
+- „į …“
+- „važiuojam …“
+- „nuvežk į …“
+- „vežk į …“
+- „rask …“
+- „rodyk …“
+- „artimiausia …“
+
+Be careful:
+
+„kiek liko“ must still map to RemainingDistance and must not be interpreted as a destination.
+
+Keep deterministic commands ahead of destination matching.
+
+8. Navigation integration
+
+Use the existing navigationController.startNavigation() flow.
+
+Do not duplicate GoogleNavigationEngine address resolution.
+
+DestinationResolver should produce the best query, then pass it to the existing working navigation flow.
+
+If a POI result has coordinates, add support for starting navigation directly from latitude/longitude.
+
+9. User feedback
+
+Show stages:
+
+- „Kentas ieško vietos…“
+- „Rasta: <place name>“
+- „Radau kelis variantus“
+- „Vietos rasti nepavyko“
+
+Speak concise Lithuanian responses.
+
+10. Logging
+
+Use tags:
+
+KentasVoice
+KentasDestination
+KentasFlow
+
+Log:
+
+- original spoken destination
+- normalized query
+- current locality
+- resolution method
+- candidate count
+- selected candidate
+- final address or coordinates
+- failure reason
+
+Do not log API keys.
+
+11. Tests
+
+Add at least 35 unit tests covering:
+
+- short street address
+- street abbreviation
+- full address unchanged
+- POI name
+- category search
+- nearest-place phrase
+- city centre
+- home/work aliases
+- ambiguous results
+- ordinal clarification
+- empty destination
+- command collision with „kiek liko“
+- Lithuanian diacritics
+- punctuation and duplicate spaces
+
+12. Build verification
+
+Run locally or ensure the user runs:
+
+./gradlew :app:testDebugUnitTest
+./gradlew :app:compileDebugKotlin
+
+Do not claim successful compilation without an actual Gradle result.
+
+13. Git safety
+
+Do not push automatically.
+
+FINAL REPORT
+
+Report:
+
+- files added and changed
+- destination resolution order
+- supported short phrases
+- saved-place behavior
+- clarification behavior
+- test count
+- actual build result or clearly state that local build is still required
