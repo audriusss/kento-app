@@ -22,7 +22,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.launch
+import lt.sturmanas.bajeristas.navigation.ManeuverType
+import lt.sturmanas.bajeristas.navigation.NavigationState
+import lt.sturmanas.bajeristas.personality.formatDistance
+import lt.sturmanas.bajeristas.voice.TtsManager
 import lt.sturmanas.bajeristas.voice.askKentas
+import androidx.activity.viewModels
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -52,6 +58,9 @@ class MainActivity : ComponentActivity() {
             MockNavigationEngine()
         }
     }
+
+    // Survives screen rotation — holds TtsManager so TTS is not restarted on every rotation.
+    private val viewModel: MainViewModel by viewModels()
 
     private val navigationController by lazy { NavigationController(engine) }
     private val safetyController = SafetyController()
@@ -96,6 +105,7 @@ class MainActivity : ComponentActivity() {
                     safetyController = safetyController,
                     voiceSessionController = voiceSessionController,
                     audioController = audioController,
+                    ttsManager = viewModel.ttsManager,
                     engineReady = engineReady.value,
                     engineError = engineError.value,
                     permissionDenied = permissionState.value == PermissionState.Denied,
@@ -185,6 +195,7 @@ private fun SturmanasApp(
     safetyController: SafetyController,
     voiceSessionController: VoiceSessionController,
     audioController: AudioController,
+    ttsManager: TtsManager,
     engineReady: Boolean,
     engineError: String?,
     permissionDenied: Boolean,
@@ -216,17 +227,22 @@ private fun SturmanasApp(
                 coroutineScope.launch {
                     // sessionConfig and navState are Compose state — read fresh on the
                     // main thread at launch time, before dispatching to IO inside askKentas.
-                    aiStatusMessage = askKentas(
+                    val reply = askKentas(
                         userText = text,
                         config = sessionConfig,
                         navState = navState,
                         apiKey = BuildConfig.OPENAI_API_KEY,
                     )
+                    aiStatusMessage = reply
+                    // Speak the reply — stop any navigation announcement already playing.
+                    if (!isMuted) ttsManager.speak(reply)
                 }
             } else {
                 // Recognizer returned OK but an empty transcript (mumble, background noise,
                 // silence timeout). Show a rotating Kentas-style fallback — no API call.
-                aiStatusMessage = KENTAS_FALLBACKS.random()
+                val fallback = KENTAS_FALLBACKS.random()
+                aiStatusMessage = fallback
+                if (!isMuted) ttsManager.speak(fallback)
             }
         } else {
             // RESULT_CANCELED = user dismissed without speaking; clear quietly.
@@ -249,10 +265,45 @@ private fun SturmanasApp(
 
     val permission = safetyController.getPermission(navState)
 
-    // Safety rule — navigation always takes priority over AI audio
-    if (safetyController.shouldInterruptAudio(navState) && audioController.isAiPlaying) {
+    // Safety rule — navigation always takes priority over AI audio.
+    // TTS is checked independently because AudioController is a Phase 1 stub
+    // (isAiPlaying is always false until Phase 3 PCM playback is wired up).
+    if (safetyController.shouldInterruptAudio(navState) &&
+        (audioController.isAiPlaying || ttsManager.isSpeaking)
+    ) {
         audioController.interruptAiAudio()
+        ttsManager.stop()
         aiStatusMessage = "Navigacija perėmė garsą"
+    }
+
+    // ── Navigation maneuver announcements ─────────────────────────────────
+    // Speak the next maneuver at three closing distances: 500 m, 200 m, 50 m.
+    //
+    // announcedThresholds is a plain MutableSet (not Compose state) so mutations
+    // inside LaunchedEffect do not trigger recomposition — only TTS side-effects.
+    val announcedThresholds = remember { mutableSetOf<Int>() }
+    var lastManeuverKey by remember { mutableStateOf("") }
+    val maneuverKey = "${navState.maneuverType}_${navState.nextRoadName}"
+
+    // Maneuver changed — clear the set so all thresholds can fire again.
+    LaunchedEffect(navState.maneuverType, navState.nextRoadName) {
+        if (maneuverKey != lastManeuverKey) {
+            announcedThresholds.clear()
+            lastManeuverKey = maneuverKey
+        }
+    }
+
+    val maneuverDist = navState.distanceToNextManeuverMeters
+        .takeIf { it != Int.MAX_VALUE } ?: 0
+
+    LaunchedEffect(maneuverDist) {
+        if (isMuted || !navState.isNavigating || maneuverDist <= 0) return@LaunchedEffect
+        val threshold = listOf(500, 200, 50).firstOrNull { t ->
+            maneuverDist <= t && t !in announcedThresholds
+        } ?: return@LaunchedEffect
+        announcedThresholds.add(threshold)
+        val instruction = buildNavInstruction(navState, maneuverDist)
+        if (instruction.isNotBlank()) ttsManager.speak(instruction)
     }
 
     // Propagate navState error back to start screen if navigation is not yet active
@@ -315,6 +366,7 @@ private fun SturmanasApp(
                     isMuted = !isMuted
                     if (isMuted) {
                         audioController.interruptAiAudio()
+                        ttsManager.stop()
                         aiStatusMessage = "AI nutildytas"
                     } else {
                         aiStatusMessage = ""
@@ -331,6 +383,7 @@ private fun SturmanasApp(
                     navigationController.stopNavigation()
                     voiceSessionController.stopSession()
                     audioController.release()
+                    ttsManager.stop()
                     isNavigating = false
                     isMuted = false
                     aiStatusMessage = ""
@@ -339,4 +392,38 @@ private fun SturmanasApp(
             )
         }
     }
+}
+
+// ── Navigation instruction builder ────────────────────────────────────────────
+
+/**
+ * Builds a spoken Lithuanian instruction for an upcoming maneuver in [navState].
+ *
+ * Returns an empty string for passive maneuvers (NONE, STRAIGHT, UNKNOWN) — no
+ * announcement is needed when the driver just continues straight ahead.
+ *
+ * @param distanceMeters Actual distance to the maneuver at the moment of the call.
+ *   Used to choose between "Dabar" (≤ 50 m) and "Po [distance]" phrasing.
+ */
+private fun buildNavInstruction(navState: NavigationState, distanceMeters: Int): String {
+    val action = when (navState.maneuverType) {
+        ManeuverType.TURN_LEFT        -> "sukite kairėn"
+        ManeuverType.TURN_RIGHT       -> "sukite dešinėn"
+        ManeuverType.SLIGHT_LEFT      -> "lenkite kairėn"
+        ManeuverType.SLIGHT_RIGHT     -> "lenkite dešinėn"
+        ManeuverType.SHARP_LEFT       -> "staigiai kairėn"
+        ManeuverType.SHARP_RIGHT      -> "staigiai dešinėn"
+        ManeuverType.UTURN            -> "apsisukite"
+        ManeuverType.ROUNDABOUT       -> "įvažiuokite į žiedą"
+        ManeuverType.MOTORWAY_EXIT    -> "važiuokite į išvažiavimą"
+        ManeuverType.LANE_CHANGE      -> "keiskite juostą"
+        ManeuverType.COMPLEX_JUNCTION -> "atidžiai į sankryžą"
+        ManeuverType.MERGE            -> "įsijunkite į srautą"
+        ManeuverType.FORK             -> "laikykitės kelio šakos"
+        ManeuverType.ARRIVE           -> return "Atvykote į tikslą."
+        else                          -> return ""  // NONE, STRAIGHT, UNKNOWN
+    }
+    val street = navState.nextRoadName.ifBlank { "" }
+    val prefix = if (distanceMeters <= 50) "Dabar" else "Po ${formatDistance(distanceMeters)}"
+    return if (street.isNotBlank()) "$prefix, $action į $street." else "$prefix, $action."
 }
