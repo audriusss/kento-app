@@ -292,7 +292,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        speechRecognitionManager.onRecoverableError = { errorCode ->
+        speechRecognitionManager.onRecoverableError = recoverableError@{ errorCode ->
             val name = RecoveryPolicy.errorName(errorCode)
             Log.w(LIFECYCLE_TAG,
                 "SR: RECOVERABLE_ERROR code=$errorCode ($name) " +
@@ -308,7 +308,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 else RecoveryPolicy.statusText(errorCode)
                 _voiceStatusText.value = msg
                 scheduleStatusClear(3_000)
-                return@onRecoverableError
+                return@recoverableError
             }
 
             // Continuous session: route through the SINGLE restart path.

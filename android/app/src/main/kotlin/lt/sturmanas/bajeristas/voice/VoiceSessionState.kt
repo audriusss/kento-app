@@ -92,18 +92,18 @@ sealed class VoiceSessionState {
     object Listening : VoiceSessionState()
 
     /** Lithuanian status label shown below [MicButton]. */
+    @Suppress("DEPRECATION")
     val statusText: String
         get() = when (this) {
-            is Idle          -> "Kentas išjungtas"
-            is Starting      -> "Įjungiamas klausymas…"
+            is Idle           -> "Kentas išjungtas"
+            is Starting       -> "Įjungiamas klausymas…"
             is ListeningReady -> "Kentas klauso…"
-            is UserSpeaking  -> "Klausau…"
-            is Processing    -> "Atpažįstu…"
-            is Speaking      -> "Kentas kalba…"
-            is RestartDelay  -> "Laukiu komandos…"
-            is Recovering    -> "Atkuriamas balso atpažinimas…"
-            is Error         -> message
-            @Suppress("DEPRECATION")
-            is Listening     -> "Kentas klauso…"
+            is UserSpeaking   -> "Klausau…"
+            is Processing     -> "Atpažįstu…"
+            is Speaking       -> "Kentas kalba…"
+            is RestartDelay   -> "Laukiu komandos…"
+            is Recovering     -> "Atkuriamas balso atpažinimas…"
+            is Error          -> message
+            is Listening      -> "Kentas klauso…"
         }
 }
