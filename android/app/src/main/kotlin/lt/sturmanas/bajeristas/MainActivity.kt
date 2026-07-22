@@ -82,6 +82,10 @@ class MainActivity : ComponentActivity() {
     ) { granted ->
         if (granted) {
             permissionState.value = PermissionState.Granted
+            // Re-subscribe to location updates now that permission is available.
+            // startLocationUpdates() was called in MainViewModel.init but silently
+            // failed (SecurityException) because the permission was not yet granted.
+            viewModel.retryLocationUpdates()
             initializeNavigation()
         } else {
             permissionState.value = PermissionState.Denied
@@ -121,6 +125,22 @@ class MainActivity : ComponentActivity() {
                     permissionDenied      = permissionState.value == PermissionState.Denied,
                 )
             }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // If the user previously denied the permission dialog but then granted it
+        // from the system Settings and returned to the app, the launcher callback
+        // never fires again. Re-check here and re-subscribe so the next nearby
+        // voice command ("artimiausia …") sees a real GPS fix instead of null.
+        if (permissionState.value == PermissionState.Denied &&
+            LocationPermissionHelper.hasLocationPermission(this)
+        ) {
+            Log.d(FLOW_TAG, "onResume: permission now granted — re-subscribing to location")
+            permissionState.value = PermissionState.Granted
+            viewModel.retryLocationUpdates()
+            initializeNavigation()
         }
     }
 

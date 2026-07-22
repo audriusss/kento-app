@@ -197,17 +197,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ── Location caching ──────────────────────────────────────────────────
 
     /**
-     * Starts continuous location updates so [resolveAndNavigate] can read a cached
-     * fix immediately, even on the very first voice command after a cold launch.
+     * Starts (or re-starts) continuous location updates so [resolveAndNavigate] can
+     * read a cached fix immediately, even on the very first voice command after a
+     * cold launch.
+     *
+     * Safe to call multiple times — [LocationProvider.startUpdates] removes any
+     * existing listener before registering a new one, so this is idempotent.
+     *
+     * Called from [init] and from [MainActivity] whenever the location permission
+     * transitions from denied → granted (either via the system dialog or after the
+     * user grants it in Settings and returns to the app).
      */
-    private fun startLocationUpdates() {
+    fun retryLocationUpdates() {
         try {
             LocationProvider.startUpdates(getApplication())
-            Log.d(TAG, "Location updates started")
+            Log.d(TAG, "Location updates started / re-subscribed")
         } catch (e: Exception) {
-            Log.w(TAG, "startLocationUpdates failed: ${e.message}")
+            Log.w(TAG, "retryLocationUpdates failed: ${e.message}")
         }
     }
+
+    private fun startLocationUpdates() = retryLocationUpdates()
 
     private fun setupRecognitionCallbacks() {
         speechRecognitionManager.onListeningStarted = {
