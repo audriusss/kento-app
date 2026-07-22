@@ -98,6 +98,26 @@ class GoogleNavigationEngine : NavigationEngine {
 
     companion object {
         const val TAG = "GoogleNavEngine"
+
+        /**
+         * Returns the query stripped of its locality suffix (everything before the
+         * first ", ") if one is present, or `null` if there is nothing to strip.
+         *
+         * Used by the locality-stripped retry in [resolveAddress] to convert a
+         * PlaceSearch query like "degalinė, Klaipėda" into just "degalinė" when
+         * all full-query geocoding attempts have returned zero results.
+         *
+         * Examples:
+         *   "degalinė, Klaipėda" → "degalinė"
+         *   "degalinė near 55.7,21.1" → null  (no ", " separator)
+         *   "degalinė"           → null
+         */
+        internal fun stripLocalitySuffix(query: String): String? {
+            val idx = query.indexOf(", ")
+            if (idx < 0) return null
+            val stripped = query.substring(0, idx).trim()
+            return stripped.ifBlank { null }
+        }
     }
 
     // ── NavigationEngine impl ─────────────────────────────────────────────
@@ -169,7 +189,7 @@ class GoogleNavigationEngine : NavigationEngine {
                         phase = NavigationPhase.IDLE,
                         errorMessage = "Adresas nerastas: $destination",
                     )
-                    onError("Nepavyko rasti adreso. Patikrinkite rašybą arba interneto ryšį.")
+                    onError("Nepavyko rasti „$destination". Pabandykite kitaip.")
                     return@withContext
                 }
 
@@ -410,6 +430,38 @@ class GoogleNavigationEngine : NavigationEngine {
             Log.w(TAG, "Google Geocoding API: no result for '$googleQuery'")
         } else {
             Log.w(TAG, "Google Geocoding API fallback skipped: GOOGLE_MAPS_API_KEY is blank")
+        }
+
+        // ── 7. Locality-stripped retry ────────────────────────────────────
+        // If the query is a PlaceSearch result with a locality appended
+        // (e.g. "degalinė, Klaipėda"), strip everything after the first ", "
+        // and try again.  This recovers the common case where a category
+        // search like "degalinė, Klaipėda" has no Geocoder entry but the
+        // bare keyword "degalinė" does.
+        val simplified = stripLocalitySuffix(destination)
+        if (simplified != null) {
+            Log.d(TAG, "resolveAddress: locality-stripped retry with '$simplified'")
+            for (query in listOf(simplified, "$simplified, Lietuva")) {
+                Log.d(TAG, "geocoder attempt (stripped): '$query'")
+                val addresses = geocodeWithAndroid(context, query)
+                Log.d(TAG, "geocoder returned ${addresses.size} result(s) for '$query' (stripped)")
+                if (addresses.isNotEmpty()) {
+                    val addr = addresses.first()
+                    val name = buildDisplayName(addr, destination)
+                    Log.d(TAG, "locality-stripped geocoder: lat=${addr.latitude} lng=${addr.longitude} name='$name'")
+                    return Triple(addr.latitude, addr.longitude, name)
+                }
+            }
+            if (apiKey.isNotBlank()) {
+                val strippedQuery = "$simplified, Lithuania"
+                Log.d(TAG, "Google Geocoding API fallback (stripped): '$strippedQuery'")
+                val result = geocodeWithGoogleApi(strippedQuery, apiKey)
+                if (result != null) {
+                    Log.d(TAG, "locality-stripped HTTP: lat=${result.first} lng=${result.second} name='${result.third}'")
+                    return result
+                }
+                Log.w(TAG, "Google Geocoding API: no result for '$strippedQuery' (stripped)")
+            }
         }
 
         return null

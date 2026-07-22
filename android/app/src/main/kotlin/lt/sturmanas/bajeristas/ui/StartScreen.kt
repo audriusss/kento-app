@@ -41,6 +41,7 @@ import lt.sturmanas.bajeristas.personality.ConversationMode
 import lt.sturmanas.bajeristas.personality.HumorIntensity
 import lt.sturmanas.bajeristas.personality.SessionConfig
 import lt.sturmanas.bajeristas.personality.TripMode
+import lt.sturmanas.bajeristas.ui.MicButton
 import lt.sturmanas.bajeristas.voice.VoiceListeningState
 
 @OptIn(ExperimentalMaterial3Api::class)

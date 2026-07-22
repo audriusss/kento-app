@@ -166,6 +166,7 @@ class VoiceCommandParserExtTest {
         assertEquals(1, (cmd as VoiceCommand.SelectCandidate).index)
     }
 
+
     // ── Regression: "kiek liko" must NOT become StartNavigation ──────────
 
     @Test fun `kiek liko returns RemainingDistance not StartNavigation`() {
