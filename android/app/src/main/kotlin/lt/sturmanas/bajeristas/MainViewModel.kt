@@ -12,6 +12,7 @@ import kotlinx.coroutines.launch
 import lt.sturmanas.bajeristas.navigation.CandidatePlace
 import lt.sturmanas.bajeristas.navigation.DestinationResolution
 import lt.sturmanas.bajeristas.navigation.DestinationResolver
+import lt.sturmanas.bajeristas.navigation.LocationProvider
 import lt.sturmanas.bajeristas.navigation.NavigationState
 import lt.sturmanas.bajeristas.personality.SessionConfig
 import lt.sturmanas.bajeristas.voice.ClarificationState
@@ -400,11 +401,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun resolveAndNavigate(rawDestination: String, isMuted: Boolean) {
         Log.d(DEST_TAG, "resolveAndNavigate: raw='$rawDestination'")
         val savedPlaces = savedPlacesRepository.getAll()
+
+        // Fetch the device's best last-known location so DestinationResolver can bias
+        // searches to within ~20 km of the user (e.g. "artimiausia degalinė" finds a
+        // petrol station near the current position rather than anywhere in the country).
+        // All three values gracefully degrade to null when no fix is available yet.
+        val (currentLat, currentLng, currentLocality) =
+            LocationProvider.getCurrentLocation(getApplication())
+        Log.d(DEST_TAG, "location: lat=$currentLat lng=$currentLng locality='$currentLocality'")
+
         val resolution = DestinationResolver.resolve(
             rawText = rawDestination,
-            currentLat = null,        // Phase 3: obtain from NavigationState or LocationProvider
-            currentLng = null,
-            currentLocality = null,   // Phase 3: reverse geocode current location
+            currentLat = currentLat,
+            currentLng = currentLng,
+            currentLocality = currentLocality,
             savedPlaces = savedPlaces,
         )
 
