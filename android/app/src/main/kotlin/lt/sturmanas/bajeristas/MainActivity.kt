@@ -9,6 +9,7 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -48,14 +49,22 @@ import lt.sturmanas.bajeristas.voice.VoiceSessionController
 
 class MainActivity : ComponentActivity() {
 
+    companion object {
+        /** Logcat tag for high-level user-action flow. Filter on this tag to trace the full
+         *  address-search and navigation-start journey across all layers. */
+        const val FLOW_TAG = "KentasFlow"
+    }
+
     // ── Engine selection ──────────────────────────────────────────────────
     // GoogleNavigationEngine is used when GOOGLE_MAPS_API_KEY is set in local.properties.
     // MockNavigationEngine is the automatic fallback — safe to build and run
     // without any API key. No code change needed to switch; add the key and rebuild.
     private val engine by lazy {
         if (BuildConfig.GOOGLE_MAPS_API_KEY.isNotBlank()) {
+            Log.d(FLOW_TAG, "engine: GoogleNavigationEngine selected (API key present)")
             GoogleNavigationEngine()
         } else {
+            Log.d(FLOW_TAG, "engine: MockNavigationEngine selected (no API key)")
             MockNavigationEngine()
         }
     }
@@ -91,11 +100,13 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        Log.d(FLOW_TAG, "onCreate")
 
         if (LocationPermissionHelper.hasLocationPermission(this)) {
             permissionState.value = PermissionState.Granted
             initializeNavigation()
         } else {
+            Log.d(FLOW_TAG, "onCreate: location permission missing — requesting")
             locationPermissionLauncher.launch(LocationPermissionHelper.LOCATION_PERMISSION)
         }
 
@@ -117,18 +128,24 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        Log.d(FLOW_TAG, "onDestroy: releasing all resources")
         audioController.release()
         voiceSessionController.stopSession()
-        navigationController.onDestroy()
+        navigationController.onDestroy()   // full engine teardown — Navigator + NavigationView
     }
 
     // ── Private helpers ───────────────────────────────────────────────────
 
     private fun initializeNavigation() {
+        Log.d(FLOW_TAG, "initializeNavigation: engine=${engine::class.simpleName}")
         navigationController.initialize(
             activity = this,
-            onReady = { engineReady.value = true },
+            onReady = {
+                Log.d(FLOW_TAG, "engine ready")
+                engineReady.value = true
+            },
             onError = { msg ->
+                Log.e(FLOW_TAG, "engine init error: $msg")
                 engineError.value = msg
                 engineReady.value = false
             },
@@ -340,19 +357,27 @@ private fun SturmanasApp(
                 errorMessage = displayError,
                 engineReady = engineReady,
                 onStartNavigation = { destination, config ->
+                    Log.d(MainActivity.FLOW_TAG, "navigation button pressed: destination='$destination' engineReady=$engineReady isNavigating=$isNavigating")
                     startScreenError = null
                     aiStatusMessage = ""
                     sessionConfig = config
 
                     if (!engineReady) {
-                        startScreenError = engineError ?: "Navigacija neparuošta. Palaukite…"
+                        val errMsg = engineError ?: "Navigacija neparuošta. Palaukite…"
+                        Log.w(MainActivity.FLOW_TAG, "engine not ready — aborting: $errMsg")
+                        startScreenError = errMsg
                         return@StartScreen
                     }
 
+                    Log.d(MainActivity.FLOW_TAG, "isNavigating: false → true (showing NavigationScreen)")
+                    isNavigating = true
+
+                    Log.d(MainActivity.FLOW_TAG, "calling navigationController.startNavigation('$destination')")
                     navigationController.startNavigation(
                         context = context,
                         destination = destination,
                         onError = { msg ->
+                            Log.e(MainActivity.FLOW_TAG, "startNavigation onError: $msg → isNavigating false")
                             isNavigating = false
                             startScreenError = msg
                             // Speak the failure reason so the driver doesn't have to look at the screen.
@@ -363,7 +388,6 @@ private fun SturmanasApp(
                             }
                         },
                     )
-                    isNavigating = true
                     // Phase 3: voiceSessionController.startSession(PersonaPrompts.systemPrompt(config))
                 },
             )
@@ -406,6 +430,7 @@ private fun SturmanasApp(
                     aiStatusMessage = "Įprastas navigacijos balsas įjungtas"
                 },
                 onStopNavigation = {
+                    Log.d(MainActivity.FLOW_TAG, "onStopNavigation: user pressed stop → isNavigating false")
                     navigationController.stopNavigation()
                     voiceSessionController.stopSession()
                     audioController.release()

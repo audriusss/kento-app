@@ -2,6 +2,7 @@ package lt.sturmanas.bajeristas.navigation
 
 import android.app.Activity
 import android.content.Context
+import android.util.Log
 import android.view.View
 import kotlinx.coroutines.flow.StateFlow
 
@@ -37,6 +38,7 @@ class NavigationController(val engine: NavigationEngine) {
      * Must only be called after [onReady] fires from [initialize].
      */
     fun startNavigation(context: Context, destination: String, onError: (String) -> Unit) {
+        Log.d("KentasFlow", "NavigationController.startNavigation: engine=${engine::class.simpleName} destination='$destination'")
         engine.startNavigation(context, destination, onError)
     }
 
@@ -67,9 +69,23 @@ class NavigationController(val engine: NavigationEngine) {
     }
 
     // ── Lifecycle — forward from Activity/composable ──────────────────────
+    //
+    // Two distinct destroy paths — see NavigationEngine KDoc for the rationale.
+    //
+    // onViewDestroy() → called from NavigationScreen DisposableEffect.onDispose.
+    //   Tears down NavigationView only. Navigator stays alive so startNavigation
+    //   works again immediately without re-initialising the SDK.
+    //
+    // onDestroy()     → called from MainActivity.onDestroy only.
+    //   Full teardown: NavigationView + Navigator + all SDK resources.
 
     fun onResume() = engine.onResume()
     fun onPause() = engine.onPause()
     fun onStop() = engine.onStop()
+
+    /** Tears down the NavigationView only. Called from NavigationScreen's DisposableEffect. */
+    fun onViewDestroy() = engine.onViewDestroy()
+
+    /** Full teardown. Called ONLY from MainActivity.onDestroy. */
     fun onDestroy() = engine.onDestroy()
 }

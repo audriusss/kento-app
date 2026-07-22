@@ -98,14 +98,19 @@ fun NavigationScreen(
             lifecycleOwner.lifecycle.removeObserver(observer)
             // Gracefully wind down the NavigationView. The observer has already
             // called onPause/onStop if the lifecycle progressed through those
-            // states; only call them here if the Activity is still alive (i.e.
-            // they have not been called yet and the view is still running).
+            // states; only call them here if the Activity is still alive.
             val state = lifecycleOwner.lifecycle.currentState
             if (state.isAtLeast(Lifecycle.State.RESUMED)) engine.onPause()
             if (state.isAtLeast(Lifecycle.State.STARTED)) engine.onStop()
-            // onDestroy is idempotent in GoogleNavigationEngine; safe to call even
-            // if the Activity destruction path already triggered it.
-            engine.onDestroy()
+            // IMPORTANT: call onViewDestroy(), NOT onDestroy().
+            //
+            // onViewDestroy() tears down the NavigationView only and leaves the
+            // Navigator alive. This allows startNavigation() to work again immediately
+            // after the user returns to StartScreen (e.g. after a failed address search).
+            //
+            // onDestroy() (full teardown including Navigator) must only be called from
+            // MainActivity.onDestroy via NavigationController.onDestroy.
+            engine.onViewDestroy()
         }
     }
 

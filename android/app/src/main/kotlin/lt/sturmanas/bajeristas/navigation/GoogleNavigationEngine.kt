@@ -2,7 +2,9 @@ package lt.sturmanas.bajeristas.navigation
 
 import android.app.Activity
 import android.content.Context
+import android.location.Address
 import android.location.Geocoder
+import android.os.Build
 import android.util.Log
 import android.view.View
 import com.google.android.libraries.navigation.ArrivalEvent
@@ -13,6 +15,7 @@ import com.google.android.libraries.navigation.Navigator.ArrivalListener
 import com.google.android.libraries.navigation.Navigator.RouteChangedListener
 import com.google.android.libraries.navigation.RoutingOptions
 import com.google.android.libraries.navigation.Waypoint
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -20,36 +23,48 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import lt.sturmanas.bajeristas.BuildConfig
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
 import java.util.Locale
 
 /**
  * Production [NavigationEngine] backed by the Google Navigation SDK 7.x.
  *
- * SDK objects ([Navigator], [NavigationView]) are private — the rest of the
- * app sees only [NavigationState]. [ManeuverMapper] converts SDK maneuver
- * enums to the internal type.
+ * ## Lifecycle split — read before modifying
  *
- * Lifecycle contract:
- *  - [initialize] must be called first (requires location permission granted).
- *  - [startNavigation] may only be called after [onReady] fires.
- *  - [onResume], [onPause], [onStop], [onDestroy] must be forwarded from the
- *    hosting Activity/composable so [NavigationView] stays in sync.
+ * [onViewDestroy] = tears down [NavigationView] only. Called from NavigationScreen's
+ * DisposableEffect.onDispose when the composable leaves composition. The [Navigator]
+ * survives, so [startNavigation] works again immediately on the next attempt.
+ *
+ * [onDestroy] = full teardown (Navigator + NavigationView). Called ONLY from
+ * [MainActivity.onDestroy] via [NavigationController.onDestroy]. Never call from a composable.
+ *
+ * This split is the fix for: "Navigacija neparuošta" appearing after every failed address
+ * search. The old onDestroy() nulled the Navigator from DisposableEffect, permanently
+ * breaking the engine until the Activity was restarted.
+ *
+ * ## Address resolution
+ *
+ * Multi-attempt strategy (in order):
+ *  1. Raw coordinates "lat,lng" — fast path, no network.
+ *  2. Android Geocoder — raw input (API 33+: callback; older: synchronous on IO).
+ *  3. Android Geocoder — input + ", Lietuva" appended.
+ *  4. Android Geocoder — Lithuanian abbreviations normalised (pr.→prospektas, etc.).
+ *  5. Google Geocoding API HTTP — fallback for devices where Geocoder returns nothing
+ *     (common on Xiaomi/MIUI which ships without full Google Services Geocoder support).
  *
  * SDK API notes (Navigation SDK 7.8.0):
- *  - Audio guidance type: Navigator.AudioGuidance (nested), not NavigatorAudioGuidance.
- *  - setDestination() returns ListenableResultFuture<Navigator.RouteStatus>, not a Task.
- *    addOnSuccessListener/addOnFailureListener do not exist on this type.
- *    Route readiness is signalled via addRouteChangedListener; that is where
- *    startGuidance() is called (first time only, guarded by [guidanceStarted]).
- *  - Step-level maneuver access (navigator.currentStep) does not exist in the public
- *    SDK 7.8.0 API. ManeuverType is temporarily set to UNKNOWN until the correct API
- *    is confirmed. Distance and duration are read from getCurrentTimeAndDistance().
- *  - Step listener: addOnNavigationStepUpdatedListener does not exist; removed.
- *  - Route listener: addRouteChangedListener (not addOnRouteChangedListener).
- *
- * Android Studio warning "Cannot resolve symbol 'distance'" (around MainActivity line 406):
- *  This is a stale IDE index issue — the symbol referenced is 'distanceMeters' (a function
- *  parameter), which compiles and resolves correctly. Invalidate caches / restart to clear it.
+ *  - Audio guidance: Navigator.AudioGuidance (nested enum), not NavigatorAudioGuidance.
+ *  - setDestination() returns ListenableResultFuture<Navigator.RouteStatus>.
+ *    addOnSuccessListener/addOnFailureListener do NOT exist on this type.
+ *    Route readiness → RouteChangedListener; arrival → ArrivalListener.
+ *  - startGuidance() must be called explicitly after the first RouteChangedListener fires.
+ *    It is NOT called automatically by setDestination().
+ *  - currentStep / per-maneuver data: not available in public SDK 7.8.0 API.
+ *    currentTimeAndDistance gives remaining distance to destination.
  */
 class GoogleNavigationEngine : NavigationEngine {
 
@@ -60,31 +75,39 @@ class GoogleNavigationEngine : NavigationEngine {
     private var navigationView: NavigationView? = null
     private val ioScope = CoroutineScope(Dispatchers.IO)
 
-    // Guards against double-calling onDestroy (it is invoked from both the
-    // LifecycleEventObserver and onDispose in NavigationScreen).
-    private var isDestroyed = false
+    /**
+     * Guards NavigationView re-creation.
+     * Reset in [createNavigationView]; set in [onViewDestroy] and [onDestroy].
+     * Only blocks NavigationView teardown, not Navigator access.
+     */
+    private var isViewDestroyed = false
 
     /**
-     * Prevents [startGuidance] from being called more than once per navigation session.
+     * Prevents [startGuidance] from being called more than once per session.
      * [RouteChangedListener] fires for both the initial route and every re-route;
-     * only the first call should start guidance — subsequent calls are reroutes.
+     * only the first call should start guidance.
      */
     private var guidanceStarted = false
 
-    private companion object {
+    /**
+     * Request ID incremented on every [startNavigation] call.
+     * Compared inside the geocoder callback to discard stale results when the user
+     * submits a new destination before the previous geocoder call completes.
+     */
+    private var currentRequestId = 0
+
+    companion object {
         const val TAG = "GoogleNavEngine"
     }
 
     // ── NavigationEngine impl ─────────────────────────────────────────────
 
     override fun initialize(activity: Activity, onReady: () -> Unit, onError: (String) -> Unit) {
-        Log.d(TAG, "initialize: requesting navigator")
+        Log.d(TAG, "initialize: requesting navigator (navigator currently ${if (navigator != null) "alive" else "null"})")
         NavigationApi.getNavigator(activity, object : NavigationApi.NavigatorListener {
             override fun onNavigatorReady(nav: Navigator) {
-                Log.d(TAG, "onNavigatorReady")
+                Log.d(TAG, "onNavigatorReady: navigator obtained")
                 navigator = nav
-                // Kentas speaks; suppress standard navigation voice by default.
-                // Navigator.AudioGuidance is the correct nested type in SDK 7.8.0.
                 nav.setAudioGuidance(Navigator.AudioGuidance.SILENT)
                 setupListeners(nav)
                 onReady()
@@ -102,7 +125,7 @@ class GoogleNavigationEngine : NavigationEngine {
                         "Nepateikti vietos leidimai. Suteikite leidimą nustatymų lange."
                     else -> "Navigacijos inicializacijos klaida (kodas: $errorCode)"
                 }
-                Log.e(TAG, "Navigator init error $errorCode: $msg")
+                Log.e(TAG, "navigator init error $errorCode: $msg")
                 _state.value = NavigationState(errorMessage = msg)
                 onError(msg)
             }
@@ -110,64 +133,74 @@ class GoogleNavigationEngine : NavigationEngine {
     }
 
     override fun startNavigation(context: Context, destination: String, onError: (String) -> Unit) {
-        val nav = navigator ?: run {
+        val nav = navigator
+        Log.d(TAG, "startNavigation: destination='$destination' navigator=${if (nav != null) "ready" else "NULL"}")
+
+        if (nav == null) {
             val msg = "Navigacija neparuošta. Palaukite ir bandykite dar kartą."
-            Log.e(TAG, "startNavigation called but navigator is null")
+            Log.e(TAG, "startNavigation: navigator is null — engine may not have finished initialising")
             onError(msg)
             return
         }
 
-        Log.d(TAG, "startNavigation: destination='$destination'")
+        val requestId = ++currentRequestId
+        Log.d(TAG, "startNavigation: requestId=$requestId")
 
-        // Phase 1: mark address resolution in progress.
-        // isNavigating stays false until guidance actually starts.
         _state.value = _state.value.copy(
             destinationName = destination,
             errorMessage = null,
             phase = NavigationPhase.RESOLVING_ADDRESS,
         )
 
-        resolveDestination(context, destination) { result ->
-            if (result == null) {
-                Log.e(TAG, "resolveDestination: no result for '$destination'")
+        ioScope.launch {
+            Log.d(TAG, "resolveAddress [$requestId]: starting for '$destination'")
+            val result = resolveAddress(context, destination)
+
+            withContext(Dispatchers.Main) {
+                // Discard result if a newer request has replaced this one.
+                if (requestId != currentRequestId) {
+                    Log.d(TAG, "resolveAddress [$requestId]: stale — discarding (current=$currentRequestId)")
+                    return@withContext
+                }
+
+                if (result == null) {
+                    Log.e(TAG, "resolveAddress [$requestId]: all attempts failed for '$destination'")
+                    _state.value = _state.value.copy(
+                        phase = NavigationPhase.IDLE,
+                        errorMessage = "Adresas nerastas: $destination",
+                    )
+                    onError("Nepavyko rasti adreso. Patikrinkite rašybą arba interneto ryšį.")
+                    return@withContext
+                }
+
+                val (lat, lng, resolvedName) = result
+                Log.d(TAG, "resolveAddress [$requestId]: resolved lat=$lat lng=$lng name='$resolvedName'")
+
+                val waypoint = try {
+                    Waypoint.builder().setLatLng(lat, lng).build()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Waypoint build failed", e)
+                    _state.value = _state.value.copy(
+                        phase = NavigationPhase.IDLE,
+                        errorMessage = "Klaida nustatant tikslą",
+                    )
+                    onError("Klaida nustatant tikslą")
+                    return@withContext
+                }
+
+                guidanceStarted = false
                 _state.value = _state.value.copy(
-                    phase = NavigationPhase.IDLE,
-                    errorMessage = "Adresas nerastas: $destination",
+                    destinationName = resolvedName.ifBlank { destination },
+                    resolvedAddress = resolvedName,
+                    phase = NavigationPhase.CALCULATING_ROUTE,
                 )
-                onError("Nepavyko rasti adreso: $destination")
-                return@resolveDestination
+
+                Log.d(TAG, "setDestination: lat=$lat lng=$lng")
+                // setDestination returns ListenableResultFuture<RouteStatus>.
+                // addOnSuccessListener / addOnFailureListener do NOT exist on this type.
+                // Route readiness is signalled via RouteChangedListener (see setupListeners).
+                nav.setDestination(waypoint, RoutingOptions())
             }
-
-            val (lat, lng, resolvedName) = result
-            Log.d(TAG, "resolveDestination OK: lat=$lat lng=$lng name='$resolvedName'")
-
-            val waypoint = try {
-                Waypoint.builder()
-                    .setLatLng(lat, lng)
-                    .build()
-            } catch (e: Exception) {
-                Log.e(TAG, "Waypoint build failed", e)
-                _state.value = _state.value.copy(
-                    phase = NavigationPhase.IDLE,
-                    errorMessage = "Klaida nustatant tikslą",
-                )
-                onError("Klaida nustatant tikslą")
-                return@resolveDestination
-            }
-
-            // Phase 2: waypoint is valid; hand off to SDK for route calculation.
-            guidanceStarted = false
-            _state.value = _state.value.copy(
-                destinationName = resolvedName.ifBlank { destination },
-                resolvedAddress = resolvedName,
-                phase = NavigationPhase.CALCULATING_ROUTE,
-            )
-
-            Log.d(TAG, "setDestination: lat=$lat lng=$lng")
-            // setDestination() returns ListenableResultFuture<RouteStatus>.
-            // addOnSuccessListener / addOnFailureListener do not exist on this type.
-            // Route readiness is signalled via RouteChangedListener (see setupListeners).
-            nav.setDestination(waypoint, RoutingOptions())
         }
     }
 
@@ -179,17 +212,13 @@ class GoogleNavigationEngine : NavigationEngine {
     }
 
     override fun createNavigationView(context: Context): View {
-        // Reset destroy guard so the engine can be reused if navigation
-        // is stopped and restarted within the same process.
-        isDestroyed = false
+        Log.d(TAG, "createNavigationView: resetting isViewDestroyed flag")
+        isViewDestroyed = false
         return NavigationView(context).also { view ->
             navigationView = view
-            // onCreate must be called here, during composition (inside remember {}
-            // in NavigationScreen), so that navigationView is non-null by the time
-            // DisposableEffect side-effects run and the lifecycle observer replays
-            // ON_START / ON_RESUME. If onCreate were called in the AndroidView
-            // factory (layout time, after side-effects), the replay would fire on a
-            // null view and the view would be stuck in CREATED state forever.
+            // onCreate must be called here, during composition (inside remember {} in
+            // NavigationScreen), so that the view is non-null when DisposableEffect
+            // side-effects run and the lifecycle observer replays ON_START / ON_RESUME.
             view.onCreate(null)
         }
     }
@@ -204,67 +233,68 @@ class GoogleNavigationEngine : NavigationEngine {
 
     // ── Lifecycle ─────────────────────────────────────────────────────────
 
-    override fun onStart() {
-        navigationView?.onStart()
-    }
+    override fun onStart()  { navigationView?.onStart() }
+    override fun onResume() { navigationView?.onResume() }
+    override fun onPause()  { navigationView?.onPause() }
+    override fun onStop()   { navigationView?.onStop() }
 
-    override fun onResume() {
-        navigationView?.onResume()
-    }
-
-    override fun onPause() {
-        navigationView?.onPause()
-    }
-
-    override fun onStop() {
-        navigationView?.onStop()
+    /**
+     * Tears down the [NavigationView] ONLY.
+     *
+     * Called from [NavigationScreen]'s `DisposableEffect.onDispose` when the composable
+     * leaves composition — e.g. the user goes back to [StartScreen] after a failed address
+     * search, or presses "Baigti".
+     *
+     * The [Navigator] is intentionally left alive. This is the critical fix for the bug
+     * where address search failures permanently break the engine:
+     *
+     *   old flow: onError → isNavigating=false → NavigationScreen unmounts →
+     *             DisposableEffect.onDispose → onDestroy() → navigator=null →
+     *             next startNavigation fails immediately with "Navigacija neparuošta"
+     *
+     *   new flow: onError → isNavigating=false → NavigationScreen unmounts →
+     *             DisposableEffect.onDispose → onViewDestroy() → NavigationView cleaned up,
+     *             Navigator alive → next startNavigation works correctly
+     */
+    override fun onViewDestroy() {
+        if (isViewDestroyed) return
+        isViewDestroyed = true
+        Log.d(TAG, "onViewDestroy: tearing down NavigationView only (Navigator stays alive)")
+        navigationView?.onDestroy()
+        navigationView = null
     }
 
     /**
-     * Tears down [NavigationView] and cleans up the [Navigator].
-     *
-     * Called from two places in [NavigationScreen]:
-     *  1. The [LifecycleEventObserver] when the host Activity is destroyed.
-     *  2. The [DisposableEffect] onDispose when the composable leaves composition
-     *     (e.g. user stops navigation while Activity is still alive).
-     *
-     * The [isDestroyed] guard ensures only the first call executes; subsequent
-     * calls are safe no-ops.
+     * Full teardown — NavigationView + Navigator. Called ONLY from
+     * [MainActivity.onDestroy] via [NavigationController.onDestroy].
+     * Never call this from a composable or DisposableEffect.
      */
     override fun onDestroy() {
-        if (isDestroyed) return
-        isDestroyed = true
-        Log.d(TAG, "onDestroy")
-        navigationView?.onDestroy()
+        Log.d(TAG, "onDestroy: full teardown (Activity destroyed)")
+        onViewDestroy()                // tears down NavigationView (idempotent)
         navigator?.cleanup()
-        navigationView = null
         navigator = null
+        guidanceStarted = false
     }
 
-    // ── Private helpers ───────────────────────────────────────────────────
+    // ── Private: listeners ────────────────────────────────────────────────
 
     private fun setupListeners(nav: Navigator) {
-        // Remaining time / distance updates (every 10 m or 5 s change)
         nav.addRemainingTimeOrDistanceChangedListener(5, 10) {
             syncStateFromNavigator(nav)
         }
 
-        // NOTE: addOnNavigationStepUpdatedListener does not exist in Navigation SDK 7.8.0.
-        // Step-level maneuver updates are not available from this listener set.
-        // ManeuverType remains UNKNOWN until the correct step access API is confirmed.
-
-        // Route changed — fires for both the initial route calculation AND re-routes.
+        // Route changed — fires for both initial route calculation AND re-routes.
         //
-        // Core fix: startGuidance() must be called here, not in startNavigation().
-        // setDestination() only requests a route; startGuidance() starts turn-by-turn
-        // guidance and triggers maneuver / distance callbacks. The guidanceStarted flag
-        // distinguishes the initial route from subsequent re-routes so startGuidance()
-        // is called exactly once per navigation session.
+        // startGuidance() is the missing call in the original code. setDestination()
+        // only requests a route; startGuidance() begins turn-by-turn guidance and
+        // activates maneuver / distance callbacks. The guidanceStarted flag ensures it
+        // is called exactly once per navigation session, not on every re-route.
         nav.addRouteChangedListener(RouteChangedListener {
             Log.d(TAG, "routeChangedListener: guidanceStarted=$guidanceStarted")
             if (!guidanceStarted) {
                 guidanceStarted = true
-                Log.d(TAG, "First route ready — calling startGuidance()")
+                Log.d(TAG, "first route ready — calling startGuidance()")
                 nav.startGuidance()
                 _state.value = _state.value.copy(
                     isNavigating = true,
@@ -272,13 +302,12 @@ class GoogleNavigationEngine : NavigationEngine {
                     phase = NavigationPhase.NAVIGATING,
                 )
             } else {
-                Log.d(TAG, "Reroute — route updated")
+                Log.d(TAG, "re-route — route updated")
                 _state.value = _state.value.copy(isRerouting = true)
             }
             syncStateFromNavigator(nav)
         })
 
-        // Arrival
         nav.addArrivalListener(ArrivalListener { _ ->
             Log.d(TAG, "arrivalListener: arrived at destination")
             _state.value = _state.value.copy(
@@ -292,18 +321,13 @@ class GoogleNavigationEngine : NavigationEngine {
     }
 
     private fun syncStateFromNavigator(nav: Navigator) {
-        // NOTE: Navigator 7.8.0 does not expose a currentStep property on the Navigator
-        // object. There is no public API to read the current maneuver type or road name
-        // directly in this SDK version. ManeuverType is set to UNKNOWN and road names
-        // are cleared until the correct step-info API surface is confirmed.
-        //
-        // currentTimeAndDistance gives remaining time/distance to destination (not to
-        // the next maneuver). Both distanceToNextManeuverMeters and remainingDistanceMeters
-        // are set from this single source until per-step distance becomes available.
-        val timeAndDist = nav.currentTimeAndDistance
-        val distMeters = timeAndDist?.meters?.toInt() ?: Int.MAX_VALUE
-        val durSeconds = timeAndDist?.seconds?.toInt() ?: 0
-        Log.d(TAG, "syncState: distMeters=$distMeters durSeconds=$durSeconds")
+        // currentTimeAndDistance = remaining time/distance to destination (not next maneuver).
+        // Both distanceToNextManeuverMeters and remainingDistanceMeters use this until
+        // per-step distance becomes available in the public API.
+        val td = nav.currentTimeAndDistance
+        val distMeters = td?.meters?.toInt() ?: Int.MAX_VALUE
+        val durSeconds = td?.seconds?.toInt() ?: 0
+        Log.d(TAG, "syncState: dist=$distMeters m dur=$durSeconds s")
         _state.value = _state.value.copy(
             maneuverType = ManeuverType.UNKNOWN,
             distanceToNextManeuverMeters = distMeters,
@@ -313,77 +337,207 @@ class GoogleNavigationEngine : NavigationEngine {
         )
     }
 
+    // ── Private: address resolution ───────────────────────────────────────
+
     /**
-     * Resolve [destination] to (latitude, longitude, resolvedDisplayName).
+     * Multi-attempt address resolution. All attempts run on Dispatchers.IO (caller's scope).
      *
-     * Fast path: accepts "lat,lng" format directly (no network needed).
-     * Slow path: uses [Geocoder] for address strings, appending ", Lietuva" when
-     * Lithuania is not already mentioned to bias results toward Lithuanian addresses.
+     * Strategy (in order):
+     *  1. Raw "lat,lng" — fast path, no network.
+     *  2. Android Geocoder with raw input.
+     *  3. Android Geocoder with input + ", Lietuva" bias.
+     *  4. Android Geocoder with normalised Lithuanian abbreviations.
+     *  5. Android Geocoder with normalised + ", Lietuva".
+     *  6. Google Geocoding API HTTP request — reliable fallback for devices (e.g. Xiaomi/MIUI)
+     *     where the Android Geocoder returns empty results despite valid internet connectivity.
      *
-     * Result is delivered on the **main thread** via [onResult].
-     * Returns `null` when the address cannot be resolved.
+     * Returns `Triple(lat, lng, displayName)` or `null` if all attempts fail.
      */
-    private fun resolveDestination(
+    private suspend fun resolveAddress(
         context: Context,
         destination: String,
-        onResult: (Triple<Double, Double, String>?) -> Unit,
-    ) {
-        // Fast path — raw "lat,lng" coordinates, no network required
+    ): Triple<Double, Double, String>? {
+        // ── 1. Raw coordinates ────────────────────────────────────────────
         val parts = destination.split(",")
         if (parts.size == 2) {
             val lat = parts[0].trim().toDoubleOrNull()
             val lng = parts[1].trim().toDoubleOrNull()
             if (lat != null && lng != null && lat in -90.0..90.0 && lng in -180.0..180.0) {
-                Log.d(TAG, "resolveDestination: raw coordinates lat=$lat lng=$lng")
-                onResult(Triple(lat, lng, destination))
-                return
+                Log.d(TAG, "resolveAddress: raw coordinates lat=$lat lng=$lng")
+                return Triple(lat, lng, destination)
             }
         }
 
-        // Append Lithuania hint when not already present.
-        // The Geocoder uses this to bias results toward Lithuanian addresses,
-        // which significantly improves accuracy for partial Lithuanian place names
-        // (e.g. "Taikos pr. 61, Klaipėda" → "Taikos pr. 61, Klaipėda, Lietuva").
-        val query = if (destination.contains("Lietuva", ignoreCase = true) ||
+        // ── 2–5. Android Geocoder (multi-attempt) ────────────────────────
+        val hasLietuva = destination.contains("Lietuva", ignoreCase = true) ||
             destination.contains("Lithuania", ignoreCase = true)
-        ) {
-            destination
-        } else {
-            "$destination, Lietuva"
-        }
-        Log.d(TAG, "resolveDestination: geocoding '$query'")
+        val normalized = normalizeAddress(destination)
+        val normalizedDiffers = normalized != destination
 
-        ioScope.launch {
-            val result: Triple<Double, Double, String>? = try {
-                val geocoder = Geocoder(context, Locale("lt", "LT"))
-                @Suppress("DEPRECATION")
-                val addresses = geocoder.getFromLocationName(query, 3)
-                Log.d(TAG, "geocoder returned ${addresses?.size ?: 0} result(s)")
-                addresses?.firstOrNull()?.let { addr ->
-                    // Build a human-readable display name from geocoder fields,
-                    // falling back to the first address line if structured fields are absent.
-                    val displayName = buildString {
-                        if (!addr.thoroughfare.isNullOrBlank()) append(addr.thoroughfare)
-                        if (!addr.subThoroughfare.isNullOrBlank()) {
-                            if (isNotEmpty()) append(" ")
-                            append(addr.subThoroughfare)
-                        }
-                        if (!addr.locality.isNullOrBlank()) {
-                            if (isNotEmpty()) append(", ")
-                            append(addr.locality)
-                        }
-                        if (isEmpty()) {
-                            append(addr.getAddressLine(0) ?: destination)
-                        }
+        val geocoderQueries = buildList {
+            add(destination)                                         // 2. raw
+            if (!hasLietuva) add("$destination, Lietuva")           // 3. raw + country
+            if (normalizedDiffers) add(normalized)                   // 4. normalized
+            if (normalizedDiffers && !hasLietuva)
+                add("$normalized, Lietuva")                          // 5. normalized + country
+        }
+
+        for (query in geocoderQueries) {
+            Log.d(TAG, "geocoder attempt: '$query'")
+            val addresses = geocodeWithAndroid(context, query)
+            Log.d(TAG, "geocoder returned ${addresses.size} result(s) for '$query'")
+            if (addresses.isNotEmpty()) {
+                val addr = addresses.first()
+                val name = buildDisplayName(addr, destination)
+                Log.d(TAG, "geocoder selected: lat=${addr.latitude} lng=${addr.longitude} name='$name'")
+                return Triple(addr.latitude, addr.longitude, name)
+            }
+        }
+
+        // ── 6. Google Geocoding API HTTP fallback ────────────────────────
+        // Xiaomi / MIUI ships without full Google GMS geocoder support, causing the
+        // Android Geocoder to return empty results even for valid Lithuanian addresses.
+        // The Google Geocoding API HTTP endpoint is always accurate and bypasses this.
+        val apiKey = BuildConfig.GOOGLE_MAPS_API_KEY
+        if (apiKey.isNotBlank()) {
+            val googleQuery = if (hasLietuva) destination else "$destination, Lithuania"
+            Log.d(TAG, "Google Geocoding API fallback: '$googleQuery'")
+            val result = geocodeWithGoogleApi(googleQuery, apiKey)
+            if (result != null) {
+                Log.d(TAG, "Google API resolved: lat=${result.first} lng=${result.second} name='${result.third}'")
+                return result
+            }
+            Log.w(TAG, "Google Geocoding API: no result for '$googleQuery'")
+        } else {
+            Log.w(TAG, "Google Geocoding API fallback skipped: GOOGLE_MAPS_API_KEY is blank")
+        }
+
+        return null
+    }
+
+    /**
+     * Calls Android [Geocoder] with [query]. Uses the API 33+ callback API on Tiramisu
+     * and the deprecated synchronous API on older versions (both run on IO thread).
+     */
+    private suspend fun geocodeWithAndroid(context: Context, query: String): List<Address> {
+        return try {
+            val geocoder = Geocoder(context, Locale("lt", "LT"))
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                val deferred = CompletableDeferred<List<Address>>()
+                geocoder.getFromLocationName(query, 3, object : Geocoder.GeocodeListener {
+                    override fun onGeocode(addresses: MutableList<Address>) {
+                        deferred.complete(addresses)
                     }
-                    Log.d(TAG, "geocoder resolved: '$displayName' lat=${addr.latitude} lng=${addr.longitude}")
-                    Triple(addr.latitude, addr.longitude, displayName)
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "geocoder exception for '$query'", e)
+                    override fun onError(errorMessage: String?) {
+                        Log.w(TAG, "Geocoder.GeocodeListener.onError: $errorMessage")
+                        deferred.complete(emptyList())
+                    }
+                })
+                deferred.await()
+            } else {
+                @Suppress("DEPRECATION")
+                geocoder.getFromLocationName(query, 3) ?: emptyList()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "geocodeWithAndroid exception for '$query'", e)
+            emptyList()
+        }
+    }
+
+    /**
+     * Calls the Google Geocoding API via HTTP.
+     * Uses [BuildConfig.GOOGLE_MAPS_API_KEY] — never hardcoded.
+     * Language and region are set to Lithuanian for best local results.
+     */
+    private suspend fun geocodeWithGoogleApi(
+        query: String,
+        apiKey: String,
+    ): Triple<Double, Double, String>? = withContext(Dispatchers.IO) {
+        try {
+            val encoded = URLEncoder.encode(query, "UTF-8")
+            val url = "https://maps.googleapis.com/maps/api/geocode/json" +
+                "?address=$encoded&key=$apiKey&language=lt&region=lt"
+            Log.d(TAG, "Google Geocoding API: GET $url")
+
+            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 10_000
+                readTimeout = 10_000
+            }
+            val responseCode = conn.responseCode
+            val body = conn.inputStream.bufferedReader(Charsets.UTF_8).readText()
+            conn.disconnect()
+
+            val json = JSONObject(body)
+            val status = json.getString("status")
+            Log.d(TAG, "Google Geocoding API: status=$status (HTTP $responseCode)")
+
+            if (status == "OK") {
+                val first = json.getJSONArray("results").getJSONObject(0)
+                val loc = first.getJSONObject("geometry").getJSONObject("location")
+                val lat = loc.getDouble("lat")
+                val lng = loc.getDouble("lng")
+                val formatted = first.getString("formatted_address")
+                Triple(lat, lng, formatted)
+            } else {
+                Log.w(TAG, "Google Geocoding API returned status=$status for '$query'")
                 null
             }
-            withContext(Dispatchers.Main) { onResult(result) }
+        } catch (e: Exception) {
+            Log.e(TAG, "geocodeWithGoogleApi exception", e)
+            null
         }
+    }
+
+    /**
+     * Expands common Lithuanian address abbreviations.
+     * Applied before Geocoder attempts to improve match rate.
+     *
+     * Examples: "Taikos pr." → "Taikos prospektas"
+     *           "Gedimino g." → "Gedimino gatvė"
+     */
+    private fun normalizeAddress(address: String): String {
+        // Replacements with trailing space/comma ensure we match standalone abbreviations
+        // and not substrings inside longer words.
+        val replacements = listOf(
+            Pair(" pr. ",  " prospektas "),
+            Pair(" pr., ", " prospektas, "),
+            Pair(" pr.",   " prospektas"),   // end-of-string
+            Pair(" g. ",   " gatvė "),
+            Pair(" g., ",  " gatvė, "),
+            Pair(" g.",    " gatvė"),
+            Pair(" al. ",  " alėja "),
+            Pair(" al., ", " alėja, "),
+            Pair(" al.",   " alėja"),
+            Pair(" pl. ",  " plentas "),
+            Pair(" pl., ", " plentas, "),
+            Pair(" pl.",   " plentas"),
+            Pair(" sk. ",  " skersgatvis "),
+            Pair(" sk., ", " skersgatvis, "),
+            Pair(" a. ",   " aikštė "),
+            Pair(" a., ",  " aikštė, "),
+        )
+        var result = " $address " // pad so leading/trailing abbreviations match
+        for ((from, to) in replacements) {
+            result = result.replace(from, to)
+        }
+        return result.trim()
+    }
+
+    /**
+     * Builds a human-readable display name from a [Geocoder] [Address] result.
+     * Falls back to the first address line, or the original input if nothing is available.
+     */
+    private fun buildDisplayName(addr: Address, fallback: String): String = buildString {
+        if (!addr.thoroughfare.isNullOrBlank()) append(addr.thoroughfare)
+        if (!addr.subThoroughfare.isNullOrBlank()) {
+            if (isNotEmpty()) append(" ")
+            append(addr.subThoroughfare)
+        }
+        if (!addr.locality.isNullOrBlank()) {
+            if (isNotEmpty()) append(", ")
+            append(addr.locality)
+        }
+        if (isEmpty()) append(addr.getAddressLine(0) ?: fallback)
     }
 }

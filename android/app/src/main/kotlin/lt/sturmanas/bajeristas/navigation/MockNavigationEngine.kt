@@ -87,8 +87,18 @@ class MockNavigationEngine : NavigationEngine {
     override fun onResume()  { /* no lifecycle state in mock */ }
     override fun onPause()   { /* no lifecycle state in mock */ }
     override fun onStop()    { /* no lifecycle state in mock */ }
-    override fun onDestroy() {
+    /**
+     * View-only teardown — no-op for Mock because there is no real NavigationView.
+     * Cancels the simulation so ticks don't fire while the screen is unmounted.
+     */
+    override fun onViewDestroy() {
         simulationJob?.cancel()
+        simulationJob = null
+    }
+
+    /** Full teardown — same as onViewDestroy for Mock (no Navigator to clean up). */
+    override fun onDestroy() {
+        onViewDestroy()
     }
 
     // ── Simulation ────────────────────────────────────────────────────────

@@ -1,0 +1,132 @@
+TASK: Diagnose and fix the real address-search failure in Kentas Android app.
+
+OBSERVED ON REAL DEVICE
+
+Even full address:
+"Taikos prospektas 61, Klaipėda, Lietuva"
+
+still returns:
+"Nepavyksta rasti adreso."
+
+Relevant Logcat shows only:
+
+GoogleNavEngine D stopNavigation
+GoogleNavEngine D onDestroy
+
+There are no logs for:
+- startNavigation
+- raw address
+- geocoder query
+- geocoder results
+- geocoder exception
+- setDestination
+
+This suggests the navigation screen/engine may be stopped or destroyed before address resolution finishes.
+
+DO NOT assume this is only a Geocoder formatting issue.
+
+FIRST, TRACE THE FULL FLOW
+
+Add logs at every boundary:
+
+MainActivity:
+- user presses navigation button
+- exact address passed to controller
+- isNavigating state before/after
+- NavigationScreen composition/disposal
+- onError callback
+- onStopNavigation callback
+
+NavigationController:
+- startNavigation called
+- selected engine type
+- engine initialized state
+- error returned
+
+GoogleNavigationEngine:
+- startNavigation entry
+- navigator null/not null
+- coroutine launched
+- each geocoder attempt
+- result count
+- exception
+- setDestination call
+- RouteChangedListener
+- stopNavigation
+- onDestroy with stack/context reason where practical
+
+Use consistent tags:
+KentasFlow
+GoogleNavEngine
+
+INVESTIGATE THESE LIKELY BUGS
+
+1. onError immediately sets isNavigating = false, causing NavigationScreen disposal and engine onDestroy.
+2. DisposableEffect calls onDestroy during recomposition.
+3. NavigationController or engine is recreated on every recomposition.
+4. remember is missing around NavigationController / GoogleNavigationEngine.
+5. engine lifecycle is tied to NavigationScreen instead of Activity/ViewModel.
+6. stopNavigation is called from a BackHandler or UI state transition.
+7. startNavigation fails because navigator is not initialized yet.
+8. the Geocoder callback returns after the engine has already been destroyed.
+9. wrong Log tag is being filtered.
+10. MockNavigationEngine fallback or engine switch is occurring unexpectedly.
+
+REQUIRED ARCHITECTURE FIX
+
+- GoogleNavigationEngine must not be recreated on every Compose recomposition.
+- Keep NavigationController / engine in a ViewModel or remember with stable application context.
+- onDestroy must run only when Activity/ViewModel is genuinely destroyed.
+- stopNavigation must not call onDestroy.
+- A failed address search should update error state, not destroy the navigation engine.
+- Prevent stale async geocoder callbacks from acting after a newer request, but do not cancel the engine itself.
+
+ADDRESS RESOLUTION
+
+After lifecycle is fixed:
+
+- Use Locale("lt", "LT")
+- Try:
+  1. raw input
+  2. input + ", Lietuva"
+  3. normalized "pr." -> "prospektas"
+  4. simplified variant
+- API 33+ callback Geocoder
+- older versions on Dispatchers.IO
+- log every result and exception
+
+If Android Geocoder returns no results, add Google Geocoding API fallback using the existing API key configuration, without hardcoding secrets.
+
+ACCEPTANCE TEST
+
+On real Xiaomi device:
+
+1. Enter:
+   Taikos prospektas 61, Klaipėda, Lietuva
+
+2. Logcat must show:
+   KentasFlow: navigation button pressed
+   GoogleNavEngine: startNavigation
+   GoogleNavEngine: geocoder attempt ...
+   GoogleNavEngine: result count ...
+   GoogleNavEngine: selected coordinates ...
+   GoogleNavEngine: setDestination
+   GoogleNavEngine: RouteChangedListener
+   GoogleNavEngine: startGuidance
+
+3. GoogleNavEngine onDestroy must NOT appear during normal address search.
+
+4. Invalid address must show an error without destroying the engine.
+
+5. Build:
+   ./gradlew :app:compileDebugKotlin
+
+Do not commit until build succeeds.
+
+Report:
+- exact lifecycle bug found
+- why stopNavigation/onDestroy occurred
+- files changed
+- full log flow after fix
+- address resolver used
+- build result

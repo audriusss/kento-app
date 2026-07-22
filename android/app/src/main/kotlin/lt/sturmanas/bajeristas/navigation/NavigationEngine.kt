@@ -13,6 +13,24 @@ import kotlinx.coroutines.flow.StateFlow
  *
  * All SDK-specific types must remain private inside the implementing class.
  * [NavigationController] depends only on this interface.
+ *
+ * ## Lifecycle split — IMPORTANT
+ *
+ * There are two distinct destroy paths with different scopes:
+ *
+ * 1. [onViewDestroy] — called by [NavigationScreen]'s `DisposableEffect.onDispose` whenever
+ *    the composable leaves composition (user stops navigation, address search fails and returns
+ *    to StartScreen, etc.). Tears down the [NavigationView] ONLY. The [Navigator] (the SDK
+ *    routing engine) must survive so that [startNavigation] works again on the next attempt
+ *    without re-initialising the SDK.
+ *
+ * 2. [onDestroy] — called by [NavigationController.onDestroy] from [MainActivity.onDestroy]
+ *    only. Tears down both the [NavigationView] and the [Navigator]. This is the terminal
+ *    cleanup for the whole Activity lifecycle.
+ *
+ * Failure to observe this split is the cause of the "Navigacija neparuošta" error that
+ * appears after any failed address search: [onDestroy] from [DisposableEffect] nulls the
+ * Navigator, making all subsequent [startNavigation] calls fail immediately.
  */
 interface NavigationEngine {
 
@@ -36,19 +54,17 @@ interface NavigationEngine {
      * Resolve [destination] (address string or "lat,lng" pair) and start navigation.
      * Must only be called after [onReady] fires from [initialize].
      *
-     * @param context   Context for Geocoder address resolution.
+     * @param context   Context for Geocoder / HTTP address resolution.
      * @param destination Human-readable address or "lat,lng" string.
      * @param onError   Called with a Lithuanian error if routing fails.
      */
     fun startNavigation(context: Context, destination: String, onError: (String) -> Unit)
 
-    /** Stop navigation and reset to idle state. */
+    /** Stop navigation and reset to idle state. Does not destroy the engine. */
     fun stopNavigation()
 
     /**
      * Return the native [View] that renders the navigation map.
-     * The composable must call [onViewCreated] immediately after receiving the view.
-     *
      * For [GoogleNavigationEngine]: returns a [NavigationView].
      * For [MockNavigationEngine]: returns a simple placeholder [View].
      */
@@ -63,15 +79,6 @@ interface NavigationEngine {
     fun disableStandardVoice()
 
     // ── Lifecycle — forward from Activity/Composable ────────────────────
-    //
-    // NavigationView requires the full Android lifecycle sequence:
-    //   onCreate → onStart → onResume → onPause → onStop → onDestroy
-    //
-    // onCreate is called inside createNavigationView() (once, at view creation).
-    // onStart through onDestroy are forwarded by NavigationScreen via a
-    // LifecycleEventObserver. onDestroy is also called from onDispose so it fires
-    // even when the composable leaves composition while the Activity is still alive.
-    // Implementations must be idempotent for onDestroy.
 
     fun onStart()
     fun onResume()
@@ -79,9 +86,20 @@ interface NavigationEngine {
     fun onStop()
 
     /**
-     * Tear down the NavigationView and release SDK resources.
-     * May be called more than once (from both the lifecycle observer and onDispose);
-     * implementations must guard against double-execution.
+     * Tears down the [NavigationView] ONLY — called from [NavigationScreen]'s
+     * `DisposableEffect.onDispose`. The [Navigator] remains alive so that
+     * subsequent [startNavigation] calls succeed without re-initialisation.
+     *
+     * Implementations must be idempotent (safe to call multiple times).
+     */
+    fun onViewDestroy()
+
+    /**
+     * Full teardown: tears down both the [NavigationView] and the [Navigator].
+     * Called ONLY from [NavigationController.onDestroy] which is called from
+     * [MainActivity.onDestroy]. Never call this from a composable.
+     *
+     * Implementations must be idempotent.
      */
     fun onDestroy()
 }
