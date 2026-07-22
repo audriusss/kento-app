@@ -54,6 +54,50 @@ sealed class VoiceCommand {
     data class SelectCandidate(val index: Int) : VoiceCommand()
 
     /**
+     * "Pakeliui užvažiuok į Lidl." / "Pridėk degalinę." / "Užsuk į kavinę."
+     *
+     * [place] is extracted verbatim after the waypoint prefix and is forwarded
+     * to [DestinationResolver] then inserted as an intermediate stop via
+     * [WaypointManager].
+     *
+     * Checked BEFORE [StartNavigation] so that "dar važiuojam į X" is
+     * correctly classified as a waypoint addition, not a route replacement.
+     */
+    data class AddWaypoint(val place: String) : VoiceCommand()
+
+    /**
+     * "Išmesk paskutinį sustojimą." / "Pašalink paskutinį."
+     *
+     * Removes the last intermediate stop from [WaypointManager].
+     * Checked BEFORE [StopNavigation] patterns so that "atšauk paskutinį"
+     * is not mis-routed as a full navigation cancel.
+     */
+    object RemoveLastWaypoint : VoiceCommand()
+
+    /**
+     * "Pašalink visus sustojimus." / "Išvalyk sustojimus."
+     *
+     * Clears all intermediate stops while keeping the final destination.
+     */
+    object ClearWaypoints : VoiceCommand()
+
+    /**
+     * "Rodyk sustojimus." / "Kokie sustojimai?"
+     *
+     * Speaks the current waypoint list via TTS and shows it in the status text.
+     * Checked BEFORE [StartNavigation] so that "rodyk sustojimus" is not
+     * mis-parsed as StartNavigation("sustojimus").
+     */
+    object ListWaypoints : VoiceCommand()
+
+    /**
+     * "Tęsk maršrutą." / "Tęsk kelionę."
+     *
+     * Confirms the current route and re-speaks the next-stop name.
+     */
+    object ContinueRoute : VoiceCommand()
+
+    /**
      * Recognised speech that does not match any deterministic pattern.
      * Forwarded to OpenAI with full navigation context.
      */
@@ -79,15 +123,30 @@ sealed class VoiceCommand {
  * SpeechRecognizer accuracy on devices without a Lithuanian model.
  *
  * ## Matching order (most-specific first — do NOT reorder)
- * 1. [VoiceCommand.StartNavigation] — destination prefix regex (anchored `^`).
- * 2. [VoiceCommand.SelectCandidate] — ordinal words for disambiguation.
- * 3. Remaining distance / time / destination / repeat / mute / unmute / stop.
- * 4. Blank → [VoiceCommand.Unknown].
- * 5. Everything else → [VoiceCommand.GeneralQuestion].
+ * 1. [VoiceCommand.AddWaypoint]       — waypoint prefix regex (anchored `^`).
+ * 2. [VoiceCommand.RemoveLastWaypoint] / [ClearWaypoints] / [ListWaypoints] /
+ *    [ContinueRoute]                  — waypoint management keyword patterns.
+ * 3. [VoiceCommand.StartNavigation]   — destination prefix regex (anchored `^`).
+ * 4. [VoiceCommand.SelectCandidate]   — ordinal words for disambiguation.
+ * 5. Remaining distance / time / destination / repeat / mute / unmute / stop.
+ * 6. Blank → [VoiceCommand.Unknown].
+ * 7. Everything else → [VoiceCommand.GeneralQuestion].
  */
 object VoiceCommandParser {
 
     private const val TAG = "KentasVoice"
+
+    // ── AddWaypoint prefixes ───────────────────────────────────────────────
+    // Checked BEFORE NAV_PREFIX_REGEX. More-specific alternatives first.
+    // "po\s+\S+\s+važiuojam\s+į" handles "po degalinės važiuojam į X".
+    private val WAYPOINT_ADD_REGEX = Regex(
+        """^(pakeliui\s+užvažiuok\s+į|pakeliui\s+uzvazuok\s+i|pakeliui\s+važiuok\s+į|""" +
+        """pakeliui\s+vaziuok\s+i|užsuk\s+į|uzsuk\s+i|po\s+to\s+važiuojam\s+į|""" +
+        """po\s+to\s+vaziuojam\s+i|po\s+\S+\s+važiuojam\s+į|po\s+\S+\s+vaziuojam\s+i|""" +
+        """dar\s+važiuojam\s+į|dar\s+vaziuojam\s+i|pridėk\s+|pridek\s+|""" +
+        """pakeliui\s+į\s+|pakeliui\s+i\s+)\s*""",
+        RegexOption.IGNORE_CASE,
+    )
 
     // ── StartNavigation prefixes ───────────────────────────────────────────
     // More-specific alternatives MUST come before their shorter substrings in
@@ -224,6 +283,73 @@ object VoiceCommandParser {
         "stop navigaciją",
     )
 
+    // ── Waypoint management patterns ───────────────────────────────────────
+    // Checked BEFORE STOP_PATTERNS so "atšauk paskutinį" → RemoveLastWaypoint,
+    // not StopNavigation. Checked BEFORE NAV_PREFIX_REGEX so "rodyk sustojimus"
+    // → ListWaypoints, not StartNavigation("sustojimus").
+
+    private val REMOVE_WAYPOINT_PATTERNS = listOf(
+        "išmesk paskutinį sustojimą",
+        "ismesk paskutini sustojima",
+        "išmesk paskutinį",
+        "ismesk paskutini",
+        "pašalink paskutinį sustojimą",
+        "pasalink paskutini sustojima",
+        "pašalink paskutinį",
+        "pasalink paskutini",
+        "atšauk paskutinį sustojimą",
+        "atsauk paskutini sustojima",
+        "atšauk paskutinį",
+        "atsauk paskutini",
+        "ištrink paskutinį sustojimą",
+        "istrink paskutini sustojima",
+        "ištrink paskutinį",
+        "istrink paskutini",
+    )
+
+    private val CLEAR_WAYPOINTS_PATTERNS = listOf(
+        "pašalink visus sustojimus",
+        "pasalink visus sustojimus",
+        "išvalyk sustojimus",
+        "isvalyk sustojimus",
+        "pašalink sustojimus",
+        "pasalink sustojimus",
+        "išmesk visus sustojimus",
+        "ismesk visus sustojimus",
+        "ištrink visus sustojimus",
+        "istrink visus sustojimus",
+    )
+
+    private val LIST_WAYPOINTS_PATTERNS = listOf(
+        "rodyk sustojimus",
+        "parodyk sustojimus",
+        "kokie sustojimai",
+        "kokie yra sustojimai",
+        "kiek sustojimų",
+        "kiek sustojimu",
+        "sustojimų sąrašas",
+        "sustojimu sarasas",
+        "kokie sustojimų",
+        "kokie sustojimu",
+    )
+
+    private val CONTINUE_ROUTE_PATTERNS = listOf(
+        "tęsk maršrutą",
+        "tesk marsruta",
+        "tęsk kelionę",
+        "tesk kelione",
+        "tęsk navigaciją",
+        "tesk navigacija",
+        "tęsk",
+        "tesk",
+        "tęsiam",
+        "tesiam",
+        "tęsiame maršrutą",
+        "tesiame marsruta",
+        "maršrutą tęsk",
+        "marsruta tesk",
+    )
+
     // ── Public API ─────────────────────────────────────────────────────────
 
     /**
@@ -242,7 +368,35 @@ object VoiceCommandParser {
         val normalized = normalize(trimmed)
         Log.d(TAG, "parse: raw='$trimmed' normalized='$normalized'")
 
-        // ── 1. StartNavigation — checked first (anchored prefix regex) ─────
+        // ── 1. AddWaypoint — checked first (more specific than StartNavigation) ──
+        val waypointMatch = WAYPOINT_ADD_REGEX.find(trimmed)
+        if (waypointMatch != null) {
+            val place = trimmed.substring(waypointMatch.value.length).trim().trimEnd('.', ',', '!', '?')
+            if (place.isNotBlank()) {
+                Log.d(TAG, "parse: AddWaypoint place='$place'")
+                return VoiceCommand.AddWaypoint(place)
+            }
+        }
+
+        // ── 2. Waypoint management — checked before NAV_PREFIX_REGEX and STOP_PATTERNS ──
+        if (matchesAny(normalized, REMOVE_WAYPOINT_PATTERNS)) {
+            Log.d(TAG, "parse: RemoveLastWaypoint")
+            return VoiceCommand.RemoveLastWaypoint
+        }
+        if (matchesAny(normalized, CLEAR_WAYPOINTS_PATTERNS)) {
+            Log.d(TAG, "parse: ClearWaypoints")
+            return VoiceCommand.ClearWaypoints
+        }
+        if (matchesAny(normalized, LIST_WAYPOINTS_PATTERNS)) {
+            Log.d(TAG, "parse: ListWaypoints")
+            return VoiceCommand.ListWaypoints
+        }
+        if (matchesAny(normalized, CONTINUE_ROUTE_PATTERNS)) {
+            Log.d(TAG, "parse: ContinueRoute")
+            return VoiceCommand.ContinueRoute
+        }
+
+        // ── 3. StartNavigation — checked after waypoint prefixes (anchored prefix regex) ──
         val navMatch = NAV_PREFIX_REGEX.find(trimmed)
         if (navMatch != null) {
             val dest = trimmed.substring(navMatch.value.length).trim().trimEnd('.', ',', '!', '?')
@@ -252,7 +406,7 @@ object VoiceCommandParser {
             }
         }
 
-        // ── 2. SelectCandidate ordinals ────────────────────────────────────
+        // ── 4. SelectCandidate ordinals ────────────────────────────────────
         // Exact match or starts-with (e.g. "pirmą variantą" → index 1).
         val ordinalIndex = ORDINAL_MAP.entries.firstOrNull { (k, _) ->
             normalized == k || normalized.startsWith("$k ")
@@ -262,7 +416,7 @@ object VoiceCommandParser {
             return VoiceCommand.SelectCandidate(ordinalIndex)
         }
 
-        // ── 3. Deterministic keyword patterns ─────────────────────────────
+        // ── 5. Deterministic keyword patterns ─────────────────────────────
         if (matchesAny(normalized, DISTANCE_PATTERNS))    return VoiceCommand.RemainingDistance
         if (matchesAny(normalized, TIME_PATTERNS))        return VoiceCommand.RemainingTime
         if (matchesAny(normalized, DESTINATION_PATTERNS)) return VoiceCommand.DestinationInfo
@@ -271,7 +425,7 @@ object VoiceCommandParser {
         if (matchesAny(normalized, UNMUTE_PATTERNS))      return VoiceCommand.UnmuteVoice
         if (matchesAny(normalized, STOP_PATTERNS))        return VoiceCommand.StopNavigation
 
-        // ── 4. Fallthrough — forward to OpenAI ────────────────────────────
+        // ── 6. Fallthrough — forward to OpenAI ────────────────────────────
         Log.d(TAG, "parse: no pattern matched → GeneralQuestion")
         return VoiceCommand.GeneralQuestion(trimmed)
     }

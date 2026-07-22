@@ -11,11 +11,13 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -32,6 +34,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
@@ -40,6 +43,7 @@ import lt.sturmanas.bajeristas.navigation.ManeuverType
 import lt.sturmanas.bajeristas.navigation.NavigationController
 import lt.sturmanas.bajeristas.navigation.NavigationPhase
 import lt.sturmanas.bajeristas.navigation.NavigationState
+import lt.sturmanas.bajeristas.navigation.StopoverEntry
 import lt.sturmanas.bajeristas.safety.ConversationPermission
 import lt.sturmanas.bajeristas.voice.VoiceListeningState
 import lt.sturmanas.bajeristas.ui.MicButton
@@ -53,6 +57,12 @@ fun NavigationScreen(
     isMuted: Boolean,
     /** Current speech-recognition state; drives the mic button appearance. */
     voiceListeningState: VoiceListeningState = VoiceListeningState.IDLE,
+    /** Intermediate stops to show in the route card. Empty = no card rendered. */
+    stopovers: List<StopoverEntry> = emptyList(),
+    /** Final destination display name. Used in the route card header. */
+    finalDestinationName: String = "",
+    /** Called with the 0-based stopover index when the user taps its × button. */
+    onRemoveStopover: (Int) -> Unit = {},
     onMicPress: () -> Unit,
     onMuteToggle: () -> Unit,
     onEnableStandardVoice: () -> Unit,
@@ -175,8 +185,11 @@ fun NavigationScreen(
                 }
             }
 
-            // Arrival overlay
-            if (navigationState.hasArrived) {
+            // Arrival overlay — shown for final destination only.
+            // When arriving at an intermediate stop, onWaypointArrived() handles the
+            // transition before hasArrived can linger, so this overlay is suppressed
+            // while stopovers remain.
+            if (navigationState.hasArrived && stopovers.isEmpty()) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = Color(0xCC1B6CA8),
@@ -221,6 +234,20 @@ fun NavigationScreen(
                         color = MaterialTheme.colorScheme.onErrorContainer,
                     )
                 }
+            }
+
+            // Route card — only shown when there are intermediate stopovers
+            if (stopovers.isNotEmpty()) {
+                WaypointRouteCard(
+                    stopovers = stopovers,
+                    finalDestinationName = finalDestinationName
+                        .ifBlank { navigationState.resolvedAddress }
+                        .ifBlank { navigationState.destinationName },
+                    remainingDistanceMeters = navigationState.remainingDistanceMeters,
+                    remainingDurationSeconds = navigationState.remainingDurationSeconds,
+                    onRemoveStopover = onRemoveStopover,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
             }
 
             // Maneuver info card
@@ -318,6 +345,119 @@ fun NavigationScreen(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text("Įjungti įprastą navigacijos balsą")
+            }
+        }
+    }
+}
+
+// ── Route card ────────────────────────────────────────────────────────────────
+
+/**
+ * Displays the full multi-stop route: ordered stopovers with × buttons and the
+ * final destination, plus the current ETA and remaining distance.
+ *
+ * Only rendered when [stopovers] is non-empty.
+ */
+@Composable
+private fun WaypointRouteCard(
+    stopovers: List<StopoverEntry>,
+    finalDestinationName: String,
+    remainingDistanceMeters: Int,
+    remainingDurationSeconds: Int,
+    onRemoveStopover: (Int) -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+        ),
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+
+            // Header row: label + ETA/distance summary
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Maršrutas",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+                val mins = remainingDurationSeconds / 60
+                val distKm = if (remainingDistanceMeters == Int.MAX_VALUE || remainingDistanceMeters <= 0) ""
+                             else if (remainingDistanceMeters < 1000) " · ${remainingDistanceMeters} m"
+                             else " · ${remainingDistanceMeters / 1000} km"
+                Text(
+                    text = "~$mins min$distKm",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+            }
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+            // Intermediate stops (each removable)
+            stopovers.forEachIndexed { index, stop ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(
+                            text = "${index + 1}. ",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        )
+                        Text(
+                            text = stop.displayName,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    IconButton(
+                        onClick = { onRemoveStopover(index) },
+                        modifier = Modifier.size(28.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Pašalinti ${stop.displayName}",
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                        )
+                    }
+                }
+            }
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+            // Final destination row (non-removable)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    text = "⚑ ",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Text(
+                    text = finalDestinationName.ifBlank { "Tikslas" },
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
     }

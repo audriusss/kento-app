@@ -14,6 +14,8 @@ import lt.sturmanas.bajeristas.navigation.DestinationResolution
 import lt.sturmanas.bajeristas.navigation.DestinationResolver
 import lt.sturmanas.bajeristas.navigation.LocationProvider
 import lt.sturmanas.bajeristas.navigation.NavigationState
+import lt.sturmanas.bajeristas.navigation.StopoverEntry
+import lt.sturmanas.bajeristas.navigation.WaypointManager
 import lt.sturmanas.bajeristas.personality.SessionConfig
 import lt.sturmanas.bajeristas.voice.ClarificationState
 import lt.sturmanas.bajeristas.voice.SavedPlacesRepository
@@ -29,8 +31,9 @@ import lt.sturmanas.bajeristas.voice.askKentas
  * Single ViewModel for the entire app — survives screen rotation.
  *
  * Owns all audio-output ([TtsManager]), audio-input ([SpeechRecognitionManager]),
- * and the destination resolver ([DestinationResolver] + [SavedPlacesRepository])
- * that must not be destroyed and recreated on configuration changes.
+ * the destination resolver ([DestinationResolver] + [SavedPlacesRepository]),
+ * and the waypoint manager ([WaypointManager]) that must not be destroyed and
+ * recreated on configuration changes.
  *
  * ## Voice command flow
  *
@@ -43,6 +46,8 @@ import lt.sturmanas.bajeristas.voice.askKentas
  *    [pendingNavAction] and consumed by [SturmanasApp] through a second LaunchedEffect.
  * 6. For voice-triggered StartNavigation, [DestinationResolver] is called to normalise
  *    the raw destination text before forwarding to the navigation engine.
+ * 7. For voice-triggered AddWaypoint, [DestinationResolver] resolves the stop and
+ *    [WaypointManager] inserts it. The engine is then re-routed to the next target.
  *
  * ## TTS / microphone coordination
  *
@@ -55,6 +60,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
         private const val TAG      = "KentasVoice"
         private const val DEST_TAG = "KentasDestination"
+        private const val WP_TAG   = "KentasWaypoint"
     }
 
     // ── Audio output ──────────────────────────────────────────────────────
@@ -77,6 +83,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _workAddress = MutableStateFlow(savedPlacesRepository.getWorkAddress() ?: "")
     /** Currently saved work address. Empty string if not configured. */
     val workAddress: StateFlow<String> = _workAddress.asStateFlow()
+
+    // ── Waypoint manager ──────────────────────────────────────────────────
+
+    /**
+     * Tracks intermediate stops and the final destination for the current session.
+     * Exposed as package-internal so tests can inspect state directly.
+     */
+    internal val waypointManager = WaypointManager()
+
+    /**
+     * Live list of intermediate stops. Observed by [NavigationScreen] to render
+     * the route card and by [SturmanasApp] to pass remove-stop callbacks.
+     */
+    val stopovers: StateFlow<List<StopoverEntry>> = waypointManager.stopovers
+
+    private val _finalDestinationName = MutableStateFlow("")
+    /**
+     * Display name of the overall final destination (e.g. "Akropolį", "Lidl").
+     * Blank when not navigating. Observed by [NavigationScreen] for the route card.
+     */
+    val finalDestinationName: StateFlow<String> = _finalDestinationName.asStateFlow()
 
     // ── Voice state ───────────────────────────────────────────────────────
 
@@ -117,8 +144,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * Non-null when the destination resolver could not pick a single result and needs
      * the user to choose. [SturmanasApp] presents a dialog with up to 3 options.
-     * The user may tap a button ([onClarificationAnswer]) or speak an ordinal
-     * ("pirmą", "antrą", "trečią") which routes through [executeVoiceCommand].
      */
     val pendingClarification: StateFlow<ClarificationState?> = _pendingClarification.asStateFlow()
 
@@ -145,19 +170,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * Starts continuous location updates so [resolveAndNavigate] can read a cached
      * fix immediately, even on the very first voice command after a cold launch.
-     *
-     * The update interval is coarse (every 30 s / 100 m) — enough to keep
-     * [LocationProvider.cachedLocation] fresh without draining the battery.
-     *
-     * Failure (no permission, no provider) is silent: [LocationProvider.cachedLocation]
-     * stays null and [resolveAndNavigate] degrades to an unbiased search gracefully.
      */
     private fun startLocationUpdates() {
         try {
             LocationProvider.startUpdates(getApplication())
             Log.d(TAG, "Location updates started")
         } catch (e: Exception) {
-            // Defensive: permission not yet granted at ViewModel creation time.
             Log.w(TAG, "startLocationUpdates failed: ${e.message}")
         }
     }
@@ -216,11 +234,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      *
      * Non-navigation commands are handled entirely here via TTS response.
      * Navigation commands emit a [VoiceNavAction] via [pendingNavAction].
-     *
-     * For [VoiceCommand.StartNavigation], calls [DestinationResolver.resolve] to
-     * normalise the raw destination before forwarding to the navigation engine.
-     *
-     * Call [clearPendingRecognizedText] immediately after calling this.
      */
     fun executeVoiceCommand(
         text: String,
@@ -247,9 +260,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             is VoiceCommand.DestinationInfo -> {
                 Log.d("KentasFlow", "command: DestinationInfo")
-                val dest = navState.resolvedAddress.ifBlank { navState.destinationName }
-                val msg = if (dest.isBlank()) "Šiuo metu maršrutas nepasirinktas."
-                          else "Važiuojame į $dest."
+                val stops = waypointManager.allStops()
+                val msg = if (stops.isEmpty()) {
+                    val dest = navState.resolvedAddress.ifBlank { navState.destinationName }
+                    if (dest.isBlank()) "Šiuo metu maršrutas nepasirinktas."
+                    else "Važiuojame į $dest."
+                } else {
+                    buildRouteDescription(stops)
+                }
                 speakAndIdle(msg, isMuted)
             }
 
@@ -315,6 +333,79 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 return
             }
 
+            // ── Waypoint commands ─────────────────────────────────────────
+
+            is VoiceCommand.AddWaypoint -> {
+                Log.d(WP_TAG, "command: AddWaypoint place='${command.place}'")
+                _isSolvingDestination.value = true
+                _voiceListeningState.value = VoiceListeningState.PROCESSING
+                _voiceStatusText.value = "Kentas ieško: ${command.place}…"
+                viewModelScope.launch {
+                    resolveAndAddWaypoint(command.place, isMuted)
+                }
+                return
+            }
+
+            is VoiceCommand.RemoveLastWaypoint -> {
+                Log.d(WP_TAG, "command: RemoveLastWaypoint")
+                val removed = waypointManager.removeLastStopover()
+                val msg = if (removed == null) {
+                    "Nėra sustojimų, kurių būtų galima pašalinti."
+                } else {
+                    val remaining = waypointManager.stopovers.value.size
+                    val nextTarget = waypointManager.nextTarget()
+                    if (nextTarget != null) {
+                        _pendingNavAction.value = VoiceNavAction.StartNavigation(nextTarget.resolvedQuery)
+                    }
+                    if (remaining == 0) "Pašalinau ${removed.displayName}. Maršrutas perskaičiuotas."
+                    else "Pašalinau paskutinį sustojimą. Liko $remaining ${sustojimasForm(remaining)}."
+                }
+                speakAndIdle(msg, isMuted)
+            }
+
+            is VoiceCommand.ClearWaypoints -> {
+                Log.d(WP_TAG, "command: ClearWaypoints")
+                val count = waypointManager.stopovers.value.size
+                waypointManager.clearStopovers()
+                val msg = if (count == 0) {
+                    "Nėra sustojimų, kurių būtų galima pašalinti."
+                } else {
+                    val fd = waypointManager.finalDestination
+                    if (fd != null) {
+                        _pendingNavAction.value = VoiceNavAction.StartNavigation(fd.resolvedQuery)
+                        "Pašalinti visi sustojimai. Važiuojame tiesiai į ${fd.displayName}."
+                    } else {
+                        "Pašalinti visi sustojimai."
+                    }
+                }
+                speakAndIdle(msg, isMuted)
+            }
+
+            is VoiceCommand.ListWaypoints -> {
+                Log.d(WP_TAG, "command: ListWaypoints")
+                val stops = waypointManager.allStops()
+                val msg = if (stops.isEmpty()) {
+                    val dest = navState.resolvedAddress.ifBlank { navState.destinationName }
+                    if (dest.isBlank()) "Šiuo metu maršrutas nepasirinktas."
+                    else "Važiuojame į $dest. Sustojimų nėra."
+                } else {
+                    buildRouteDescription(stops)
+                }
+                speakAndIdle(msg, isMuted)
+            }
+
+            is VoiceCommand.ContinueRoute -> {
+                Log.d(WP_TAG, "command: ContinueRoute")
+                val next = waypointManager.nextTarget()
+                val msg = if (next != null) {
+                    "Tęsiame. Sekantis tikslas: ${next.displayName}."
+                } else {
+                    val dest = navState.resolvedAddress.ifBlank { navState.destinationName }
+                    if (dest.isBlank()) "Navigacija nepradėta." else "Tęsiame kelionę į $dest."
+                }
+                speakAndIdle(msg, isMuted)
+            }
+
             is VoiceCommand.GeneralQuestion -> {
                 Log.d("KentasFlow", "command: GeneralQuestion → OpenAI '${command.text}'")
                 _voiceListeningState.value = VoiceListeningState.PROCESSING
@@ -362,6 +453,63 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _pendingClarification.value = null
         _voiceListeningState.value = VoiceListeningState.IDLE
         _voiceStatusText.value = ""
+    }
+
+    // ── Public API — Waypoints ────────────────────────────────────────────
+
+    /**
+     * Called by [SturmanasApp] when [NavigationState.hasArrived] becomes true.
+     *
+     * If intermediate stops remain, automatically advances to the next stop and
+     * emits a [VoiceNavAction.StartNavigation] to re-route the engine.
+     * Does nothing when no stopovers are queued (normal final-destination arrival).
+     */
+    fun onWaypointArrived() {
+        if (!waypointManager.hasStopovers()) {
+            Log.d(WP_TAG, "onWaypointArrived: no stopovers — final destination, normal arrival")
+            return
+        }
+        val completedName = waypointManager.stopovers.value.firstOrNull()?.displayName ?: "sustojimas"
+        val nextTarget = waypointManager.advanceToNextStop()
+        if (nextTarget == null) {
+            Log.d(WP_TAG, "onWaypointArrived: no next target after advance — unexpected state")
+            return
+        }
+        val remaining = waypointManager.stopovers.value.size
+        val remainingMsg = when {
+            remaining == 0 -> "Tęsiame į galutinį tikslą, ${nextTarget.displayName}."
+            remaining == 1 -> "Liko vienas sustojimas."
+            else           -> "Liko $remaining ${sustojimasForm(remaining)}."
+        }
+        Log.d(WP_TAG, "onWaypointArrived: '$completedName' done → next='${nextTarget.displayName}'")
+        ttsManager.speak("Atvykome į $completedName. $remainingMsg")
+        _pendingNavAction.value = VoiceNavAction.StartNavigation(nextTarget.resolvedQuery)
+    }
+
+    /**
+     * Remove the stopover at [index] (0-based) from [WaypointManager] and reroute
+     * the engine to the new [nextTarget]. Called when the user taps the × button
+     * on a route-card stop.
+     */
+    fun removeStopoverAt(index: Int, isMuted: Boolean = false) {
+        val removed = waypointManager.removeStopoverAt(index) ?: return
+        Log.d(WP_TAG, "removeStopoverAt($index): '${removed.displayName}'")
+        val next = waypointManager.nextTarget()
+        if (next != null) _pendingNavAction.value = VoiceNavAction.StartNavigation(next.resolvedQuery)
+        val msg = "Pašalinau ${removed.displayName}. Maršrutas perskaičiuotas."
+        _voiceStatusText.value = msg
+        if (!isMuted) ttsManager.speak(msg)
+        scheduleStatusClear(4_000)
+    }
+
+    /**
+     * Called when navigation stops (user taps "Baigti" or says "Sustabdyk").
+     * Resets waypoint state so the next session starts clean.
+     */
+    fun onNavigationStopped() {
+        Log.d(WP_TAG, "onNavigationStopped: clearing waypoints")
+        waypointManager.clear()
+        _finalDestinationName.value = ""
     }
 
     // ── Public API — Saved places ─────────────────────────────────────────
@@ -419,17 +567,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ── Private helpers ───────────────────────────────────────────────────
 
     /**
-     * Call [DestinationResolver], then either navigate, ask for clarification, or
-     * speak a failure message. Called from [executeVoiceCommand] inside a coroutine.
+     * Resolve [rawDestination] via [DestinationResolver], record it as the final
+     * destination in [WaypointManager], and emit a [VoiceNavAction.StartNavigation].
+     *
+     * This sets a NEW primary destination — any existing stopovers are cleared
+     * by [WaypointManager.setFinalDestination].
      */
     private suspend fun resolveAndNavigate(rawDestination: String, isMuted: Boolean) {
         Log.d(DEST_TAG, "resolveAndNavigate: raw='$rawDestination'")
         val savedPlaces = savedPlacesRepository.getAll()
-
-        // Read the continuously-updated cached fix. getCurrentLocation() now checks
-        // LocationProvider.cachedLocation first, so this returns immediately when
-        // startLocationUpdates() has already received a fix — no blocking GPS call.
-        // All three values degrade to null gracefully when no fix is available yet.
         val (currentLat, currentLng, currentLocality) =
             LocationProvider.getCurrentLocation(getApplication())
         Log.d(DEST_TAG, "location: lat=$currentLat lng=$currentLng locality='$currentLocality'")
@@ -448,6 +594,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         when (resolution) {
             is DestinationResolution.ExactAddress -> {
                 Log.d(DEST_TAG, "ExactAddress: '${resolution.query}'")
+                waypointManager.setFinalDestination(StopoverEntry(resolution.query, resolution.query))
+                _finalDestinationName.value = resolution.query
                 _voiceListeningState.value = VoiceListeningState.IDLE
                 _voiceStatusText.value = "Rasta: ${resolution.query}"
                 if (!isMuted) ttsManager.speak("Keliaujame į ${resolution.query}.")
@@ -457,16 +605,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             is DestinationResolution.PlaceSearch -> {
                 Log.d(DEST_TAG, "PlaceSearch: '${resolution.query}'")
+                waypointManager.setFinalDestination(StopoverEntry(rawDestination, resolution.query))
+                _finalDestinationName.value = rawDestination
                 _voiceListeningState.value = VoiceListeningState.IDLE
                 _voiceStatusText.value = "Kentas ieško: ${resolution.query}"
-                // PlaceSearch query is forwarded to the existing geocoding flow.
-                // GoogleNavigationEngine.resolveAddress() handles the actual lookup.
                 _pendingNavAction.value = VoiceNavAction.StartNavigation(resolution.query)
                 scheduleStatusClear(5_000)
             }
 
             is DestinationResolution.SavedPlace -> {
                 Log.d(DEST_TAG, "SavedPlace: '${resolution.name}' → '${resolution.address}'")
+                waypointManager.setFinalDestination(StopoverEntry(resolution.name, resolution.address))
+                _finalDestinationName.value = resolution.name
                 _voiceListeningState.value = VoiceListeningState.IDLE
                 _voiceStatusText.value = "Rasta: ${resolution.name}"
                 if (!isMuted) ttsManager.speak("Keliaujame ${resolution.name.lowercase()}.")
@@ -484,7 +634,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val msg = buildClarificationMessage(resolution.suggestions)
                 _voiceStatusText.value = "Radau kelis variantus"
                 if (!isMuted) ttsManager.speak(msg)
-                // Status cleared when user picks or cancels.
             }
 
             is DestinationResolution.Failure -> {
@@ -497,8 +646,82 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Resolve [rawPlace] via [DestinationResolver] and insert the result as an
+     * intermediate stop in [WaypointManager]. Re-routes the engine to [nextTarget].
+     *
+     * This does NOT replace the final destination or clear existing stopovers.
+     */
+    private suspend fun resolveAndAddWaypoint(rawPlace: String, isMuted: Boolean) {
+        Log.d(WP_TAG, "resolveAndAddWaypoint: raw='$rawPlace'")
+        val savedPlaces = savedPlacesRepository.getAll()
+        val (currentLat, currentLng, currentLocality) =
+            LocationProvider.getCurrentLocation(getApplication())
+
+        val resolution = DestinationResolver.resolve(
+            rawText = rawPlace,
+            currentLat = currentLat,
+            currentLng = currentLng,
+            currentLocality = currentLocality,
+            savedPlaces = savedPlaces,
+        )
+
+        _isSolvingDestination.value = false
+        _voiceListeningState.value = VoiceListeningState.IDLE
+
+        Log.d(WP_TAG, "resolveAndAddWaypoint: resolution=${resolution::class.simpleName}")
+
+        val entry: StopoverEntry? = when (resolution) {
+            is DestinationResolution.ExactAddress ->
+                StopoverEntry(resolution.query, resolution.query)
+            is DestinationResolution.PlaceSearch ->
+                StopoverEntry(rawPlace, resolution.query)
+            is DestinationResolution.SavedPlace ->
+                StopoverEntry(resolution.name, resolution.address)
+            is DestinationResolution.NeedsClarification ->
+                // Auto-pick first candidate for waypoints; no dialog needed.
+                resolution.suggestions.firstOrNull()
+                    ?.let { StopoverEntry(it.name, it.address) }
+            is DestinationResolution.Failure -> null
+        }
+
+        if (entry == null) {
+            val msg = "Nepavyko pridėti sustojimo. Tęsiame dabartinį maršrutą."
+            Log.w(WP_TAG, "resolveAndAddWaypoint: resolution failed → $msg")
+            _voiceStatusText.value = msg
+            if (!isMuted) ttsManager.speak(msg)
+            scheduleStatusClear(5_000)
+            return
+        }
+
+        val added = waypointManager.addStopover(entry)
+        if (!added) {
+            val msg = "Šis sustojimas jau yra maršrute."
+            _voiceStatusText.value = msg
+            if (!isMuted) ttsManager.speak(msg)
+            scheduleStatusClear(4_000)
+            return
+        }
+
+        val count = waypointManager.stopovers.value.size
+        val confirmMsg = "Pridėjau ${entry.displayName} kaip tarpinį sustojimą. " +
+            "Liko $count ${sustojimasForm(count)}."
+        Log.d(WP_TAG, "addStopover confirmed: '${entry.displayName}' — total stopovers: $count")
+        _voiceStatusText.value = "Pridėta: ${entry.displayName}"
+        if (!isMuted) ttsManager.speak(confirmMsg)
+
+        // Re-route engine to the new first target (could be this new stopover or an earlier one).
+        val nextTarget = waypointManager.nextTarget()
+        if (nextTarget != null) {
+            _pendingNavAction.value = VoiceNavAction.StartNavigation(nextTarget.resolvedQuery)
+        }
+        scheduleStatusClear(5_000)
+    }
+
     private fun acceptCandidate(candidate: CandidatePlace, isMuted: Boolean) {
         Log.d(DEST_TAG, "acceptCandidate: '${candidate.name}' → '${candidate.address}'")
+        waypointManager.setFinalDestination(StopoverEntry(candidate.name, candidate.address))
+        _finalDestinationName.value = candidate.name
         _pendingClarification.value = null
         _voiceListeningState.value = VoiceListeningState.IDLE
         _voiceStatusText.value = "Pasirinkta: ${candidate.name}"
@@ -518,6 +741,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         sb.append("Pasakykite: pirmą, antrą, ar trečią.")
         return sb.toString().trim()
+    }
+
+    private fun buildRouteDescription(stops: List<StopoverEntry>): String {
+        if (stops.isEmpty()) return "Maršrutas nepasirinktas."
+        return when (stops.size) {
+            1 -> "Važiuojame į ${stops[0].displayName}."
+            2 -> "Maršrutas: ${stops[0].displayName}, tada ${stops[1].displayName}."
+            else -> {
+                val intermediate = stops.dropLast(1).joinToString(", ") { it.displayName }
+                "Maršrutas: $intermediate, tada ${stops.last().displayName}."
+            }
+        }
     }
 
     private fun speakAndIdle(msg: String, isMuted: Boolean) {
@@ -567,5 +802,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun minutesForm(n: Int): String = when {
         n % 10 == 1 && n % 100 != 11         -> "minutės"
         else                                   -> "minučių"
+    }
+
+    internal fun sustojimasForm(n: Int): String = when {
+        n % 10 == 1 && n % 100 != 11         -> "sustojimas"
+        n % 10 in 2..9 && n % 100 !in 11..19 -> "sustojimai"
+        else                                   -> "sustojimų"
     }
 }

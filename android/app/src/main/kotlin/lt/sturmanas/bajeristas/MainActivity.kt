@@ -174,13 +174,17 @@ private fun SturmanasApp(
     var showSettings  by remember { mutableStateOf(false) }
 
     // Voice state from ViewModel
-    val voiceListeningState by viewModel.voiceListeningState.collectAsStateWithLifecycle()
-    val voiceStatusText     by viewModel.voiceStatusText.collectAsStateWithLifecycle()
+    val voiceListeningState  by viewModel.voiceListeningState.collectAsStateWithLifecycle()
+    val voiceStatusText      by viewModel.voiceStatusText.collectAsStateWithLifecycle()
     val pendingRecognizedText by viewModel.pendingRecognizedText.collectAsStateWithLifecycle()
-    val pendingNavAction    by viewModel.pendingNavAction.collectAsStateWithLifecycle()
+    val pendingNavAction     by viewModel.pendingNavAction.collectAsStateWithLifecycle()
     val pendingClarification by viewModel.pendingClarification.collectAsStateWithLifecycle()
-    val homeAddress         by viewModel.homeAddress.collectAsStateWithLifecycle()
-    val workAddress         by viewModel.workAddress.collectAsStateWithLifecycle()
+    val homeAddress          by viewModel.homeAddress.collectAsStateWithLifecycle()
+    val workAddress          by viewModel.workAddress.collectAsStateWithLifecycle()
+
+    // Waypoint state from ViewModel
+    val stopovers            by viewModel.stopovers.collectAsStateWithLifecycle()
+    val finalDestinationName by viewModel.finalDestinationName.collectAsStateWithLifecycle()
 
     // Voice status takes priority over generic AI status message in the display.
     val effectiveStatus = voiceStatusText.ifBlank { aiStatusMessage }
@@ -230,6 +234,7 @@ private fun SturmanasApp(
                 voiceSessionController.stopSession()
                 audioController.release()
                 viewModel.ttsManager.stop()
+                viewModel.onNavigationStopped()
                 isNavigating = false; isMuted = false
                 aiStatusMessage = ""; startScreenError = null
             }
@@ -261,6 +266,18 @@ private fun SturmanasApp(
             }
         }
         viewModel.clearPendingNavAction()
+    }
+
+    // ── Waypoint arrival chaining ─────────────────────────────────────────
+    // When the SDK fires the arrival event and there are still intermediate stops
+    // queued, onWaypointArrived() emits a new StartNavigation action for the next
+    // stop. When no stopovers remain this is a no-op (normal final-destination flow).
+
+    LaunchedEffect(navState.hasArrived) {
+        if (navState.hasArrived) {
+            Log.d(MainActivity.FLOW_TAG, "hasArrived=true — checking waypoints")
+            viewModel.onWaypointArrived()
+        }
     }
 
     // ── Safety: navigation audio priority ────────────────────────────────
@@ -365,14 +382,17 @@ private fun SturmanasApp(
 
         else -> {
             NavigationScreen(
-                navigationState     = navState,
+                navigationState      = navState,
                 navigationController = navigationController,
                 conversationPermission = permission,
-                aiStatusMessage     = effectiveStatus,
-                isMuted             = isMuted,
-                voiceListeningState = voiceListeningState,
-                onMicPress          = { onMicPress() },
-                onMuteToggle        = {
+                aiStatusMessage      = effectiveStatus,
+                isMuted              = isMuted,
+                voiceListeningState  = voiceListeningState,
+                stopovers            = stopovers,
+                finalDestinationName = finalDestinationName,
+                onRemoveStopover     = { index -> viewModel.removeStopoverAt(index, isMuted) },
+                onMicPress           = { onMicPress() },
+                onMuteToggle         = {
                     isMuted = !isMuted
                     if (isMuted) {
                         audioController.interruptAiAudio()
@@ -395,6 +415,7 @@ private fun SturmanasApp(
                     voiceSessionController.stopSession()
                     audioController.release()
                     viewModel.ttsManager.stop()
+                    viewModel.onNavigationStopped()
                     isNavigating = false; isMuted = false
                     aiStatusMessage = ""; startScreenError = null
                 },
