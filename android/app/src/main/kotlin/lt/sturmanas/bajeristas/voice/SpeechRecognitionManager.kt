@@ -39,6 +39,15 @@ import android.util.Log
  * All SpeechRecognizer calls must happen on the thread that created the recognizer
  * (the Main thread). The callbacks fire on the same thread.
  *
+ * ## Typed error callbacks
+ *
+ * In addition to the generic [onError] kept for backward compatibility, the manager
+ * exposes two typed callbacks used by the continuous session loop:
+ * - [onRecoverableError] — fired for NO_MATCH, SPEECH_TIMEOUT, RECOGNIZER_BUSY.
+ *   The session loop retries up to [MainViewModel.MAX_SESSION_RETRIES] times.
+ * - [onFatalError] — fired for INSUFFICIENT_PERMISSIONS and other hard failures.
+ *   The session loop stops immediately.
+ *
  * ## Usage example
  * ```
  * manager.onResult = { text -> viewModel.onRecognitionResult(text) }
@@ -58,8 +67,25 @@ class SpeechRecognitionManager(private val appContext: Context) {
     var onListeningStarted: (() -> Unit)? = null
     var onPartialResult: ((String) -> Unit)? = null
     var onResult: ((String) -> Unit)? = null
+    /** Generic error callback — kept for backward compatibility. */
     var onError: ((String) -> Unit)? = null
     var onListeningStopped: (() -> Unit)? = null
+
+    /**
+     * Fired for transient, recoverable errors: [SpeechRecognizer.ERROR_NO_MATCH],
+     * [SpeechRecognizer.ERROR_SPEECH_TIMEOUT], [SpeechRecognizer.ERROR_RECOGNIZER_BUSY].
+     * Receives the raw error code so the session loop can apply error-specific delays.
+     * When set, [onError] is NOT additionally called for these error codes.
+     */
+    var onRecoverableError: ((Int) -> Unit)? = null
+
+    /**
+     * Fired for hard, non-retryable failures: [SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS]
+     * and unknown error codes.
+     * Receives a user-facing Lithuanian message.
+     * When set, [onError] is NOT additionally called for these error codes.
+     */
+    var onFatalError: ((String) -> Unit)? = null
 
     // ── Internal state ────────────────────────────────────────────────────
 
@@ -94,7 +120,8 @@ class SpeechRecognitionManager(private val appContext: Context) {
 
         if (!isAvailable) {
             Log.w(TAG, "startListening: recognition not available on this device")
-            onError?.invoke("Balso atpažinimas neprieinamas šiame įrenginyje.")
+            val msg = "Balso atpažinimas neprieinamas šiame įrenginyje."
+            if (onFatalError != null) onFatalError?.invoke(msg) else onError?.invoke(msg)
             return
         }
 
@@ -106,7 +133,8 @@ class SpeechRecognitionManager(private val appContext: Context) {
             val sr = SpeechRecognizer.createSpeechRecognizer(appContext)
             if (sr == null) {
                 Log.e(TAG, "startListening: SpeechRecognizer.create returned null")
-                onError?.invoke("Nepavyko sukurti balso atpažintuvio.")
+                val msg = "Nepavyko sukurti balso atpažintuvio."
+                if (onFatalError != null) onFatalError?.invoke(msg) else onError?.invoke(msg)
                 return
             }
             sr.setRecognitionListener(listener)
@@ -117,7 +145,8 @@ class SpeechRecognitionManager(private val appContext: Context) {
             Log.d(TAG, "startListening: listening started")
         } catch (e: Exception) {
             Log.e(TAG, "startListening: exception", e)
-            onError?.invoke("Nepavyko paleisti balso atpažinimo: ${e.message?.take(40)}")
+            val msg = "Nepavyko paleisti balso atpažinimo: ${e.message?.take(40)}"
+            if (onFatalError != null) onFatalError?.invoke(msg) else onError?.invoke(msg)
         }
     }
 
@@ -142,6 +171,8 @@ class SpeechRecognitionManager(private val appContext: Context) {
         onResult = null
         onError = null
         onListeningStopped = null
+        onRecoverableError = null
+        onFatalError = null
     }
 
     // ── Private helpers ───────────────────────────────────────────────────
@@ -217,33 +248,73 @@ class SpeechRecognitionManager(private val appContext: Context) {
             Log.d(TAG, "onResults: text='$text'")
 
             if (text.isNullOrBlank()) {
-                onError?.invoke("Nieko aiškiai neišgirdau. Pabandykite dar kartą.")
+                val msg = "Nieko aiškiai neišgirdau. Pabandykite dar kartą."
+                // Treat an empty result as recoverable (user just didn't speak).
+                if (onRecoverableError != null) {
+                    onRecoverableError?.invoke(SpeechRecognizer.ERROR_NO_MATCH)
+                } else {
+                    onError?.invoke(msg)
+                }
             } else {
                 onResult?.invoke(text)
             }
         }
 
         override fun onError(errorCode: Int) {
-            val msg = when (errorCode) {
-                SpeechRecognizer.ERROR_NO_MATCH          -> "Nieko aiškiai neišgirdau. Pabandykite dar kartą."
-                SpeechRecognizer.ERROR_SPEECH_TIMEOUT    -> "Nieko neišgirdau."
-                SpeechRecognizer.ERROR_NETWORK           -> "Balso atpažinimui nepavyko prisijungti prie interneto."
-                SpeechRecognizer.ERROR_NETWORK_TIMEOUT   -> "Tinklo užklausa užtruko per ilgai."
-                SpeechRecognizer.ERROR_AUDIO             -> "Nepavyko naudoti mikrofono."
-                SpeechRecognizer.ERROR_SERVER            -> "Balso atpažinimo serverio klaida."
-                SpeechRecognizer.ERROR_CLIENT            -> "Kliento klaida."
-                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Nėra mikrofono leidimo."
-                SpeechRecognizer.ERROR_RECOGNIZER_BUSY   -> {
+            when (errorCode) {
+                SpeechRecognizer.ERROR_NO_MATCH,
+                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
+                    val msg = if (errorCode == SpeechRecognizer.ERROR_NO_MATCH)
+                        "Nieko aiškiai neišgirdau. Pabandykite dar kartą."
+                    else
+                        "Nieko neišgirdau."
+                    Log.w(TAG, "onError: recoverable code=$errorCode")
+                    if (onRecoverableError != null) {
+                        onRecoverableError?.invoke(errorCode)
+                    } else {
+                        onError?.invoke(msg)
+                    }
+                }
+                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
                     // Destroy and allow a fresh startListening() call — do not propagate as error.
                     Log.w(TAG, "onError: RECOGNIZER_BUSY ($errorCode) — cancelling for retry")
                     destroyCurrentRecognizer()
-                    onListeningStopped?.invoke()
-                    return
+                    if (onRecoverableError != null) {
+                        onRecoverableError?.invoke(errorCode)
+                    } else {
+                        onListeningStopped?.invoke()
+                    }
                 }
-                else -> "Balso atpažinimo klaida (kodas: $errorCode)"
+                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> {
+                    val msg = "Nėra mikrofono leidimo."
+                    Log.e(TAG, "onError: FATAL code=$errorCode msg='$msg'")
+                    if (onFatalError != null) onFatalError?.invoke(msg) else onError?.invoke(msg)
+                }
+                else -> {
+                    val msg = when (errorCode) {
+                        SpeechRecognizer.ERROR_NETWORK         -> "Balso atpažinimui nepavyko prisijungti prie interneto."
+                        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Tinklo užklausa užtruko per ilgai."
+                        SpeechRecognizer.ERROR_AUDIO           -> "Nepavyko naudoti mikrofono."
+                        SpeechRecognizer.ERROR_SERVER          -> "Balso atpažinimo serverio klaida."
+                        SpeechRecognizer.ERROR_CLIENT          -> "Kliento klaida."
+                        else                                   -> "Balso atpažinimo klaida (kodas: $errorCode)"
+                    }
+                    Log.e(TAG, "onError: code=$errorCode msg='$msg'")
+                    // Network/audio errors may be transient — route to recoverable if handler set.
+                    if (onRecoverableError != null && errorCode in listOf(
+                            SpeechRecognizer.ERROR_NETWORK,
+                            SpeechRecognizer.ERROR_NETWORK_TIMEOUT,
+                            SpeechRecognizer.ERROR_AUDIO,
+                        )
+                    ) {
+                        onRecoverableError?.invoke(errorCode)
+                    } else if (onFatalError != null) {
+                        onFatalError?.invoke(msg)
+                    } else {
+                        onError?.invoke(msg)
+                    }
+                }
             }
-            Log.e(TAG, "onError: code=$errorCode msg='$msg'")
-            onError?.invoke(msg)
         }
 
         override fun onEvent(eventType: Int, params: Bundle?) {

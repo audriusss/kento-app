@@ -2,6 +2,7 @@ package lt.sturmanas.bajeristas.voice
 
 import android.content.Context
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.util.Log
 import java.util.Locale
 
@@ -24,6 +25,11 @@ import java.util.Locale
  *   `rememberCoroutineScope`-launched coroutine (which runs on the main dispatcher).
  * - [isReady] is marked `@Volatile` so the init callback's write is visible
  *   to calls coming from any thread.
+ *
+ * ## Completion callback
+ * - [onDone] is invoked when each utterance finishes (or errors out).
+ *   The continuous voice session loop uses this to restart listening after
+ *   Kentas finishes speaking. Set it once from [MainViewModel.init].
  */
 class TtsManager(context: Context) {
 
@@ -34,10 +40,22 @@ class TtsManager(context: Context) {
     private var tts: TextToSpeech? = null
     @Volatile private var isReady = false
 
-    // ── Public API ────────────────────────────────────────────────────────
+    /**
+     * True while the engine is synthesising speech.
+     * Backed by [UtteranceProgressListener] so it accurately reflects the
+     * engine's speaking state rather than relying on the deprecated polling API.
+     */
+    @Volatile var isSpeaking: Boolean = false
+        private set
 
-    /** True while the engine is synthesising speech. */
-    val isSpeaking: Boolean get() = tts?.isSpeaking == true
+    /**
+     * Called when the current utterance finishes (success, error, or interrupted).
+     * Set once from [MainViewModel.setupRecognitionCallbacks] to restart the
+     * continuous listening loop after Kentas completes a TTS response.
+     */
+    var onDone: (() -> Unit)? = null
+
+    // ── Public API ────────────────────────────────────────────────────────
 
     /**
      * Initialise the TTS engine asynchronously. Safe to call multiple times —
@@ -49,6 +67,7 @@ class TtsManager(context: Context) {
             if (status == TextToSpeech.SUCCESS) {
                 applyLocale()
                 applySettings()
+                registerProgressListener()
                 isReady = true
                 Log.d(TAG, "TTS ready — locale: ${tts?.language}")
             } else {
@@ -77,7 +96,10 @@ class TtsManager(context: Context) {
 
     /** Stop any ongoing or queued speech immediately. */
     fun stop() {
-        if (isReady) tts?.stop()
+        if (isReady) {
+            tts?.stop()
+            isSpeaking = false
+        }
     }
 
     /**
@@ -95,6 +117,7 @@ class TtsManager(context: Context) {
      */
     fun release() {
         isReady = false
+        isSpeaking = false
         tts?.stop()
         tts?.shutdown()
         tts = null
@@ -111,6 +134,42 @@ class TtsManager(context: Context) {
             Log.w(TAG, "Lithuanian TTS not available — falling back to en_US")
             engine.setLanguage(Locale.US)
         }
+    }
+
+    /**
+     * Register an [UtteranceProgressListener] that keeps [isSpeaking] accurate
+     * and fires [onDone] when each utterance completes or errors out.
+     *
+     * Must be called after the TTS engine reports [TextToSpeech.SUCCESS] in its
+     * init callback, because [TextToSpeech.setOnUtteranceProgressListener] is
+     * undefined before the engine is ready.
+     */
+    private fun registerProgressListener() {
+        tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) {
+                isSpeaking = true
+                Log.d(TAG, "utterance started: $utteranceId")
+            }
+
+            override fun onDone(utteranceId: String?) {
+                isSpeaking = false
+                Log.d(TAG, "utterance done: $utteranceId")
+                onDone?.invoke()
+            }
+
+            @Deprecated("Required override — delegate to onError(String)")
+            override fun onError(utteranceId: String?) {
+                isSpeaking = false
+                Log.w(TAG, "utterance error (deprecated callback): $utteranceId")
+                onDone?.invoke()
+            }
+
+            override fun onError(utteranceId: String?, errorCode: Int) {
+                isSpeaking = false
+                Log.w(TAG, "utterance error: utteranceId=$utteranceId errorCode=$errorCode")
+                onDone?.invoke()
+            }
+        })
     }
 
     companion object {

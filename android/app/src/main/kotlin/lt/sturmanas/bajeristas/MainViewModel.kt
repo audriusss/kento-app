@@ -1,6 +1,7 @@
 package lt.sturmanas.bajeristas
 
 import android.app.Application
+import android.speech.SpeechRecognizer
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -25,6 +26,7 @@ import lt.sturmanas.bajeristas.voice.VoiceCommand
 import lt.sturmanas.bajeristas.voice.VoiceCommandParser
 import lt.sturmanas.bajeristas.voice.VoiceListeningState
 import lt.sturmanas.bajeristas.voice.VoiceNavAction
+import lt.sturmanas.bajeristas.voice.VoiceSessionState
 import lt.sturmanas.bajeristas.voice.askKentas
 
 /**
@@ -61,6 +63,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val TAG      = "KentasVoice"
         private const val DEST_TAG = "KentasDestination"
         private const val WP_TAG   = "KentasWaypoint"
+        /** Maximum consecutive recoverable SR errors before the session loop stops itself. */
+        internal const val MAX_SESSION_RETRIES = 3
     }
 
     // ── Audio output ──────────────────────────────────────────────────────
@@ -119,6 +123,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** True while [DestinationResolver] is resolving a voice destination. */
     val isSolvingDestination: StateFlow<Boolean> = _isSolvingDestination.asStateFlow()
 
+    // ── Continuous voice session ───────────────────────────────────────────
+
+    private val _continuousSessionActive = MutableStateFlow(false)
+    /**
+     * True while the hands-free voice session loop is running.
+     * Observed by [MicButton] to render the persistent-active indicator ring.
+     */
+    val continuousSessionActive: StateFlow<Boolean> = _continuousSessionActive.asStateFlow()
+
+    private val _sessionState = MutableStateFlow<VoiceSessionState>(VoiceSessionState.Idle)
+    /**
+     * Current phase of the voice session loop. Drives the [MicButton] status text
+     * when a continuous session is active.
+     */
+    val sessionState: StateFlow<VoiceSessionState> = _sessionState.asStateFlow()
+
+    /** Retry counter — reset to 0 each time a new continuous session starts. */
+    @Volatile private var sessionRetryCount = 0
+
     // ── Pending recognized text ───────────────────────────────────────────
 
     private val _pendingRecognizedText = MutableStateFlow<String?>(null)
@@ -163,6 +186,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         speechRecognitionManager.initialize()
         setupRecognitionCallbacks()
         startLocationUpdates()
+        // Wire TTS completion → restart continuous session listening window.
+        ttsManager.onDone = {
+            if (_continuousSessionActive.value) {
+                scheduleSessionRestart(400L)
+            }
+        }
     }
 
     // ── Location caching ──────────────────────────────────────────────────
@@ -199,6 +228,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _pendingRecognizedText.value = text
         }
         speechRecognitionManager.onError = { msg ->
+            // Only reached for errors not handled by onRecoverableError / onFatalError.
             Log.e(TAG, "SR: error='$msg'")
             Log.d("KentasFlow", "SR error: $msg")
             _voiceListeningState.value = VoiceListeningState.ERROR
@@ -211,20 +241,123 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _voiceListeningState.value = VoiceListeningState.IDLE
             }
         }
+        speechRecognitionManager.onRecoverableError = { errorCode ->
+            Log.w(TAG, "SR: recoverable error code=$errorCode retryCount=$sessionRetryCount")
+            _voiceListeningState.value = VoiceListeningState.IDLE
+            if (_continuousSessionActive.value) {
+                if (sessionRetryCount < MAX_SESSION_RETRIES) {
+                    sessionRetryCount++
+                    val delayMs = when (errorCode) {
+                        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> 800L
+                        else                                   -> 500L
+                    }
+                    viewModelScope.launch {
+                        delay(delayMs)
+                        if (_continuousSessionActive.value) {
+                            Log.d(TAG, "SR: retrying session (attempt $sessionRetryCount)")
+                            speechRecognitionManager.startListening()
+                        }
+                    }
+                } else {
+                    Log.w(TAG, "SR: max retries ($MAX_SESSION_RETRIES) reached — stopping session")
+                    stopContinuousSession()
+                    _voiceListeningState.value = VoiceListeningState.ERROR
+                    _voiceStatusText.value = "Sesija baigta. Paspauskite, kad bandytumėte dar kartą."
+                    scheduleStatusClear(5_000)
+                }
+            } else {
+                // Single-press mode — show a brief message.
+                val msg = "Nieko neišgirdau. Pabandykite dar kartą."
+                _voiceStatusText.value = msg
+                scheduleStatusClear(3_000)
+            }
+        }
+        speechRecognitionManager.onFatalError = { msg ->
+            Log.e(TAG, "SR: fatal error='$msg'")
+            if (_continuousSessionActive.value) stopContinuousSession()
+            _voiceListeningState.value = VoiceListeningState.ERROR
+            _voiceStatusText.value = msg
+            scheduleStatusClear(4_000)
+        }
     }
 
-    // ── Public API — Mic ──────────────────────────────────────────────────
+    // ── Public API — Mic / Session ────────────────────────────────────────
 
     /**
-     * Called when the user taps the mic button.
-     * Stops TTS first to prevent Kentas from recognising its own speech.
+     * Toggle the continuous voice session loop on or off.
+     *
+     * - If no session is running: starts hands-free mode — TTS responses automatically
+     *   restart the listening window so the user never has to tap again.
+     * - If a session is running: stops it cleanly (does NOT stop navigation).
+     *
+     * Called from the composable `onMicPress()` after RECORD_AUDIO permission is confirmed.
      * Must be called on the Main thread (SpeechRecognizer requirement).
+     */
+    fun toggleSession() {
+        Log.d("KentasFlow", "toggleSession: active=${_continuousSessionActive.value}")
+        if (_continuousSessionActive.value) {
+            stopContinuousSession()
+        } else {
+            startContinuousSession()
+        }
+    }
+
+    /**
+     * Single-press mic: start one listening session without the automatic restart loop.
+     * Kept for backward compatibility and for use by the RECORD_AUDIO permission grant
+     * callback path in MainActivity. Calls [toggleSession] so that the session can still
+     * be stopped with a second tap.
+     *
+     * Must be called on the Main thread.
      */
     fun onMicPressed() {
         Log.d("KentasFlow", "mic button pressed — stopping TTS, starting SR")
+        toggleSession()
+    }
+
+    private fun startContinuousSession() {
+        Log.d(TAG, "startContinuousSession: beginning session loop")
+        sessionRetryCount = 0
+        _continuousSessionActive.value = true
+        _sessionState.value = VoiceSessionState.Listening
         ttsManager.stop()
-        Log.d(TAG, "TTS stopped before listening")
         speechRecognitionManager.startListening()
+    }
+
+    /**
+     * Stop the continuous voice session loop without stopping navigation.
+     * Safe to call from any coroutine context.
+     */
+    fun stopContinuousSession() {
+        Log.d(TAG, "stopContinuousSession: stopping loop")
+        _continuousSessionActive.value = false
+        _sessionState.value = VoiceSessionState.Idle
+        // Cancel the recognizer — if it is LISTENING, this prevents a stale result
+        // from restarting the loop after we have already set active=false.
+        speechRecognitionManager.cancel()
+        _voiceListeningState.value = VoiceListeningState.IDLE
+        _voiceStatusText.value = ""
+    }
+
+    /**
+     * Schedule a listening restart after [delayMs] milliseconds.
+     * No-op if the session has been stopped in the meantime.
+     * Must only be called from [ttsManager.onDone] or the error-retry path.
+     */
+    private fun scheduleSessionRestart(delayMs: Long) {
+        if (!_continuousSessionActive.value) return
+        Log.d(TAG, "scheduleSessionRestart: delay=${delayMs}ms")
+        _sessionState.value = VoiceSessionState.RestartDelay
+        viewModelScope.launch {
+            delay(delayMs)
+            if (_continuousSessionActive.value) {
+                Log.d(TAG, "scheduleSessionRestart: starting SR")
+                sessionRetryCount = 0
+                _sessionState.value = VoiceSessionState.Listening
+                ttsManager.stop()
+                speechRecognitionManager.startListening()
+            }
+        }
     }
 
     // ── Public API — Command execution ────────────────────────────────────
@@ -296,6 +429,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     delay(150)
                     speakAndIdle("Balsas įjungtas.", isMuted = false)
                 }
+                return
+            }
+
+            is VoiceCommand.StopListening -> {
+                Log.d("KentasFlow", "command: StopListening")
+                // Stop the session loop but do NOT stop navigation.
+                stopContinuousSession()
+                _voiceStatusText.value = "Klausymasis sustabdytas."
+                scheduleStatusClear(3_000)
                 return
             }
 

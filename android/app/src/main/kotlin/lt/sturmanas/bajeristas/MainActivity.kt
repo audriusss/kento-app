@@ -203,7 +203,7 @@ private fun SturmanasApp(
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
             == PackageManager.PERMISSION_GRANTED
         ) {
-            viewModel.onMicPressed()
+            viewModel.toggleSession()
         } else {
             audioPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }

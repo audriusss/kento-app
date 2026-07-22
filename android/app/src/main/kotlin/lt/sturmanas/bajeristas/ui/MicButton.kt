@@ -6,6 +6,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -43,13 +44,18 @@ import lt.sturmanas.bajeristas.voice.VoiceListeningState
  * - [VoiceListeningState.PROCESSING] — primary colour, spinner overlay
  * - [VoiceListeningState.ERROR]      — error colour, mic icon, error message
  *
+ * When [sessionActive] is true and the state is IDLE (i.e. the session loop is running
+ * but currently waiting for a restart), a green border ring is drawn around the button
+ * to indicate that hands-free mode is on.
+ *
  * @param state         Current recognition state, drives visuals.
  * @param statusText    Text shown below the button (partial result, error, "Išgirdau: …").
  * @param enabled       False when the safety system blocks conversation or the engine
  *                      is still initialising.
+ * @param sessionActive True when the continuous hands-free session loop is running.
+ *                      Adds a persistent indicator ring so the user knows mic is always-on.
  * @param size          Diameter of the circular button. Defaults to 64.dp.
- * @param onClick       Called when the button is tapped. Must check RECORD_AUDIO
- *                      permission before calling [MainViewModel.onMicPressed].
+ * @param onClick       Called when the button is tapped. Calls [MainViewModel.toggleSession].
  */
 @Composable
 fun MicButton(
@@ -59,6 +65,7 @@ fun MicButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     size: Dp = 64.dp,
+    sessionActive: Boolean = false,
 ) {
     val isListening = state == VoiceListeningState.LISTENING
 
@@ -81,10 +88,26 @@ fun MicButton(
         else -> MaterialTheme.colorScheme.primary
     }
 
+    // Session-active ring: visible when hands-free loop is on but state is IDLE
+    // (loop is between TTS and next listen window).
+    val showSessionRing = sessionActive && state == VoiceListeningState.IDLE
+    val sessionRingColor = Color(0xFF43A047) // green
+
     Column(
         modifier = modifier,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        // Outer box carries the session-active ring; inner box carries bg + scale animation.
+        Box(
+            modifier = if (showSessionRing)
+                Modifier
+                    .size(size + 6.dp)
+                    .border(3.dp, sessionRingColor, CircleShape)
+                    .padding(3.dp)
+            else
+                Modifier.size(size),
+            contentAlignment = Alignment.Center,
+        ) {
         Box(
             modifier = Modifier
                 .size(size)
@@ -120,6 +143,7 @@ fun MicButton(
                 }
             }
         }
+        } // end outer session-ring Box
 
         if (statusText.isNotBlank()) {
             Spacer(Modifier.height(6.dp))

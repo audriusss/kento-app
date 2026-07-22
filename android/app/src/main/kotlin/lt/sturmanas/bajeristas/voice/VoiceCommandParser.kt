@@ -98,6 +98,15 @@ sealed class VoiceCommand {
     object ContinueRoute : VoiceCommand()
 
     /**
+     * "Nustok klausyti." / "Išjunk mikrofoną." / "Baik klausytis."
+     *
+     * Stops the continuous voice session loop without stopping navigation.
+     * Checked BEFORE [MuteVoice] patterns so that "išjunk mikrofoną" is not
+     * mis-classified as a general mute command.
+     */
+    object StopListening : VoiceCommand()
+
+    /**
      * Recognised speech that does not match any deterministic pattern.
      * Forwarded to OpenAI with full navigation context.
      */
@@ -283,6 +292,51 @@ object VoiceCommandParser {
         "stop navigaciją",
     )
 
+    // ── StopListening patterns ─────────────────────────────────────────────
+    // Checked BEFORE MUTE_PATTERNS so "išjunk mikrofoną" → StopListening,
+    // not MuteVoice.
+    private val STOP_LISTENING_PATTERNS = listOf(
+        "nustok klausyti",
+        "nustok klausyti",
+        "baik klausytis",
+        "baik klausyti",
+        "išjunk mikrofoną",
+        "isjunk mikrofona",
+        "išjunk sessiją",
+        "isjunk sesija",
+        "sustabdyk klausymą",
+        "sustabdyk klausyma",
+    )
+
+    // ── Destination classifier lists ───────────────────────────────────────
+    // Used by looksLikeDestination() to distinguish plain place names from
+    // conversational questions before routing to GeneralQuestion / OpenAI.
+
+    private val DEST_CLASSIFIER_BRANDS = listOf(
+        "lidl", "maxima", "iki", "rimi", "norfa", "norfos", "akropolis", "akropolį",
+        "mcdonald", "burger king", "kfc", "pizza", "hesburger", "circle k",
+        "lukoil", "viada", "neste", "statoil", "virvi",
+    )
+
+    private val DEST_CLASSIFIER_CATEGORIES = listOf(
+        "degalinė", "degaline", "vaistinė", "vaistine",
+        "parduotuvė", "parduotuve", "kavinė", "kavine",
+        "restoranas", "viešbutis", "viesbutis",
+        "paštas", "pastas", "ligoninė", "ligonine",
+        "mokykla", "universitetas", "biblioteka",
+        "autobusų stotis", "autobusu stotis",
+        "traukinių stotis", "traukiniu stotis",
+        "oro uostas",
+    )
+
+    private val CONVERSATIONAL_PATTERNS = listOf(
+        "ar ", "kas ", "kodėl", "kodel", "kaip ", "norėčiau", "norečiau",
+        "papasakok", "pasakyk man", "informuok",
+        "labas", "sveiki", "ačiū", "aciu", "prašau", "prasau",
+        "taip", "ne ", "gerai", "puiku", "tikrai", "žinoma", "zinoma",
+        "gal ", "turbūt", "turbut",
+    )
+
     // ── Waypoint management patterns ───────────────────────────────────────
     // Checked BEFORE STOP_PATTERNS so "atšauk paskutinį" → RemoveLastWaypoint,
     // not StopNavigation. Checked BEFORE NAV_PREFIX_REGEX so "rodyk sustojimus"
@@ -421,11 +475,24 @@ object VoiceCommandParser {
         if (matchesAny(normalized, TIME_PATTERNS))        return VoiceCommand.RemainingTime
         if (matchesAny(normalized, DESTINATION_PATTERNS)) return VoiceCommand.DestinationInfo
         if (matchesAny(normalized, REPEAT_PATTERNS))      return VoiceCommand.RepeatInstruction
+        // StopListening checked BEFORE MuteVoice — "išjunk mikrofoną" must not fire MuteVoice.
+        if (matchesAny(normalized, STOP_LISTENING_PATTERNS)) {
+            Log.d(TAG, "parse: StopListening")
+            return VoiceCommand.StopListening
+        }
         if (matchesAny(normalized, MUTE_PATTERNS))        return VoiceCommand.MuteVoice
         if (matchesAny(normalized, UNMUTE_PATTERNS))      return VoiceCommand.UnmuteVoice
         if (matchesAny(normalized, STOP_PATTERNS))        return VoiceCommand.StopNavigation
 
-        // ── 6. Fallthrough — forward to OpenAI ────────────────────────────
+        // ── 6. Destination classifier — before OpenAI fallthrough ──────────
+        // Plain inputs like "Akropolis", "Taikos 61", "Lidl", "degalinė" are
+        // routed to DestinationResolver as StartNavigation instead of OpenAI.
+        if (looksLikeDestination(trimmed, normalized)) {
+            Log.d("KentasVoiceFlow", "parse: looksLikeDestination → StartNavigation('$trimmed')")
+            return VoiceCommand.StartNavigation(trimmed)
+        }
+
+        // ── 7. Fallthrough — forward to OpenAI ────────────────────────────
         Log.d(TAG, "parse: no pattern matched → GeneralQuestion")
         return VoiceCommand.GeneralQuestion(trimmed)
     }
@@ -450,4 +517,40 @@ object VoiceCommandParser {
             .replace(Regex("[.,!?;:]+"), " ")
             .replace(Regex("\\s+"), " ")
             .trim()
+
+    /**
+     * Heuristic classifier: returns true when [trimmed] looks like a destination
+     * name that [DestinationResolver] should handle rather than OpenAI.
+     *
+     * Called only after all deterministic patterns have been checked (step 6),
+     * so known commands can never be mis-routed here.
+     *
+     * ## Logic (checked in order, first match wins)
+     * 1. Contains a digit → street address ("Taikos 61", "Gedimino pr. 3").
+     * 2. Starts with a known brand keyword → brand POI ("Lidl", "Maxima").
+     * 3. Contains a known category word → category POI ("degalinė", "kavinė").
+     * 4. Matches a conversational pattern → NOT a destination (return false).
+     * 5. 1–3 words, no conversational signals → generic place name ("Lazdynai").
+     *
+     * @param trimmed   The original trimmed input (preserves Lithuanian case).
+     * @param normalized The lowercased, punctuation-stripped version for matching.
+     */
+    internal fun looksLikeDestination(trimmed: String, normalized: String): Boolean {
+        // 1. Digit → street address
+        if (trimmed.any { it.isDigit() }) return true
+
+        // 2. Known brand keyword
+        val normFirst = normalized.substringBefore(" ")
+        if (DEST_CLASSIFIER_BRANDS.any { normalized.startsWith(it) || normFirst == it }) return true
+
+        // 3. Known category word
+        if (DEST_CLASSIFIER_CATEGORIES.any { normalized.contains(it) }) return true
+
+        // 4. Conversational pattern → definitely not a destination
+        if (CONVERSATIONAL_PATTERNS.any { normalized.contains(it) }) return false
+
+        // 5. Short input (1–3 words) with no conversational signals → place name
+        val wordCount = normalized.trim().split(Regex("\\s+")).size
+        return wordCount in 1..3
+    }
 }
