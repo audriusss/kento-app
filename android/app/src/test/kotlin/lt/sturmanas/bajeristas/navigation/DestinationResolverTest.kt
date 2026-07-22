@@ -248,6 +248,210 @@ class DestinationResolverTest {
         assertEquals("Saulėtoji", DestinationResolver.expandStreetName("Saulėtoji"))
     }
 
+    // ── expandStreetName — full STREET_EXPANSIONS coverage ────────────────
+
+    // Klaipėda streets
+
+    @Test fun `expandStreetName liepų diacritic expands to Liepų alėja`() {
+        assertEquals("Liepų alėja", DestinationResolver.expandStreetName("liepų"))
+    }
+
+    @Test fun `expandStreetName liepu no-diacritic expands to Liepų alėja`() {
+        assertEquals("Liepų alėja", DestinationResolver.expandStreetName("liepu"))
+    }
+
+    @Test fun `expandStreetName šilutės diacritic expands to Šilutės plentas`() {
+        assertEquals("Šilutės plentas", DestinationResolver.expandStreetName("šilutės"))
+    }
+
+    @Test fun `expandStreetName silutes no-diacritic expands to Šilutės plentas`() {
+        assertEquals("Šilutės plentas", DestinationResolver.expandStreetName("silutes"))
+    }
+
+    @Test fun `expandStreetName baltijos expands to Baltijos prospektas`() {
+        assertEquals("Baltijos prospektas", DestinationResolver.expandStreetName("baltijos"))
+    }
+
+    @Test fun `expandStreetName h manto abbreviated expands to Herkaus Manto gatvė`() {
+        assertEquals("Herkaus Manto gatvė", DestinationResolver.expandStreetName("h. manto"))
+    }
+
+    @Test fun `expandStreetName herkaus manto expands to Herkaus Manto gatvė`() {
+        assertEquals("Herkaus Manto gatvė", DestinationResolver.expandStreetName("herkaus manto"))
+    }
+
+    @Test fun `expandStreetName sausio expands to Sausio 13-osios gatvė`() {
+        assertEquals("Sausio 13-osios gatvė", DestinationResolver.expandStreetName("sausio"))
+    }
+
+    @Test fun `expandStreetName danės diacritic expands to Danės gatvė`() {
+        assertEquals("Danės gatvė", DestinationResolver.expandStreetName("danės"))
+    }
+
+    @Test fun `expandStreetName danes no-diacritic expands to Danės gatvė`() {
+        assertEquals("Danės gatvė", DestinationResolver.expandStreetName("danes"))
+    }
+
+    @Test fun `expandStreetName melnragės diacritic expands to Melnragės gatvė`() {
+        assertEquals("Melnragės gatvė", DestinationResolver.expandStreetName("melnragės"))
+    }
+
+    @Test fun `expandStreetName melnrages no-diacritic expands to Melnragės gatvė`() {
+        assertEquals("Melnragės gatvė", DestinationResolver.expandStreetName("melnrages"))
+    }
+
+    // Vilnius streets
+
+    @Test fun `expandStreetName konstitucijos expands to Konstitucijos prospektas`() {
+        assertEquals("Konstitucijos prospektas", DestinationResolver.expandStreetName("konstitucijos"))
+    }
+
+    @Test fun `expandStreetName žirmūnų diacritic expands to Žirmūnų gatvė`() {
+        assertEquals("Žirmūnų gatvė", DestinationResolver.expandStreetName("žirmūnų"))
+    }
+
+    @Test fun `expandStreetName zirmunu no-diacritic expands to Žirmūnų gatvė`() {
+        assertEquals("Žirmūnų gatvė", DestinationResolver.expandStreetName("zirmunu"))
+    }
+
+    @Test fun `expandStreetName ukmergės diacritic expands to Ukmergės gatvė`() {
+        assertEquals("Ukmergės gatvė", DestinationResolver.expandStreetName("ukmergės"))
+    }
+
+    @Test fun `expandStreetName ukmerges no-diacritic expands to Ukmergės gatvė`() {
+        assertEquals("Ukmergės gatvė", DestinationResolver.expandStreetName("ukmerges"))
+    }
+
+    @Test fun `expandStreetName laisvės diacritic expands to Laisvės prospektas`() {
+        assertEquals("Laisvės prospektas", DestinationResolver.expandStreetName("laisvės"))
+    }
+
+    @Test fun `expandStreetName laisves no-diacritic expands to Laisvės prospektas`() {
+        assertEquals("Laisvės prospektas", DestinationResolver.expandStreetName("laisves"))
+    }
+
+    @Test fun `expandStreetName vilniaus expands to Vilniaus gatvė`() {
+        assertEquals("Vilniaus gatvė", DestinationResolver.expandStreetName("vilniaus"))
+    }
+
+    @Test fun `expandStreetName saltoniškių diacritic expands to Saltoniškių gatvė`() {
+        assertEquals("Saltoniškių gatvė", DestinationResolver.expandStreetName("saltoniškių"))
+    }
+
+    @Test fun `expandStreetName saltoniskiu no-diacritic expands to Saltoniškių gatvė`() {
+        assertEquals("Saltoniškių gatvė", DestinationResolver.expandStreetName("saltoniskiu"))
+    }
+
+    @Test fun `expandStreetName ozo expands to Ozo gatvė`() {
+        assertEquals("Ozo gatvė", DestinationResolver.expandStreetName("ozo"))
+    }
+
+    @Test fun `expandStreetName žygio diacritic expands to Žygio gatvė`() {
+        assertEquals("Žygio gatvė", DestinationResolver.expandStreetName("žygio"))
+    }
+
+    @Test fun `expandStreetName zygio no-diacritic expands to Žygio gatvė`() {
+        assertEquals("Žygio gatvė", DestinationResolver.expandStreetName("zygio"))
+    }
+
+    // Kaunas streets
+
+    @Test fun `expandStreetName savanorių diacritic expands to Savanorių prospektas`() {
+        assertEquals("Savanorių prospektas", DestinationResolver.expandStreetName("savanorių"))
+    }
+
+    @Test fun `expandStreetName savanoriu no-diacritic expands to Savanorių prospektas`() {
+        assertEquals("Savanorių prospektas", DestinationResolver.expandStreetName("savanoriu"))
+    }
+
+    @Test fun `expandStreetName jonavos expands to Jonavos gatvė`() {
+        assertEquals("Jonavos gatvė", DestinationResolver.expandStreetName("jonavos"))
+    }
+
+    @Test fun `expandStreetName partizanų diacritic expands to Partizanų gatvė`() {
+        assertEquals("Partizanų gatvė", DestinationResolver.expandStreetName("partizanų"))
+    }
+
+    @Test fun `expandStreetName partizanu no-diacritic expands to Partizanų gatvė`() {
+        assertEquals("Partizanų gatvė", DestinationResolver.expandStreetName("partizanu"))
+    }
+
+    @Test fun `expandStreetName nemuno expands to Nemuno gatvė`() {
+        assertEquals("Nemuno gatvė", DestinationResolver.expandStreetName("nemuno"))
+    }
+
+    @Test fun `expandStreetName žalgirio diacritic expands to Žalgirio gatvė`() {
+        assertEquals("Žalgirio gatvė", DestinationResolver.expandStreetName("žalgirio"))
+    }
+
+    @Test fun `expandStreetName zalgirio no-diacritic expands to Žalgirio gatvė`() {
+        assertEquals("Žalgirio gatvė", DestinationResolver.expandStreetName("zalgirio"))
+    }
+
+    @Test fun `expandStreetName kauno expands to Kauno gatvė`() {
+        assertEquals("Kauno gatvė", DestinationResolver.expandStreetName("kauno"))
+    }
+
+    // ── No-double-expand guard for Kaunas streets ─────────────────────────
+
+    @Test fun `already-expanded Savanorių prospektas is not double-expanded`() = runBlocking {
+        val result = resolve("Savanorių prospektas 87")
+        assertTrue(result is DestinationResolution.ExactAddress)
+        val q = (result as DestinationResolution.ExactAddress).query
+        assertEquals(1, Regex("prospektas").findAll(q).count())
+    }
+
+    @Test fun `already-expanded Jonavos gatvė is not double-expanded`() = runBlocking {
+        val result = resolve("Jonavos gatvė 14")
+        assertTrue(result is DestinationResolution.ExactAddress)
+        val q = (result as DestinationResolution.ExactAddress).query
+        assertEquals(1, Regex("gatvė").findAll(q).count())
+    }
+
+    @Test fun `already-expanded Partizanų gatvė is not double-expanded`() = runBlocking {
+        val result = resolve("Partizanų gatvė 33")
+        assertTrue(result is DestinationResolution.ExactAddress)
+        val q = (result as DestinationResolution.ExactAddress).query
+        assertEquals(1, Regex("gatvė").findAll(q).count())
+    }
+
+    // ── Kaunas street + number integration (resolve path C) ───────────────
+
+    @Test fun `Savanorių 87 with Kaunas locality expands correctly`() = runBlocking {
+        val result = resolve("Savanorių 87", locality = "Kaunas")
+        assertTrue(result is DestinationResolution.ExactAddress)
+        assertEquals("Savanorių prospektas 87, Kaunas",
+            (result as DestinationResolution.ExactAddress).query)
+    }
+
+    @Test fun `Savanoriu no-diacritic 87 with Kaunas locality expands correctly`() = runBlocking {
+        val result = resolve("Savanoriu 87", locality = "Kaunas")
+        assertTrue(result is DestinationResolution.ExactAddress)
+        assertEquals("Savanorių prospektas 87, Kaunas",
+            (result as DestinationResolution.ExactAddress).query)
+    }
+
+    @Test fun `Jonavos 14 with Kaunas locality expands correctly`() = runBlocking {
+        val result = resolve("Jonavos 14", locality = "Kaunas")
+        assertTrue(result is DestinationResolution.ExactAddress)
+        assertEquals("Jonavos gatvė 14, Kaunas",
+            (result as DestinationResolution.ExactAddress).query)
+    }
+
+    @Test fun `Partizanų 33 with Kaunas locality expands correctly`() = runBlocking {
+        val result = resolve("Partizanų 33", locality = "Kaunas")
+        assertTrue(result is DestinationResolution.ExactAddress)
+        assertEquals("Partizanų gatvė 33, Kaunas",
+            (result as DestinationResolution.ExactAddress).query)
+    }
+
+    @Test fun `Partizanu no-diacritic 33 with Kaunas locality expands correctly`() = runBlocking {
+        val result = resolve("Partizanu 33", locality = "Kaunas")
+        assertTrue(result is DestinationResolution.ExactAddress)
+        assertEquals("Partizanų gatvė 33, Kaunas",
+            (result as DestinationResolution.ExactAddress).query)
+    }
+
     // ── buildLocationQuery helper ──────────────────────────────────────────
 
     @Test fun `buildLocationQuery with locality appends city`() {
