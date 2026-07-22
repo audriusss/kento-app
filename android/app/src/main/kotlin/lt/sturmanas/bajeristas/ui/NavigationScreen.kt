@@ -41,6 +41,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import lt.sturmanas.bajeristas.navigation.ManeuverType
 import lt.sturmanas.bajeristas.navigation.NavigationController
+import lt.sturmanas.bajeristas.navigation.NavigationPhase
 import lt.sturmanas.bajeristas.navigation.NavigationState
 import lt.sturmanas.bajeristas.safety.ConversationPermission
 
@@ -121,6 +122,32 @@ fun NavigationScreen(
                 factory = { navView },
                 modifier = Modifier.fillMaxSize(),
             )
+
+            // Phase-based loading overlays — shown while address is resolving or route is calculating.
+            // The map is already visible behind them so when the route appears it feels instant.
+            val phaseLabel = when (navigationState.phase) {
+                NavigationPhase.RESOLVING_ADDRESS -> "Ieškomas adresas…"
+                NavigationPhase.CALCULATING_ROUTE -> "Skaičiuojamas maršrutas…"
+                else -> null
+            }
+            if (phaseLabel != null) {
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 16.dp),
+                    color = MaterialTheme.colorScheme.secondaryContainer,
+                    shape = MaterialTheme.shapes.medium,
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Text(phaseLabel, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
 
             // Rerouting overlay
             if (navigationState.isRerouting) {

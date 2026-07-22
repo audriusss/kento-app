@@ -1,0 +1,142 @@
+TASK: Fix address search and route start in the Kentas Android navigation app.
+
+CURRENT STATUS
+
+- App builds and installs successfully.
+- Android native TextToSpeech works.
+- Kentas answers AI questions and speaks responses.
+- Google Navigation SDK map is displayed.
+- The user can enter an address, but no route is shown and navigation does not start.
+
+GOAL
+
+When the user enters an address and confirms it:
+
+1. Resolve the typed address into a valid destination.
+2. Show the calculated route on the map.
+3. Start turn-by-turn navigation.
+4. Update the UI with destination, distance and estimated travel time.
+5. Speak a clear Lithuanian confirmation using the existing TtsManager.
+
+IMPORTANT
+
+First inspect the existing project and determine:
+
+- Where the address input field is implemented.
+- What happens when its search/start button is pressed.
+- Whether Google Places, Android Geocoder, or Navigation SDK destination APIs are already partially implemented.
+- Whether GoogleNavigationEngine already has a route-start method.
+- Whether the entered address is accidentally being sent only to the AI chat.
+- Whether permissions, API keys or manifest declarations are missing.
+
+Do not create a second navigation architecture if an existing GoogleNavigationEngine abstraction already exists.
+Extend and repair the existing implementation.
+
+IMPLEMENTATION REQUIREMENTS
+
+Address resolution:
+
+- Prefer the existing Google Places / Navigation SDK implementation if available.
+- Otherwise use Android Geocoder as a fallback.
+- Resolve the address asynchronously, not on the UI thread.
+- Use Lithuania as the preferred region where supported.
+- Handle Lithuanian addresses and characters correctly.
+- Return latitude, longitude and a readable resolved address.
+
+Route start:
+
+- Convert the resolved location into the destination type expected by Google Navigation SDK.
+- Call the existing navigator / GoogleNavigationEngine to set the destination.
+- Request a route.
+- Start guidance only after route calculation succeeds.
+- Ensure the route polyline is visible on the map.
+- Move or zoom the camera so the route/destination is visible.
+
+UI states:
+
+- Searching address…
+- Address not found
+- Calculating route…
+- Route ready
+- Navigation started
+- Route calculation failed
+
+On success show:
+
+- Resolved destination name/address
+- Remaining distance
+- Estimated travel time
+- Stop navigation button
+
+Voice:
+
+Use the existing TtsManager.
+
+On successful route start speak something similar to:
+
+„Maršrutas į [destination] paruoštas. Pradedame kelionę.“
+
+On failure speak:
+
+„Nepavyko rasti arba apskaičiuoti maršruto. Patikrinkite adresą.“
+
+Do not overlap speech and respect the existing mute setting.
+
+ERROR HANDLING
+
+Handle gracefully:
+
+- Empty input
+- Address not found
+- No internet
+- Location permission denied
+- GPS disabled
+- Navigator not initialized
+- Route request failure
+- User entering the same destination repeatedly
+- User stopping navigation during route calculation
+
+DEBUGGING
+
+Add concise logs for:
+
+- Raw typed address
+- Resolved address and coordinates
+- Navigator initialization status
+- Destination submission
+- Route calculation result
+- Guidance start result
+- Errors and exceptions
+
+Also inspect and fix the Android Studio warning:
+
+Cannot resolve symbol 'distance' around MainActivity.kt line 406
+
+Do not hide the error with a dummy value. Determine whether it is a stale reference, wrong property name, scope issue, or incorrect Navigation SDK API usage.
+
+TESTS / ACCEPTANCE CRITERIA
+
+Verify on a real connected Android phone:
+
+1. Enter „Taikos pr. 61, Klaipėda“.
+2. Address resolves successfully.
+3. Route appears visually on the map.
+4. Distance and ETA appear.
+5. Turn-by-turn guidance starts.
+6. Kentas speaks the route-start confirmation.
+7. Stop navigation stops guidance and TTS.
+8. Invalid address shows a clear error without crashing.
+9. App still builds with:
+
+./gradlew :app:compileDebugKotlin
+
+10. Do not commit or push until compilation is successful.
+
+After completing, provide:
+
+- Root cause
+- Files changed
+- Exact address-resolution flow
+- Exact Navigation SDK methods used
+- Build result
+- Any API key or Google Cloud configuration still required

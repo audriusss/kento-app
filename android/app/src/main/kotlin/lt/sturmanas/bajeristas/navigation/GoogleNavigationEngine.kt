@@ -3,6 +3,7 @@ package lt.sturmanas.bajeristas.navigation
 import android.app.Activity
 import android.content.Context
 import android.location.Geocoder
+import android.util.Log
 import android.view.View
 import com.google.android.libraries.navigation.ArrivalEvent
 import com.google.android.libraries.navigation.NavigationApi
@@ -38,12 +39,17 @@ import java.util.Locale
  *  - Audio guidance type: Navigator.AudioGuidance (nested), not NavigatorAudioGuidance.
  *  - setDestination() returns ListenableResultFuture<Navigator.RouteStatus>, not a Task.
  *    addOnSuccessListener/addOnFailureListener do not exist on this type.
- *    Routing updates are received via addRouteChangedListener and addArrivalListener.
+ *    Route readiness is signalled via addRouteChangedListener; that is where
+ *    startGuidance() is called (first time only, guarded by [guidanceStarted]).
  *  - Step-level maneuver access (navigator.currentStep) does not exist in the public
  *    SDK 7.8.0 API. ManeuverType is temporarily set to UNKNOWN until the correct API
  *    is confirmed. Distance and duration are read from getCurrentTimeAndDistance().
  *  - Step listener: addOnNavigationStepUpdatedListener does not exist; removed.
  *  - Route listener: addRouteChangedListener (not addOnRouteChangedListener).
+ *
+ * Android Studio warning "Cannot resolve symbol 'distance'" (around MainActivity line 406):
+ *  This is a stale IDE index issue — the symbol referenced is 'distanceMeters' (a function
+ *  parameter), which compiles and resolves correctly. Invalidate caches / restart to clear it.
  */
 class GoogleNavigationEngine : NavigationEngine {
 
@@ -58,11 +64,24 @@ class GoogleNavigationEngine : NavigationEngine {
     // LifecycleEventObserver and onDispose in NavigationScreen).
     private var isDestroyed = false
 
+    /**
+     * Prevents [startGuidance] from being called more than once per navigation session.
+     * [RouteChangedListener] fires for both the initial route and every re-route;
+     * only the first call should start guidance — subsequent calls are reroutes.
+     */
+    private var guidanceStarted = false
+
+    private companion object {
+        const val TAG = "GoogleNavEngine"
+    }
+
     // ── NavigationEngine impl ─────────────────────────────────────────────
 
     override fun initialize(activity: Activity, onReady: () -> Unit, onError: (String) -> Unit) {
+        Log.d(TAG, "initialize: requesting navigator")
         NavigationApi.getNavigator(activity, object : NavigationApi.NavigatorListener {
             override fun onNavigatorReady(nav: Navigator) {
+                Log.d(TAG, "onNavigatorReady")
                 navigator = nav
                 // Kentas speaks; suppress standard navigation voice by default.
                 // Navigator.AudioGuidance is the correct nested type in SDK 7.8.0.
@@ -83,6 +102,7 @@ class GoogleNavigationEngine : NavigationEngine {
                         "Nepateikti vietos leidimai. Suteikite leidimą nustatymų lange."
                     else -> "Navigacijos inicializacijos klaida (kodas: $errorCode)"
                 }
+                Log.e(TAG, "Navigator init error $errorCode: $msg")
                 _state.value = NavigationState(errorMessage = msg)
                 onError(msg)
             }
@@ -91,50 +111,70 @@ class GoogleNavigationEngine : NavigationEngine {
 
     override fun startNavigation(context: Context, destination: String, onError: (String) -> Unit) {
         val nav = navigator ?: run {
-            onError("Navigacija neparuošta. Palaukite ir bandykite dar kartą.")
+            val msg = "Navigacija neparuošta. Palaukite ir bandykite dar kartą."
+            Log.e(TAG, "startNavigation called but navigator is null")
+            onError(msg)
             return
         }
 
+        Log.d(TAG, "startNavigation: destination='$destination'")
+
+        // Phase 1: mark address resolution in progress.
+        // isNavigating stays false until guidance actually starts.
         _state.value = _state.value.copy(
-            isNavigating = true,
             destinationName = destination,
             errorMessage = null,
+            phase = NavigationPhase.RESOLVING_ADDRESS,
         )
 
-        resolveDestination(context, destination) { latLng ->
-            if (latLng == null) {
+        resolveDestination(context, destination) { result ->
+            if (result == null) {
+                Log.e(TAG, "resolveDestination: no result for '$destination'")
                 _state.value = _state.value.copy(
-                    isNavigating = false,
+                    phase = NavigationPhase.IDLE,
                     errorMessage = "Adresas nerastas: $destination",
                 )
                 onError("Nepavyko rasti adreso: $destination")
                 return@resolveDestination
             }
 
+            val (lat, lng, resolvedName) = result
+            Log.d(TAG, "resolveDestination OK: lat=$lat lng=$lng name='$resolvedName'")
+
             val waypoint = try {
                 Waypoint.builder()
-                    .setLatLng(latLng.first, latLng.second)
+                    .setLatLng(lat, lng)
                     .build()
             } catch (e: Exception) {
+                Log.e(TAG, "Waypoint build failed", e)
                 _state.value = _state.value.copy(
-                    isNavigating = false,
+                    phase = NavigationPhase.IDLE,
                     errorMessage = "Klaida nustatant tikslą",
                 )
                 onError("Klaida nustatant tikslą")
                 return@resolveDestination
             }
 
-            // Navigator.setDestination returns ListenableResultFuture<Navigator.RouteStatus>.
-            // This type does not support addOnSuccessListener / addOnFailureListener (those are
-            // Google Task methods). Routing success is confirmed via addRouteChangedListener;
-            // arrival via addArrivalListener. The return value is intentionally not chained here
-            // to avoid using an unverified API surface.
+            // Phase 2: waypoint is valid; hand off to SDK for route calculation.
+            guidanceStarted = false
+            _state.value = _state.value.copy(
+                destinationName = resolvedName.ifBlank { destination },
+                resolvedAddress = resolvedName,
+                phase = NavigationPhase.CALCULATING_ROUTE,
+            )
+
+            Log.d(TAG, "setDestination: lat=$lat lng=$lng")
+            // setDestination() returns ListenableResultFuture<RouteStatus>.
+            // addOnSuccessListener / addOnFailureListener do not exist on this type.
+            // Route readiness is signalled via RouteChangedListener (see setupListeners).
             nav.setDestination(waypoint, RoutingOptions())
         }
     }
 
     override fun stopNavigation() {
+        Log.d(TAG, "stopNavigation")
         navigator?.stopGuidance()
+        guidanceStarted = false
         _state.value = NavigationState()
     }
 
@@ -194,6 +234,7 @@ class GoogleNavigationEngine : NavigationEngine {
     override fun onDestroy() {
         if (isDestroyed) return
         isDestroyed = true
+        Log.d(TAG, "onDestroy")
         navigationView?.onDestroy()
         navigator?.cleanup()
         navigationView = null
@@ -212,19 +253,40 @@ class GoogleNavigationEngine : NavigationEngine {
         // Step-level maneuver updates are not available from this listener set.
         // ManeuverType remains UNKNOWN until the correct step access API is confirmed.
 
-        // Rerouting — correct SDK 7.8.0 method is addRouteChangedListener (not addOnRouteChangedListener)
+        // Route changed — fires for both the initial route calculation AND re-routes.
+        //
+        // Core fix: startGuidance() must be called here, not in startNavigation().
+        // setDestination() only requests a route; startGuidance() starts turn-by-turn
+        // guidance and triggers maneuver / distance callbacks. The guidanceStarted flag
+        // distinguishes the initial route from subsequent re-routes so startGuidance()
+        // is called exactly once per navigation session.
         nav.addRouteChangedListener(RouteChangedListener {
-            _state.value = _state.value.copy(isRerouting = true)
+            Log.d(TAG, "routeChangedListener: guidanceStarted=$guidanceStarted")
+            if (!guidanceStarted) {
+                guidanceStarted = true
+                Log.d(TAG, "First route ready — calling startGuidance()")
+                nav.startGuidance()
+                _state.value = _state.value.copy(
+                    isNavigating = true,
+                    isRerouting = false,
+                    phase = NavigationPhase.NAVIGATING,
+                )
+            } else {
+                Log.d(TAG, "Reroute — route updated")
+                _state.value = _state.value.copy(isRerouting = true)
+            }
             syncStateFromNavigator(nav)
         })
 
         // Arrival
         nav.addArrivalListener(ArrivalListener { _ ->
+            Log.d(TAG, "arrivalListener: arrived at destination")
             _state.value = _state.value.copy(
                 hasArrived = true,
                 isNavigating = false,
                 maneuverType = ManeuverType.ARRIVE,
                 distanceToNextManeuverMeters = 0,
+                phase = NavigationPhase.ARRIVED,
             )
         })
     }
@@ -234,45 +296,91 @@ class GoogleNavigationEngine : NavigationEngine {
         // object. There is no public API to read the current maneuver type or road name
         // directly in this SDK version. ManeuverType is set to UNKNOWN and road names
         // are cleared until the correct step-info API surface is confirmed.
-        // Distance and duration are read from getCurrentTimeAndDistance() which does exist.
+        //
+        // currentTimeAndDistance gives remaining time/distance to destination (not to
+        // the next maneuver). Both distanceToNextManeuverMeters and remainingDistanceMeters
+        // are set from this single source until per-step distance becomes available.
         val timeAndDist = nav.currentTimeAndDistance
+        val distMeters = timeAndDist?.meters?.toInt() ?: Int.MAX_VALUE
+        val durSeconds = timeAndDist?.seconds?.toInt() ?: 0
+        Log.d(TAG, "syncState: distMeters=$distMeters durSeconds=$durSeconds")
         _state.value = _state.value.copy(
             maneuverType = ManeuverType.UNKNOWN,
-            distanceToNextManeuverMeters = timeAndDist?.meters?.toInt() ?: Int.MAX_VALUE,
-            remainingDurationSeconds = timeAndDist?.seconds?.toInt() ?: 0,
+            distanceToNextManeuverMeters = distMeters,
+            remainingDistanceMeters = distMeters,
+            remainingDurationSeconds = durSeconds,
             isRerouting = false,
         )
     }
 
     /**
-     * Resolve [destination] to (latitude, longitude).
-     * Accepts "lat,lng" format directly, or uses [Geocoder] for address strings.
-     * Result is delivered on the main thread via [onResult].
+     * Resolve [destination] to (latitude, longitude, resolvedDisplayName).
+     *
+     * Fast path: accepts "lat,lng" format directly (no network needed).
+     * Slow path: uses [Geocoder] for address strings, appending ", Lietuva" when
+     * Lithuania is not already mentioned to bias results toward Lithuanian addresses.
+     *
+     * Result is delivered on the **main thread** via [onResult].
+     * Returns `null` when the address cannot be resolved.
      */
     private fun resolveDestination(
         context: Context,
         destination: String,
-        onResult: (Pair<Double, Double>?) -> Unit,
+        onResult: (Triple<Double, Double, String>?) -> Unit,
     ) {
-        // Try parsing as raw coordinates first
+        // Fast path — raw "lat,lng" coordinates, no network required
         val parts = destination.split(",")
         if (parts.size == 2) {
             val lat = parts[0].trim().toDoubleOrNull()
             val lng = parts[1].trim().toDoubleOrNull()
             if (lat != null && lng != null && lat in -90.0..90.0 && lng in -180.0..180.0) {
-                onResult(Pair(lat, lng))
+                Log.d(TAG, "resolveDestination: raw coordinates lat=$lat lng=$lng")
+                onResult(Triple(lat, lng, destination))
                 return
             }
         }
 
-        // Use Geocoder for address strings
+        // Append Lithuania hint when not already present.
+        // The Geocoder uses this to bias results toward Lithuanian addresses,
+        // which significantly improves accuracy for partial Lithuanian place names
+        // (e.g. "Taikos pr. 61, Klaipėda" → "Taikos pr. 61, Klaipėda, Lietuva").
+        val query = if (destination.contains("Lietuva", ignoreCase = true) ||
+            destination.contains("Lithuania", ignoreCase = true)
+        ) {
+            destination
+        } else {
+            "$destination, Lietuva"
+        }
+        Log.d(TAG, "resolveDestination: geocoding '$query'")
+
         ioScope.launch {
-            val result = try {
+            val result: Triple<Double, Double, String>? = try {
                 val geocoder = Geocoder(context, Locale("lt", "LT"))
                 @Suppress("DEPRECATION")
-                val addresses = geocoder.getFromLocationName(destination, 1)
-                addresses?.firstOrNull()?.let { Pair(it.latitude, it.longitude) }
-            } catch (_: Exception) {
+                val addresses = geocoder.getFromLocationName(query, 3)
+                Log.d(TAG, "geocoder returned ${addresses?.size ?: 0} result(s)")
+                addresses?.firstOrNull()?.let { addr ->
+                    // Build a human-readable display name from geocoder fields,
+                    // falling back to the first address line if structured fields are absent.
+                    val displayName = buildString {
+                        if (!addr.thoroughfare.isNullOrBlank()) append(addr.thoroughfare)
+                        if (!addr.subThoroughfare.isNullOrBlank()) {
+                            if (isNotEmpty()) append(" ")
+                            append(addr.subThoroughfare)
+                        }
+                        if (!addr.locality.isNullOrBlank()) {
+                            if (isNotEmpty()) append(", ")
+                            append(addr.locality)
+                        }
+                        if (isEmpty()) {
+                            append(addr.getAddressLine(0) ?: destination)
+                        }
+                    }
+                    Log.d(TAG, "geocoder resolved: '$displayName' lat=${addr.latitude} lng=${addr.longitude}")
+                    Triple(addr.latitude, addr.longitude, displayName)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "geocoder exception for '$query'", e)
                 null
             }
             withContext(Dispatchers.Main) { onResult(result) }

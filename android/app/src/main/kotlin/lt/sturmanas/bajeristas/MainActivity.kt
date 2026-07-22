@@ -36,6 +36,7 @@ import lt.sturmanas.bajeristas.navigation.GoogleNavigationEngine
 import lt.sturmanas.bajeristas.navigation.LocationPermissionHelper
 import lt.sturmanas.bajeristas.navigation.MockNavigationEngine
 import lt.sturmanas.bajeristas.navigation.NavigationController
+import lt.sturmanas.bajeristas.navigation.NavigationPhase
 import lt.sturmanas.bajeristas.personality.PersonaPrompts
 import lt.sturmanas.bajeristas.personality.SessionConfig
 import lt.sturmanas.bajeristas.safety.SafetyController
@@ -306,6 +307,25 @@ private fun SturmanasApp(
         if (instruction.isNotBlank()) ttsManager.speak(instruction)
     }
 
+    // ── Route-start TTS confirmation ──────────────────────────────────────
+    // Fires once when the navigation phase transitions to NAVIGATING (route ready,
+    // guidance started). Uses the resolved address from navState so the spoken name
+    // matches what the geocoder returned, not the raw typed string.
+    // previousPhase tracks the prior value so we only speak on the transition edge,
+    // not every recomposition while the phase remains NAVIGATING.
+    var previousPhase by remember { mutableStateOf(NavigationPhase.IDLE) }
+    LaunchedEffect(navState.phase) {
+        if (navState.phase == NavigationPhase.NAVIGATING &&
+            previousPhase != NavigationPhase.NAVIGATING
+        ) {
+            if (!isMuted) {
+                val dest = navState.resolvedAddress.ifBlank { navState.destinationName }.ifBlank { "tikslą" }
+                ttsManager.speak("Maršrutas į $dest paruoštas. Pradedame kelionę.")
+            }
+        }
+        previousPhase = navState.phase
+    }
+
     // Propagate navState error back to start screen if navigation is not yet active
     if (!isNavigating && navState.errorMessage != null) {
         startScreenError = navState.errorMessage
@@ -335,6 +355,12 @@ private fun SturmanasApp(
                         onError = { msg ->
                             isNavigating = false
                             startScreenError = msg
+                            // Speak the failure reason so the driver doesn't have to look at the screen.
+                            if (!isMuted) {
+                                ttsManager.speak(
+                                    "Nepavyko rasti arba apskaičiuoti maršruto. Patikrinkite adresą."
+                                )
+                            }
                         },
                     )
                     isNavigating = true

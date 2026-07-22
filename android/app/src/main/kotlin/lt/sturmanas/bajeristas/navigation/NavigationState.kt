@@ -1,6 +1,25 @@
 package lt.sturmanas.bajeristas.navigation
 
 /**
+ * Lifecycle phase of an active (or pending) navigation session.
+ *
+ * Drives UI overlays in [NavigationScreen] and TTS confirmations in [MainActivity].
+ * The engine updates this field; the UI only reads it.
+ */
+enum class NavigationPhase {
+    /** No active navigation session — [StartScreen] is visible. */
+    IDLE,
+    /** Address string is being resolved to coordinates via Geocoder. */
+    RESOLVING_ADDRESS,
+    /** Waypoint submitted to SDK; route calculation is in progress. */
+    CALCULATING_ROUTE,
+    /** Route calculated, guidance started — driver is navigating. */
+    NAVIGATING,
+    /** Driver has reached the destination. */
+    ARRIVED,
+}
+
+/**
  * All maneuver types recognised by the application.
  * Maps 1-to-1 to the internal representation; [ManeuverMapper] converts
  * Google Navigation SDK [com.google.android.libraries.navigation.Maneuver]
@@ -51,6 +70,11 @@ data class NavigationState(
     val isNavigating: Boolean = false,
     /** Human-readable destination name or address. */
     val destinationName: String = "",
+    /**
+     * Geocoder-resolved display address (may differ from the raw typed string).
+     * Blank until geocoding completes successfully.
+     */
+    val resolvedAddress: String = "",
     /** Current road the vehicle is on. */
     val currentRoadName: String = "",
     /** Road name after the next maneuver. */
@@ -69,4 +93,6 @@ data class NavigationState(
     val hasArrived: Boolean = false,
     /** Non-null when a setup or runtime error has occurred. */
     val errorMessage: String? = null,
+    /** Current lifecycle phase of the navigation session. */
+    val phase: NavigationPhase = NavigationPhase.IDLE,
 )

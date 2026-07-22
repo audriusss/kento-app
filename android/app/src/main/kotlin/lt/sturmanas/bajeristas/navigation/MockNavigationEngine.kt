@@ -51,12 +51,15 @@ class MockNavigationEngine : NavigationEngine {
         _state.value = NavigationState(
             isNavigating = true,
             destinationName = destination,
+            resolvedAddress = destination,
             currentRoadName = "Gedimino prospektas",
             nextRoadName = "Pilies gatvė",
             maneuverType = ManeuverType.STRAIGHT,
             distanceToNextManeuverMeters = 850,
             remainingDistanceMeters = 4_200,
             remainingDurationSeconds = 780,
+            // Mock resolves instantly — go straight to NAVIGATING.
+            phase = NavigationPhase.NAVIGATING,
         )
         startSimulation()
     }
@@ -125,6 +128,7 @@ class MockNavigationEngine : NavigationEngine {
                     maneuverType = ManeuverType.ARRIVE,
                     distanceToNextManeuverMeters = 0,
                     remainingDurationSeconds = 0,
+                    phase = NavigationPhase.ARRIVED,
                 )
             }
         }
