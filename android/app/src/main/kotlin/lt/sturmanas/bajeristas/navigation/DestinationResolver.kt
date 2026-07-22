@@ -286,7 +286,7 @@ object DestinationResolver {
         // ── H. Failure ────────────────────────────────────────────────────
         Log.d(TAG, "resolve[H]: single word, no context → Failure")
         return DestinationResolution.Failure(
-            "Nepavyko rasti tikslo „$trimmed". Ar galite pasakyti pilną adresą?"
+            "Nepavyko rasti tikslo \"$trimmed\". Ar galite pasakyti pilną adresą?"
         )
     }
 

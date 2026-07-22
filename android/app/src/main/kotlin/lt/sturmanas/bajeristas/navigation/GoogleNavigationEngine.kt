@@ -189,7 +189,7 @@ class GoogleNavigationEngine : NavigationEngine {
                         phase = NavigationPhase.IDLE,
                         errorMessage = "Adresas nerastas: $destination",
                     )
-                    onError("Nepavyko rasti „$destination". Pabandykite kitaip.")
+                    onError("Nepavyko rasti \"$destination\". Pabandykite kitaip.")
                     return@withContext
                 }
 

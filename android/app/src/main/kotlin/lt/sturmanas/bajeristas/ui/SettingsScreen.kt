@@ -100,7 +100,7 @@ fun SettingsScreen(
                 shape = MaterialTheme.shapes.small,
             ) {
                 Text(
-                    text = "Išsaugoti adresai leidžia sakyti:\n„Važiuojam namo" arba „Važiuojam į darbą"",
+                    text = "Išsaugoti adresai leidžia sakyti:\n\"Važiuojam namo\" arba \"Važiuojam į darbą\"",
                     modifier = Modifier.padding(12.dp),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSecondaryContainer,

@@ -429,7 +429,7 @@ private fun ClarificationDialog(
         text = {
             Column {
                 Text(
-                    text = "Kurį renkamės? Pasakykite „pirmą", „antrą" arba „trečią", " +
+                    text = "Kurį renkamės? Pasakykite \"pirmą\", \"antrą\" arba \"trečią\", " +
                            "arba paspauskite.",
                     style = MaterialTheme.typography.bodySmall,
                 )
