@@ -1,15 +1,16 @@
 package lt.sturmanas.bajeristas
 
 import android.app.Application
-import android.speech.SpeechRecognizer
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import lt.sturmanas.bajeristas.voice.RecoveryPolicy
 import lt.sturmanas.bajeristas.navigation.CandidatePlace
 import lt.sturmanas.bajeristas.navigation.DestinationResolution
 import lt.sturmanas.bajeristas.navigation.DestinationResolver
@@ -60,9 +61,10 @@ import lt.sturmanas.bajeristas.voice.askKentas
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
-        private const val TAG      = "KentasVoice"
-        private const val DEST_TAG = "KentasDestination"
-        private const val WP_TAG   = "KentasWaypoint"
+        private const val TAG            = "KentasVoice"
+        private const val DEST_TAG       = "KentasDestination"
+        private const val WP_TAG         = "KentasWaypoint"
+        private const val LIFECYCLE_TAG  = "KentasSpeechLifecycle"
         /** Maximum consecutive recoverable SR errors before the session loop stops itself. */
         internal const val MAX_SESSION_RETRIES = 3
     }
@@ -142,6 +144,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Retry counter — reset to 0 each time a new continuous session starts. */
     @Volatile private var sessionRetryCount = 0
 
+    /**
+     * The single pending restart job.
+     * MUST be cancelled before scheduling a new one — this is the primary defence
+     * against multiple overlapping [SpeechRecognitionManager.startListening] calls.
+     */
+    private var pendingRestartJob: Job? = null
+
     // ── Pending recognized text ───────────────────────────────────────────
 
     private val _pendingRecognizedText = MutableStateFlow<String?>(null)
@@ -186,10 +195,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         speechRecognitionManager.initialize()
         setupRecognitionCallbacks()
         startLocationUpdates()
-        // Wire TTS completion → restart continuous session listening window.
+        // TTS completion → single restart path. 500ms post-TTS gap prevents the
+        // recognizer from picking up reverberation from the speaker.
         ttsManager.onDone = {
+            Log.d(LIFECYCLE_TAG,
+                "TTS onDone: sessionActive=${_continuousSessionActive.value}")
             if (_continuousSessionActive.value) {
-                scheduleSessionRestart(400L)
+                scheduleOneRestart(500L)
             }
         }
     }
@@ -220,74 +232,120 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun startLocationUpdates() = retryLocationUpdates()
 
     private fun setupRecognitionCallbacks() {
-        speechRecognitionManager.onListeningStarted = {
-            Log.d(TAG, "SR: listening started")
-            Log.d("KentasFlow", "SR listening started")
+
+        // Fired immediately when startListening() is called (before onReadyForSpeech).
+        // UI shows "Įjungiamas klausymas…" — not "Kentas klauso…".
+        speechRecognitionManager.onStartRequested = {
+            Log.d(LIFECYCLE_TAG, "SR: START_REQUESTED gen=${speechRecognitionManager.generation}")
+            _sessionState.value = VoiceSessionState.Starting
+            _voiceListeningState.value = VoiceListeningState.IDLE   // not yet LISTENING
+            _voiceStatusText.value = "Įjungiamas klausymas…"
+        }
+
+        // Fired on onReadyForSpeech — the recognizer is genuinely active.
+        // ONLY now may the UI show "Kentas klauso…".
+        speechRecognitionManager.onReadyForSpeech = {
+            Log.d(LIFECYCLE_TAG, "SR: LISTENING_READY gen=${speechRecognitionManager.generation}")
+            _sessionState.value = VoiceSessionState.ListeningReady
             _voiceListeningState.value = VoiceListeningState.LISTENING
             _voiceStatusText.value = "Kentas klauso…"
+            // A successful onReadyForSpeech counts as session established → reset retries.
+            sessionRetryCount = 0
         }
+
+        speechRecognitionManager.onBeginningOfSpeech = {
+            Log.d(LIFECYCLE_TAG, "SR: USER_SPEAKING gen=${speechRecognitionManager.generation}")
+            _sessionState.value = VoiceSessionState.UserSpeaking
+            _voiceStatusText.value = "Klausau…"
+        }
+
         speechRecognitionManager.onPartialResult = { partial ->
-            Log.d(TAG, "SR: partial='$partial'")
+            Log.d(LIFECYCLE_TAG, "SR: PARTIAL='$partial'")
             _voiceStatusText.value = "Klausau: $partial…"
         }
+
         speechRecognitionManager.onResult = { text ->
-            Log.d(TAG, "SR: final result='$text'")
-            Log.d("KentasFlow", "SR final recognition: '$text'")
+            Log.d(LIFECYCLE_TAG,
+                "SR: RESULT='$text' gen=${speechRecognitionManager.generation} " +
+                "retries=$sessionRetryCount")
+            _sessionState.value = VoiceSessionState.Processing
             _voiceListeningState.value = VoiceListeningState.PROCESSING
             _voiceStatusText.value = "Išgirdau: $text"
             _pendingRecognizedText.value = text
+            // Session produced a result → reset retry counter.
+            sessionRetryCount = 0
         }
+
         speechRecognitionManager.onError = { msg ->
-            // Only reached for errors not handled by onRecoverableError / onFatalError.
-            Log.e(TAG, "SR: error='$msg'")
-            Log.d("KentasFlow", "SR error: $msg")
+            // Reached only when onRecoverableError / onFatalError are not set
+            // (e.g. during single-press mode outside the continuous loop).
+            Log.e(LIFECYCLE_TAG, "SR: ERROR (legacy) '$msg'")
             _voiceListeningState.value = VoiceListeningState.ERROR
             _voiceStatusText.value = msg
             scheduleStatusClear(4_000)
         }
+
         speechRecognitionManager.onListeningStopped = {
-            Log.d(TAG, "SR: stopped")
+            Log.d(LIFECYCLE_TAG, "SR: LISTENING_STOPPED")
             if (_voiceListeningState.value == VoiceListeningState.LISTENING) {
                 _voiceListeningState.value = VoiceListeningState.IDLE
             }
         }
+
         speechRecognitionManager.onRecoverableError = { errorCode ->
-            Log.w(TAG, "SR: recoverable error code=$errorCode retryCount=$sessionRetryCount")
+            val name = RecoveryPolicy.errorName(errorCode)
+            Log.w(LIFECYCLE_TAG,
+                "SR: RECOVERABLE_ERROR code=$errorCode ($name) " +
+                "retries=$sessionRetryCount sessionActive=${_continuousSessionActive.value}")
+
+            // Immediately leave LISTENING state — UI must not claim we're listening.
             _voiceListeningState.value = VoiceListeningState.IDLE
-            if (_continuousSessionActive.value) {
-                if (sessionRetryCount < MAX_SESSION_RETRIES) {
-                    sessionRetryCount++
-                    val delayMs = when (errorCode) {
-                        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> 800L
-                        else                                   -> 500L
-                    }
-                    viewModelScope.launch {
-                        delay(delayMs)
-                        if (_continuousSessionActive.value) {
-                            Log.d(TAG, "SR: retrying session (attempt $sessionRetryCount)")
-                            speechRecognitionManager.startListening()
-                        }
-                    }
-                } else {
-                    Log.w(TAG, "SR: max retries ($MAX_SESSION_RETRIES) reached — stopping session")
-                    stopContinuousSession()
-                    _voiceListeningState.value = VoiceListeningState.ERROR
-                    _voiceStatusText.value = "Sesija baigta. Paspauskite, kad bandytumėte dar kartą."
-                    scheduleStatusClear(5_000)
-                }
-            } else {
-                // Single-press mode — show a brief message.
-                val msg = "Nieko neišgirdau. Pabandykite dar kartą."
+
+            if (!_continuousSessionActive.value) {
+                // Single-press mode — show brief message, no retry.
+                val msg = if (RecoveryPolicy.isSilentRecovery(errorCode))
+                    "Nieko neišgirdau. Pabandykite dar kartą."
+                else RecoveryPolicy.statusText(errorCode)
                 _voiceStatusText.value = msg
                 scheduleStatusClear(3_000)
+                return@onRecoverableError
+            }
+
+            // Continuous session: route through the SINGLE restart path.
+            if (sessionRetryCount < MAX_SESSION_RETRIES) {
+                sessionRetryCount++
+                _sessionState.value = VoiceSessionState.Recovering
+
+                // Silent recoveries (NO_MATCH, SPEECH_TIMEOUT) show no TTS message.
+                if (!RecoveryPolicy.isSilentRecovery(errorCode)) {
+                    _voiceStatusText.value = RecoveryPolicy.statusText(errorCode)
+                }
+
+                val delayMs = RecoveryPolicy.delayMs(errorCode)
+                Log.d(LIFECYCLE_TAG,
+                    "SR: retry $sessionRetryCount/$MAX_SESSION_RETRIES in ${delayMs}ms")
+                scheduleOneRestart(delayMs)
+            } else {
+                Log.w(LIFECYCLE_TAG,
+                    "SR: MAX_RETRIES reached ($MAX_SESSION_RETRIES) — stopping session")
+                _sessionState.value = VoiceSessionState.Error(
+                    message = "Balso atpažinimas laikinai neveikia. Paliesk mikrofoną, kad bandytum dar kartą.",
+                    isFatal = false,
+                )
+                stopContinuousSessionInternal()
+                _voiceListeningState.value = VoiceListeningState.ERROR
+                _voiceStatusText.value = "Balso atpažinimas laikinai neveikia. Paliesk mikrofoną, kad bandytum dar kartą."
+                scheduleStatusClear(6_000)
             }
         }
+
         speechRecognitionManager.onFatalError = { msg ->
-            Log.e(TAG, "SR: fatal error='$msg'")
-            if (_continuousSessionActive.value) stopContinuousSession()
+            Log.e(LIFECYCLE_TAG, "SR: FATAL_ERROR '$msg'")
+            stopContinuousSessionInternal()
             _voiceListeningState.value = VoiceListeningState.ERROR
+            _sessionState.value = VoiceSessionState.Error(message = msg, isFatal = true)
             _voiceStatusText.value = msg
-            scheduleStatusClear(4_000)
+            scheduleStatusClear(5_000)
         }
     }
 
@@ -326,79 +384,93 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun startContinuousSession() {
-        Log.d(TAG, "startContinuousSession: beginning session loop")
+        Log.d(LIFECYCLE_TAG, "startContinuousSession: beginning session loop")
+        pendingRestartJob?.cancel()
+        pendingRestartJob = null
         sessionRetryCount = 0
         _continuousSessionActive.value = true
-        _sessionState.value = VoiceSessionState.Listening
         ttsManager.stop()
-        speechRecognitionManager.startListening()
+        speechRecognitionManager.startListening()   // onStartRequested → Starting state
     }
 
     /**
      * Stop the continuous voice session loop without stopping navigation.
-     * Safe to call from any coroutine context.
+     * Safe to call from any context; cancels any pending restart job first.
      */
     fun stopContinuousSession() {
-        Log.d(TAG, "stopContinuousSession: stopping loop")
+        Log.d(LIFECYCLE_TAG, "stopContinuousSession: user-initiated stop")
+        stopContinuousSessionInternal()
+    }
+
+    /**
+     * Internal stop — used by error handlers and [stopContinuousSession].
+     * Cancels pending restart job, cancels the recognizer, and resets state.
+     */
+    private fun stopContinuousSessionInternal() {
+        pendingRestartJob?.cancel()
+        pendingRestartJob = null
         _continuousSessionActive.value = false
         _sessionState.value = VoiceSessionState.Idle
-        // Cancel the recognizer — if it is LISTENING, this prevents a stale result
-        // from restarting the loop after we have already set active=false.
         speechRecognitionManager.cancel()
         _voiceListeningState.value = VoiceListeningState.IDLE
         _voiceStatusText.value = ""
+        Log.d(LIFECYCLE_TAG, "stopContinuousSessionInternal: session stopped")
     }
 
     /**
-     * Restart listening if the session is active and TTS is not currently speaking.
+     * The SINGLE restart entry point for the continuous session loop.
      *
-     * Two restart paths exist for the continuous session loop:
-     * 1. **TTS path**: when [ttsManager.speak] is called, [ttsManager.onDone] fires
-     *    at utterance end and calls [scheduleSessionRestart] automatically.
-     * 2. **Silent path** (this function): when a command produces no TTS — because
-     *    [isMuted]=true, or the command type never speaks — [ttsManager.onDone] is
-     *    never invoked. This function handles that case explicitly.
+     * Cancels any previously scheduled restart job before scheduling a new one.
+     * This is the primary guard against overlapping [SpeechRecognitionManager.startListening]
+     * calls — the root cause of "stuck listening" and race-condition errors.
      *
-     * Must be called at the end of every command execution path that exits
-     * [executeVoiceCommand] or an async coroutine that processes a command.
-     * Safe to call multiple times: [_continuousSessionActive] guards all paths.
+     * Callers:
+     * - [ttsManager.onDone] — after TTS completes
+     * - [onRecoverableError] — after a recoverable SR error
+     * - [notifyCommandDone] — when a command produces no TTS (muted / silent command)
      */
-    private fun scheduleRestartIfSessionActive(delayMs: Long = 300L) {
+    private fun scheduleOneRestart(delayMs: Long) {
         if (!_continuousSessionActive.value) return
-        if (ttsManager.isSpeaking) {
-            // TTS is playing — onDone will trigger the restart when it finishes.
-            Log.d(TAG, "scheduleRestartIfSessionActive: TTS speaking → onDone will restart")
-            return
-        }
-        Log.d(TAG, "scheduleRestartIfSessionActive: no TTS → scheduling restart in ${delayMs}ms")
-        scheduleSessionRestart(delayMs)
-    }
-
-    /**
-     * Schedule a listening restart after [delayMs] milliseconds.
-     * No-op if the session has been stopped in the meantime.
-     * Called by [ttsManager.onDone] and [scheduleRestartIfSessionActive].
-     */
-    private fun scheduleSessionRestart(delayMs: Long) {
-        if (!_continuousSessionActive.value) return
-        Log.d(TAG, "scheduleSessionRestart: delay=${delayMs}ms")
+        pendingRestartJob?.cancel()
+        Log.d(LIFECYCLE_TAG, "scheduleOneRestart: delay=${delayMs}ms")
         _sessionState.value = VoiceSessionState.RestartDelay
-        viewModelScope.launch {
+        pendingRestartJob = viewModelScope.launch {
             delay(delayMs)
-            if (!_continuousSessionActive.value) return@launch
-            // Safety guard: if TTS started speaking during the delay window (e.g.
-            // another command was processed), do NOT interrupt it. onDone will
-            // call scheduleSessionRestart again when the utterance finishes.
-            if (ttsManager.isSpeaking) {
-                Log.d(TAG, "scheduleSessionRestart: TTS still speaking after delay — deferring to onDone")
+            pendingRestartJob = null
+            if (!_continuousSessionActive.value) {
+                Log.d(LIFECYCLE_TAG, "scheduleOneRestart: session stopped during delay — abort")
                 return@launch
             }
-            Log.d(TAG, "scheduleSessionRestart: starting SR")
-            sessionRetryCount = 0
-            _sessionState.value = VoiceSessionState.Listening
+            // If TTS started speaking during the delay (e.g. a maneuver announcement),
+            // do NOT interrupt it. onDone will schedule the next restart.
+            if (ttsManager.isSpeaking) {
+                Log.d(LIFECYCLE_TAG, "scheduleOneRestart: TTS speaking during delay — defer to onDone")
+                return@launch
+            }
+            Log.d(LIFECYCLE_TAG, "scheduleOneRestart: firing startListening")
             ttsManager.stop()
             speechRecognitionManager.startListening()
         }
+    }
+
+    /**
+     * Called at the end of every command execution path.
+     *
+     * - If TTS is speaking: [ttsManager.onDone] will call [scheduleOneRestart] — nothing to do.
+     * - If TTS is not speaking (command was silent, or [isMuted]=true): schedule a restart now.
+     *
+     * This replaces the previous [scheduleRestartIfSessionActive] + [scheduleSessionRestart]
+     * dual-path design that allowed two restarts to fire for the same command.
+     */
+    private fun notifyCommandDone() {
+        if (!_continuousSessionActive.value) return
+        if (ttsManager.isSpeaking) {
+            // TTS is playing — onDone is the restart trigger. Do NOT also schedule here.
+            Log.d(LIFECYCLE_TAG, "notifyCommandDone: TTS speaking → defer to onDone")
+            return
+        }
+        Log.d(LIFECYCLE_TAG, "notifyCommandDone: silent command → scheduleOneRestart(300)")
+        scheduleOneRestart(300L)
     }
 
     // ── Public API — Command execution ────────────────────────────────────
@@ -460,8 +532,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _voiceListeningState.value = VoiceListeningState.IDLE
                 _voiceStatusText.value = ""
                 _pendingNavAction.value = VoiceNavAction.Mute
-                // No TTS produced — restart manually so the loop continues while muted.
-                scheduleRestartIfSessionActive()
+                notifyCommandDone()   // no TTS produced — silent-path restart
                 return
             }
 
@@ -471,9 +542,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 viewModelScope.launch {
                     delay(150)
                     speakAndIdle("Balsas įjungtas.", isMuted = false)
-                    // onDone handles restart when TTS succeeds.
-                    // If TTS is disabled or fails, restart manually (isSpeaking=false).
-                    scheduleRestartIfSessionActive()
+                    // onDone handles restart when TTS plays; notifyCommandDone() handles
+                    // disabled-TTS / failed-utterance fallback (isSpeaking=false at that point).
+                    notifyCommandDone()
                 }
                 return
             }
@@ -519,7 +590,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 // acceptCandidate / speakAndIdle may or may not speak; guard both paths.
-                scheduleRestartIfSessionActive()
+                notifyCommandDone()
                 return
             }
 
@@ -611,8 +682,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _voiceListeningState.value = VoiceListeningState.IDLE
                     if (!isMuted) ttsManager.speak(reply)
                     scheduleStatusClear(6_000)
-                    // Restart: if not muted, onDone handles it; if muted, restart manually.
-                    scheduleRestartIfSessionActive()
+                    notifyCommandDone()
                 }
                 return
             }
@@ -626,9 +696,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         scheduleStatusClear(4_000)
         // Covers all synchronous commands that fall through here (Distance, Time,
-        // DestinationInfo, Repeat, waypoint management, Unknown). If TTS is speaking,
-        // onDone handles restart; otherwise restarts immediately (e.g. isMuted=true).
-        scheduleRestartIfSessionActive()
+        // DestinationInfo, Repeat, waypoint management, Unknown).
+        notifyCommandDone()
     }
 
     // ── Public API — Clarification ────────────────────────────────────────
@@ -755,6 +824,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
+        pendingRestartJob?.cancel()
+        pendingRestartJob = null
         LocationProvider.stopUpdates(getApplication())
         speechRecognitionManager.release()
         ttsManager.release()
@@ -840,8 +911,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 scheduleStatusClear(6_000)
             }
         }
-        // If muted (or PlaceSearch which never speaks), onDone won't fire — restart manually.
-        scheduleRestartIfSessionActive()
+        notifyCommandDone()
     }
 
     /**
@@ -889,7 +959,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _voiceStatusText.value = msg
             if (!isMuted) ttsManager.speak(msg)
             scheduleStatusClear(5_000)
-            scheduleRestartIfSessionActive()
+            notifyCommandDone()
             return
         }
 
@@ -899,7 +969,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _voiceStatusText.value = msg
             if (!isMuted) ttsManager.speak(msg)
             scheduleStatusClear(4_000)
-            scheduleRestartIfSessionActive()
+            notifyCommandDone()
             return
         }
 
@@ -916,8 +986,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _pendingNavAction.value = VoiceNavAction.StartNavigation(nextTarget.resolvedQuery)
         }
         scheduleStatusClear(5_000)
-        // If muted, onDone won't fire — restart the session loop manually.
-        scheduleRestartIfSessionActive()
+        notifyCommandDone()
     }
 
     private fun acceptCandidate(candidate: CandidatePlace, isMuted: Boolean) {

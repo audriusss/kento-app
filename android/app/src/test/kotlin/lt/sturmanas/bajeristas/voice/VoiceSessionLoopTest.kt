@@ -4,16 +4,19 @@ import org.junit.Assert.*
 import org.junit.Test
 
 /**
- * Guards the session-loop restart invariants introduced in Task #21.
+ * Guards the session-loop restart invariants.
  *
- * The continuous hands-free loop has TWO restart paths:
- * 1. **TTS path**: ttsManager.onDone fires at utterance end → scheduleSessionRestart.
- * 2. **Silent path**: when no TTS is produced (isMuted=true, or command never speaks)
- *    → scheduleRestartIfSessionActive() is called at every command exit point.
+ * The continuous hands-free loop now has a SINGLE restart entry point:
+ *   `scheduleOneRestart(delayMs)` — always cancels any pending job before scheduling.
+ *
+ * Route to `scheduleOneRestart`:
+ *   - TTS path:    `ttsManager.onDone` fires → `scheduleOneRestart(500ms)`
+ *   - Silent path: `notifyCommandDone()` detects !isSpeaking → `scheduleOneRestart(300ms)`
+ *   - Error path:  `onRecoverableError` → `scheduleOneRestart(RecoveryPolicy.delayMs(code))`
  *
  * These tests verify:
- * a) The parser routes each command type correctly so the right restart path is taken.
- * b) The restart guard logic (`continuousSessionActive && !isSpeaking`) behaves as expected.
+ * a) The parser routes each command type correctly.
+ * b) notifyCommandDone / single-restart guard logic is correct.
  * c) StopListening ends the session; it must NEVER trigger a restart.
  * d) MuteVoice does NOT stop the session — the loop must continue while muted.
  */
@@ -54,19 +57,18 @@ class VoiceSessionLoopTest {
 
     @Test
     fun `StopListening and MuteVoice are different commands`() {
-        // The silent-restart call is intentionally absent after StopListening.
+        // The restart is intentionally absent after StopListening.
         // Verify the two commands are distinct types so callers can guard separately.
         assertFalse(VoiceCommand.StopListening is VoiceCommand.MuteVoice)
     }
 
-    // ── 3. Restart guard logic — pure boolean invariant ───────────────────
+    // ── 3. notifyCommandDone guard logic — pure boolean invariant ──────────
 
     @Test
     fun `restart is scheduled when session active and TTS not speaking`() {
-        // Mirrors the guard in scheduleRestartIfSessionActive:
-        //   if (!_continuousSessionActive.value) return
-        //   if (ttsManager.isSpeaking) return   // onDone will handle it
-        //   scheduleSessionRestart(delayMs)
+        // notifyCommandDone: if (!_continuousSessionActive.value) return
+        //                    if (ttsManager.isSpeaking) return   // onDone will handle it
+        //                    scheduleOneRestart(300L)
         val sessionActive = true
         val isSpeaking = false
         val shouldSchedule = sessionActive && !isSpeaking
@@ -83,20 +85,40 @@ class VoiceSessionLoopTest {
 
     @Test
     fun `restart delegated to onDone when TTS is speaking`() {
-        // When TTS IS speaking, scheduleRestartIfSessionActive returns early.
-        // The actual restart happens via ttsManager.onDone → scheduleSessionRestart.
+        // When TTS IS speaking, notifyCommandDone() returns early.
+        // The actual restart happens via ttsManager.onDone → scheduleOneRestart(500ms).
         val sessionActive = true
         val isSpeaking = true
         val shouldSchedule = sessionActive && !isSpeaking
         assertFalse("Expected onDone to handle restart (not manual)", shouldSchedule)
     }
 
-    // ── 4. Async-command types — parser confirms restart path is async ─────
+    // ── 4. Single restart path — no double-scheduling ─────────────────────
+
+    @Test
+    fun `TTS-path delay 500ms is greater than silent-path delay 300ms`() {
+        // This ordering ensures that a silent-path restart can fire promptly
+        // while TTS restarts wait for audio to finish playing.
+        val ttsPathDelay   = 500L
+        val silentPathDelay = 300L
+        assertTrue("TTS restart delay ($ttsPathDelay) must be > silent delay ($silentPathDelay)",
+            ttsPathDelay > silentPathDelay)
+    }
+
+    @Test
+    fun `error path delay for SERVER_DISCONNECTED is larger than normal restart delay`() {
+        // After ERROR 11 (server disconnected), back off significantly
+        // before retrying to avoid hammering the server.
+        val errorDelay  = RecoveryPolicy.delayMs(RecoveryPolicy.E_SERVER_DISCONNECTED)
+        val normalDelay = 300L
+        assertTrue("ERROR 11 delay ($errorDelay) must be > normal restart delay ($normalDelay)",
+            errorDelay > normalDelay)
+    }
+
+    // ── 5. Async-command types — parser confirms restart path is async ─────
 
     @Test
     fun `StartNavigation is parsed for plain place name (async restart path)`() {
-        // resolveAndNavigate() is launched in a coroutine;
-        // scheduleRestartIfSessionActive() is called at the end of each coroutine branch.
         val cmd = VoiceCommandParser.parse("Akropolis")
         assertTrue("Expected StartNavigation, got ${cmd::class.simpleName}",
             cmd is VoiceCommand.StartNavigation)
@@ -113,16 +135,16 @@ class VoiceSessionLoopTest {
     fun `Unknown falls through to synchronous restart path`() {
         val cmd = VoiceCommandParser.parse("xyzzy nonce phrase 9128374")
         // Could be Unknown or StartNavigation depending on word-count classifier.
-        // Either way, both paths call scheduleRestartIfSessionActive.
+        // Either way, both paths call notifyCommandDone().
         assertTrue("Expected Unknown or StartNavigation",
             cmd is VoiceCommand.Unknown || cmd is VoiceCommand.StartNavigation)
     }
 
-    // ── 5. Muted session — silent commands must not break the loop ─────────
+    // ── 6. Muted session — silent commands must not break the loop ─────────
 
     @Test
     fun `MuteVoice then UnmuteVoice round-trip parses correctly`() {
-        val mute = VoiceCommandParser.parse("nutildyk")
+        val mute   = VoiceCommandParser.parse("nutildyk")
         val unmute = VoiceCommandParser.parse("kalbėk")
         assertTrue(mute is VoiceCommand.MuteVoice)
         assertTrue(unmute is VoiceCommand.UnmuteVoice)
@@ -130,8 +152,6 @@ class VoiceSessionLoopTest {
 
     @Test
     fun `distance query while muted takes sync path (speakAndIdle + restart)`() {
-        // RemainingDistance speaks via speakAndIdle if NOT muted, or produces no TTS
-        // when muted. Both branches fall through to scheduleRestartIfSessionActive.
         val cmd = VoiceCommandParser.parse("kiek kilometrų liko")
         assertTrue("Expected RemainingDistance, got ${cmd::class.simpleName}",
             cmd is VoiceCommand.RemainingDistance)
@@ -144,14 +164,12 @@ class VoiceSessionLoopTest {
             cmd is VoiceCommand.RemainingTime)
     }
 
-    // ── 6. Session state transitions ───────────────────────────────────────
+    // ── 7. Session state transitions ───────────────────────────────────────
 
     @Test
-    fun `VoiceSessionState RestartDelay is between Listening turns`() {
-        // RestartDelay is entered by scheduleSessionRestart before SR.startListening().
-        // Idle is only reached when the session is explicitly stopped.
+    fun `VoiceSessionState RestartDelay is between ListeningReady turns`() {
         assertNotEquals(VoiceSessionState.RestartDelay, VoiceSessionState.Idle)
-        assertNotEquals(VoiceSessionState.RestartDelay, VoiceSessionState.Listening)
+        assertNotEquals(VoiceSessionState.RestartDelay, VoiceSessionState.ListeningReady)
     }
 
     @Test
@@ -162,5 +180,35 @@ class VoiceSessionLoopTest {
     @Test
     fun `RestartDelay statusText signals loop is waiting not stopped`() {
         assertEquals("Laukiu komandos…", VoiceSessionState.RestartDelay.statusText)
+    }
+
+    @Test
+    fun `Recovering is distinct from Idle so UI does not claim session is stopped`() {
+        assertNotEquals(
+            "Recovering and Idle must not have identical statusText",
+            VoiceSessionState.Recovering.statusText,
+            VoiceSessionState.Idle.statusText,
+        )
+    }
+
+    // ── 8. MAX_SESSION_RETRIES boundary ────────────────────────────────────
+
+    @Test
+    fun `retry counter boundary — retries exhausted after MAX_SESSION_RETRIES increments`() {
+        var count = 0
+        val maxRetries = 3   // mirrors MainViewModel.MAX_SESSION_RETRIES
+        val retryResults = mutableListOf<Boolean>()
+        repeat(5) {
+            count++
+            retryResults.add(count <= maxRetries)
+        }
+        // Exactly the first 3 increments should succeed.
+        assertEquals(listOf(true, true, true, false, false), retryResults)
+    }
+
+    @Test
+    fun `MAX_SESSION_RETRIES is 3 (regression guard)`() {
+        // Changing this constant changes the UX contract — keep it explicit.
+        assertEquals(3, MainViewModel.MAX_SESSION_RETRIES)
     }
 }

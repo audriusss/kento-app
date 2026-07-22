@@ -18,15 +18,29 @@ import android.util.Log
  *
  * - [initialize] — call once from ViewModel init. Checks recognizer availability.
  * - [startListening] — must be called on the Main thread (SpeechRecognizer requirement).
- *   Re-creates the recognizer on every call for reliability on Xiaomi/MIUI devices
- *   where a reused recognizer often enters bad states after the first session.
+ *   Re-creates the recognizer on every call for reliability on Xiaomi/MIUI devices.
+ *   Returns the [generation] ID of the new session so callers can correlate callbacks.
  * - [cancel] — stop listening and release the current recognizer.
  * - [release] — full teardown; call from ViewModel.onCleared().
  *
+ * ## Generation IDs — stale callback elimination
+ *
+ * Every [startListening] call increments [generation] and creates a new
+ * [RecognitionListener] that captures its own generation value. Each callback
+ * checks whether its generation is still current before doing anything. This
+ * makes callbacks from old, destroyed recognizer instances completely harmless —
+ * the main source of race conditions on Xiaomi/MIUI and after rapid toggles.
+ *
+ * ## Single active session guarantee
+ *
+ * [isSessionActive] tracks whether a recognizer is currently between
+ * startListening→onReadyForSpeech and onResults/onError. Callers must check this
+ * before scheduling another start to avoid overlapping sessions.
+ *
  * ## TTS coordination
  *
- * The caller ([MainViewModel.onMicPressed]) must stop TTS speech BEFORE calling
- * [startListening] to prevent the recognizer from hearing Kentas's own voice.
+ * The caller ([MainViewModel]) must stop TTS speech BEFORE calling [startListening]
+ * to prevent the recognizer from hearing Kentas's own voice.
  *
  * ## Duplicate callback guard
  *
@@ -38,52 +52,51 @@ import android.util.Log
  *
  * All SpeechRecognizer calls must happen on the thread that created the recognizer
  * (the Main thread). The callbacks fire on the same thread.
- *
- * ## Typed error callbacks
- *
- * In addition to the generic [onError] kept for backward compatibility, the manager
- * exposes two typed callbacks used by the continuous session loop:
- * - [onRecoverableError] — fired for NO_MATCH, SPEECH_TIMEOUT, RECOGNIZER_BUSY.
- *   The session loop retries up to [MainViewModel.MAX_SESSION_RETRIES] times.
- * - [onFatalError] — fired for INSUFFICIENT_PERMISSIONS and other hard failures.
- *   The session loop stops immediately.
- *
- * ## Usage example
- * ```
- * manager.onResult = { text -> viewModel.onRecognitionResult(text) }
- * manager.onError = { msg -> viewModel.onRecognitionError(msg) }
- * manager.startListening()
- * ```
  */
 class SpeechRecognitionManager(private val appContext: Context) {
 
     companion object {
-        const val TAG = "KentasVoice"
+        private const val TAG            = "KentasVoice"
+        private const val LIFECYCLE_TAG  = "KentasSpeechLifecycle"
         private const val DUPLICATE_WINDOW_MS = 500L
     }
 
     // ── Callbacks (set by MainViewModel) ──────────────────────────────────
 
-    var onListeningStarted: (() -> Unit)? = null
+    /**
+     * Fired immediately when [startListening] is called — before the recognizer is ready.
+     * Use to transition UI to [VoiceSessionState.Starting].
+     */
+    var onStartRequested: (() -> Unit)? = null
+
+    /**
+     * Fired when [android.speech.RecognitionListener.onReadyForSpeech] is received —
+     * the recognizer is genuinely active. UI may only show "Kentas klauso…" from here.
+     */
+    var onReadyForSpeech: (() -> Unit)? = null
+
+    /** Fired when the user begins speaking (onBeginningOfSpeech). */
+    var onBeginningOfSpeech: (() -> Unit)? = null
+
     var onPartialResult: ((String) -> Unit)? = null
     var onResult: ((String) -> Unit)? = null
-    /** Generic error callback — kept for backward compatibility. */
+
+    /** Generic error callback — kept for backward compatibility with single-press mode. */
     var onError: ((String) -> Unit)? = null
+
     var onListeningStopped: (() -> Unit)? = null
 
     /**
-     * Fired for transient, recoverable errors: [SpeechRecognizer.ERROR_NO_MATCH],
-     * [SpeechRecognizer.ERROR_SPEECH_TIMEOUT], [SpeechRecognizer.ERROR_RECOGNIZER_BUSY].
-     * Receives the raw error code so the session loop can apply error-specific delays.
-     * When set, [onError] is NOT additionally called for these error codes.
+     * Fired for transient recoverable errors.
+     * Receives the raw error code so the session loop can apply [RecoveryPolicy] delays.
+     * When set, [onError] is NOT additionally called for these codes.
      */
     var onRecoverableError: ((Int) -> Unit)? = null
 
     /**
-     * Fired for hard, non-retryable failures: [SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS]
-     * and unknown error codes.
+     * Fired for hard, non-retryable failures (e.g. [RecoveryPolicy.E_INSUFFICIENT_PERMISSIONS]).
      * Receives a user-facing Lithuanian message.
-     * When set, [onError] is NOT additionally called for these error codes.
+     * When set, [onError] is NOT additionally called for these codes.
      */
     var onFatalError: ((String) -> Unit)? = null
 
@@ -93,6 +106,24 @@ class SpeechRecognitionManager(private val appContext: Context) {
     private var isAvailable = false
     private var lastResultTimestampMs = 0L
 
+    /**
+     * Monotonically increasing counter. Incremented on every [startListening] call.
+     * Each [RecognitionListener] instance captures its own generation and ignores
+     * callbacks that arrive after the generation has advanced (i.e. after a new session
+     * has started or cancel was called).
+     */
+    @Volatile var generation: Long = 0L
+        private set
+
+    /**
+     * True while a recognition session is in progress — between [startListening]
+     * and [onResults]/[onError]/[cancel].
+     *
+     * Callers should check this before scheduling a new start to prevent overlap.
+     */
+    @Volatile var isSessionActive: Boolean = false
+        private set
+
     // ── Public API ────────────────────────────────────────────────────────
 
     /**
@@ -101,7 +132,7 @@ class SpeechRecognitionManager(private val appContext: Context) {
      */
     fun initialize() {
         isAvailable = SpeechRecognizer.isRecognitionAvailable(appContext)
-        Log.d(TAG, "initialize: SpeechRecognizer available=$isAvailable")
+        Log.d(LIFECYCLE_TAG, "initialize: SpeechRecognizer available=$isAvailable")
     }
 
     /**
@@ -109,53 +140,67 @@ class SpeechRecognitionManager(private val appContext: Context) {
      *
      * Must be called on the Main thread.
      * Destroys any currently active recognizer before creating a new one
-     * (re-create-each-call pattern — more reliable on Xiaomi/MIUI).
+     * (re-create-each-call pattern — reliable on Xiaomi/MIUI).
      *
-     * Calls [onError] with a Lithuanian message if:
-     * - the device has no speech recognition capability, or
-     * - the recognizer cannot be created.
+     * @return the [generation] ID of the new session, or -1 if startup failed.
      */
-    fun startListening() {
-        Log.d(TAG, "startListening: isAvailable=$isAvailable")
+    fun startListening(): Long {
+        Log.d(LIFECYCLE_TAG,
+            "startListening: gen=${generation+1} isAvailable=$isAvailable isSessionActive=$isSessionActive")
 
         if (!isAvailable) {
-            Log.w(TAG, "startListening: recognition not available on this device")
             val msg = "Balso atpažinimas neprieinamas šiame įrenginyje."
+            Log.w(LIFECYCLE_TAG, "startListening: recognition not available")
             if (onFatalError != null) onFatalError?.invoke(msg) else onError?.invoke(msg)
-            return
+            return -1L
         }
 
-        // Destroy any existing recognizer before creating a new one.
-        // Re-creation on each call prevents stale state on Xiaomi/MIUI.
+        // Advance generation BEFORE destroying — any in-flight callbacks from the old
+        // listener will see their generation != currentGeneration and abort.
+        generation++
+        val myGeneration = generation
+
         destroyCurrentRecognizer()
+
+        // Notify caller that a session is being requested (before onReadyForSpeech).
+        isSessionActive = true
+        onStartRequested?.invoke()
+        Log.d(LIFECYCLE_TAG,
+            "startListening: gen=$myGeneration — START_REQUESTED")
 
         try {
             val sr = SpeechRecognizer.createSpeechRecognizer(appContext)
             if (sr == null) {
-                Log.e(TAG, "startListening: SpeechRecognizer.create returned null")
                 val msg = "Nepavyko sukurti balso atpažintuvio."
+                Log.e(LIFECYCLE_TAG, "startListening: SpeechRecognizer.create returned null gen=$myGeneration")
+                isSessionActive = false
                 if (onFatalError != null) onFatalError?.invoke(msg) else onError?.invoke(msg)
-                return
+                return -1L
             }
-            sr.setRecognitionListener(listener)
+            sr.setRecognitionListener(makeListener(myGeneration))
             recognizer = sr
-
-            val intent = buildRecognitionIntent()
-            sr.startListening(intent)
-            Log.d(TAG, "startListening: listening started")
+            sr.startListening(buildRecognitionIntent())
+            Log.d(LIFECYCLE_TAG,
+                "startListening: gen=$myGeneration — LISTENING_REQUESTED")
         } catch (e: Exception) {
-            Log.e(TAG, "startListening: exception", e)
+            Log.e(LIFECYCLE_TAG, "startListening: exception gen=$myGeneration", e)
+            isSessionActive = false
             val msg = "Nepavyko paleisti balso atpažinimo: ${e.message?.take(40)}"
             if (onFatalError != null) onFatalError?.invoke(msg) else onError?.invoke(msg)
+            return -1L
         }
+
+        return myGeneration
     }
 
     /**
      * Stop listening and destroy the current recognizer.
-     * Calls [onListeningStopped].
+     * Increments [generation] so any pending callbacks are discarded.
      */
     fun cancel() {
-        Log.d(TAG, "cancel: stopping recognition")
+        Log.d(LIFECYCLE_TAG, "cancel: gen=$generation")
+        generation++          // invalidate any in-flight callbacks
+        isSessionActive = false
         destroyCurrentRecognizer()
         onListeningStopped?.invoke()
     }
@@ -164,15 +209,19 @@ class SpeechRecognitionManager(private val appContext: Context) {
      * Full teardown. Call from ViewModel.onCleared().
      */
     fun release() {
-        Log.d(TAG, "release: full teardown")
+        Log.d(LIFECYCLE_TAG, "release: full teardown gen=$generation")
+        generation++
+        isSessionActive = false
         destroyCurrentRecognizer()
-        onListeningStarted = null
-        onPartialResult = null
-        onResult = null
-        onError = null
+        onStartRequested  = null
+        onReadyForSpeech  = null
+        onBeginningOfSpeech = null
+        onPartialResult   = null
+        onResult          = null
+        onError           = null
         onListeningStopped = null
         onRecoverableError = null
-        onFatalError = null
+        onFatalError      = null
     }
 
     // ── Private helpers ───────────────────────────────────────────────────
@@ -197,63 +246,83 @@ class SpeechRecognitionManager(private val appContext: Context) {
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
         }
 
-    // ── RecognitionListener ───────────────────────────────────────────────
+    /**
+     * Create a [RecognitionListener] that captures [sessionGeneration].
+     * Every callback checks `sessionGeneration == generation` before proceeding.
+     * If the session has advanced (new start or cancel), the callback is a no-op.
+     */
+    private fun makeListener(sessionGeneration: Long) = object : RecognitionListener {
 
-    private val listener = object : RecognitionListener {
+        /** Returns true and logs if this callback is stale. */
+        private fun isStale(event: String): Boolean {
+            if (sessionGeneration != generation) {
+                Log.d(LIFECYCLE_TAG,
+                    "$event: STALE gen=$sessionGeneration currentGen=$generation — ignored")
+                return true
+            }
+            return false
+        }
 
         override fun onReadyForSpeech(params: Bundle?) {
-            Log.d(TAG, "onReadyForSpeech")
-            onListeningStarted?.invoke()
+            if (isStale("onReadyForSpeech")) return
+            Log.d(LIFECYCLE_TAG, "onReadyForSpeech gen=$sessionGeneration — LISTENING_READY")
+            this@SpeechRecognitionManager.onReadyForSpeech?.invoke()
         }
 
         override fun onBeginningOfSpeech() {
-            Log.d(TAG, "onBeginningOfSpeech")
+            if (isStale("onBeginningOfSpeech")) return
+            Log.d(LIFECYCLE_TAG, "onBeginningOfSpeech gen=$sessionGeneration — USER_SPEAKING")
+            this@SpeechRecognitionManager.onBeginningOfSpeech?.invoke()
         }
 
         override fun onRmsChanged(rmsdB: Float) {
             /* Audio level updates — not logged (too noisy) */
         }
 
-        override fun onBufferReceived(buffer: ByteArray?) {
-            /* Raw audio buffer — unused */
-        }
+        override fun onBufferReceived(buffer: ByteArray?) { /* unused */ }
 
         override fun onEndOfSpeech() {
-            Log.d(TAG, "onEndOfSpeech")
+            if (isStale("onEndOfSpeech")) return
+            Log.d(LIFECYCLE_TAG, "onEndOfSpeech gen=$sessionGeneration")
             onListeningStopped?.invoke()
         }
 
         override fun onPartialResults(partialResults: Bundle?) {
+            if (isStale("onPartialResults")) return
             val partial = partialResults
                 ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 ?.firstOrNull()
                 ?: return
-            Log.d(TAG, "onPartialResults: '$partial'")
+            Log.d(LIFECYCLE_TAG, "onPartialResults gen=$sessionGeneration: '$partial'")
             onPartialResult?.invoke(partial)
         }
 
         override fun onResults(results: Bundle?) {
+            if (isStale("onResults")) return
+
             // Duplicate callback guard — some ROMs fire onResults twice.
             val now = System.currentTimeMillis()
             if (now - lastResultTimestampMs < DUPLICATE_WINDOW_MS) {
-                Log.d(TAG, "onResults: duplicate callback within ${DUPLICATE_WINDOW_MS}ms — ignored")
+                Log.d(LIFECYCLE_TAG,
+                    "onResults: DUPLICATE within ${DUPLICATE_WINDOW_MS}ms gen=$sessionGeneration — ignored")
                 return
             }
             lastResultTimestampMs = now
+            isSessionActive = false
 
             val text = results
                 ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 ?.firstOrNull { it.isNotBlank() }
 
-            Log.d(TAG, "onResults: text='$text'")
+            Log.d(LIFECYCLE_TAG, "onResults gen=$sessionGeneration: text='$text'")
 
             if (text.isNullOrBlank()) {
-                val msg = "Nieko aiškiai neišgirdau. Pabandykite dar kartą."
-                // Treat an empty result as recoverable (user just didn't speak).
+                Log.w(LIFECYCLE_TAG,
+                    "onResults: empty result gen=$sessionGeneration → routing to NO_MATCH")
                 if (onRecoverableError != null) {
-                    onRecoverableError?.invoke(SpeechRecognizer.ERROR_NO_MATCH)
+                    onRecoverableError?.invoke(RecoveryPolicy.E_NO_MATCH)
                 } else {
-                    onError?.invoke(msg)
+                    onError?.invoke("Nieko aiškiai neišgirdau. Pabandykite dar kartą.")
                 }
             } else {
                 onResult?.invoke(text)
@@ -261,64 +330,40 @@ class SpeechRecognitionManager(private val appContext: Context) {
         }
 
         override fun onError(errorCode: Int) {
-            when (errorCode) {
-                SpeechRecognizer.ERROR_NO_MATCH,
-                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
-                    val msg = if (errorCode == SpeechRecognizer.ERROR_NO_MATCH)
-                        "Nieko aiškiai neišgirdau. Pabandykite dar kartą."
-                    else
-                        "Nieko neišgirdau."
-                    Log.w(TAG, "onError: recoverable code=$errorCode")
-                    if (onRecoverableError != null) {
-                        onRecoverableError?.invoke(errorCode)
-                    } else {
-                        onError?.invoke(msg)
-                    }
-                }
-                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
-                    // Destroy and allow a fresh startListening() call — do not propagate as error.
-                    Log.w(TAG, "onError: RECOGNIZER_BUSY ($errorCode) — cancelling for retry")
-                    destroyCurrentRecognizer()
-                    if (onRecoverableError != null) {
-                        onRecoverableError?.invoke(errorCode)
-                    } else {
-                        onListeningStopped?.invoke()
-                    }
-                }
-                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> {
-                    val msg = "Nėra mikrofono leidimo."
-                    Log.e(TAG, "onError: FATAL code=$errorCode msg='$msg'")
+            if (isStale("onError")) return
+            isSessionActive = false
+
+            val name  = RecoveryPolicy.errorName(errorCode)
+            val fatal = RecoveryPolicy.isFatal(errorCode)
+            val recreate = RecoveryPolicy.shouldRecreateRecognizer(errorCode)
+
+            Log.w(LIFECYCLE_TAG,
+                "onError gen=$sessionGeneration code=$errorCode ($name) " +
+                "fatal=$fatal recreate=$recreate")
+
+            // Destroy the recognizer when the error indicates a broken session state.
+            // A fresh instance will be created by the next startListening() call.
+            if (recreate) {
+                destroyCurrentRecognizer()
+            }
+
+            when {
+                fatal -> {
+                    val msg = RecoveryPolicy.fatalTtsMessage(errorCode)
+                    Log.e(LIFECYCLE_TAG, "onError: FATAL code=$errorCode ($name)")
                     if (onFatalError != null) onFatalError?.invoke(msg) else onError?.invoke(msg)
                 }
+                onRecoverableError != null -> {
+                    onRecoverableError?.invoke(errorCode)
+                }
                 else -> {
-                    val msg = when (errorCode) {
-                        SpeechRecognizer.ERROR_NETWORK         -> "Balso atpažinimui nepavyko prisijungti prie interneto."
-                        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Tinklo užklausa užtruko per ilgai."
-                        SpeechRecognizer.ERROR_AUDIO           -> "Nepavyko naudoti mikrofono."
-                        SpeechRecognizer.ERROR_SERVER          -> "Balso atpažinimo serverio klaida."
-                        SpeechRecognizer.ERROR_CLIENT          -> "Kliento klaida."
-                        else                                   -> "Balso atpažinimo klaida (kodas: $errorCode)"
-                    }
-                    Log.e(TAG, "onError: code=$errorCode msg='$msg'")
-                    // Network/audio errors may be transient — route to recoverable if handler set.
-                    if (onRecoverableError != null && errorCode in listOf(
-                            SpeechRecognizer.ERROR_NETWORK,
-                            SpeechRecognizer.ERROR_NETWORK_TIMEOUT,
-                            SpeechRecognizer.ERROR_AUDIO,
-                        )
-                    ) {
-                        onRecoverableError?.invoke(errorCode)
-                    } else if (onFatalError != null) {
-                        onFatalError?.invoke(msg)
-                    } else {
-                        onError?.invoke(msg)
-                    }
+                    // Fallback: use generic error callback with Lithuanian message.
+                    val msg = RecoveryPolicy.statusText(errorCode)
+                    onError?.invoke(msg)
                 }
             }
         }
 
-        override fun onEvent(eventType: Int, params: Bundle?) {
-            /* SDK extension point — unused */
-        }
+        override fun onEvent(eventType: Int, params: Bundle?) { /* SDK extension — unused */ }
     }
 }
