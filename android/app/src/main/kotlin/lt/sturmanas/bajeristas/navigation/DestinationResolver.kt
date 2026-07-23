@@ -418,6 +418,18 @@ object DestinationResolver {
         locality: String?,
     ): String = buildStreetCandidateQueries(streetPart, numberPart, locality).first()
 
+    /**
+     * Returns true when [text] is a bare street + house-number input (no city provided
+     * by the user) that requires a GPS-derived locality to generate a city-scoped
+     * geocoding query.
+     *
+     * Uses [STREET_NUMBER_REGEX] — the same pattern that step C of [resolve] applies.
+     * Callers use this to detect when locality is missing and ask for the city before
+     * attempting a nationwide search.
+     */
+    internal fun isStreetNumberQuery(text: String): Boolean =
+        STREET_NUMBER_REGEX.matches(text.trim())
+
     /** Build a location-biased query. Locality takes priority over raw coordinates. */
     internal fun buildLocationQuery(
         query: String,

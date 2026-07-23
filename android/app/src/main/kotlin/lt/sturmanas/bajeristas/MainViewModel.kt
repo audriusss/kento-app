@@ -68,8 +68,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val WP_TAG         = "KentasWaypoint"
         private const val LIFECYCLE_TAG  = "KentasSpeechLifecycle"
         private const val STABILITY_TAG  = "KentasVoiceStability"
+        private const val SPEECH_TAG     = "KentasSpeechTiming"
+        private const val LOC_CTX_TAG    = "KentasLocationContext"
         /** Maximum consecutive recoverable SR errors before the session loop stops itself. */
         internal const val MAX_SESSION_RETRIES = 3
+        /**
+         * Grace window for a bare-street utterance (no house number detected).
+         * The recognizer is held idle for this long before processing "Taikos" alone,
+         * allowing a follow-up partial ("Taikos 61") to supersede the truncated result.
+         */
+        internal const val UTTERANCE_GRACE_MS = 900L
     }
 
     // ── Audio output ──────────────────────────────────────────────────────
@@ -159,6 +167,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * against multiple overlapping [SpeechRecognitionManager.startListening] calls.
      */
     private var pendingRestartJob: Job? = null
+
+    /**
+     * Pending grace-window coroutine for a bare-street utterance (no house number).
+     * Cancelled when a newer [onResult] arrives so only the most recent utterance
+     * is ever processed.
+     */
+    private var pendingGraceJob: Job? = null
+
+    /**
+     * Most recent partial transcript; reset on every new [onResult].
+     * Consumed by [recoverFromTruncation] to recover a truncated final result when
+     * the recognizer fired before the house number was fully transcribed.
+     */
+    private var lastPartialText: String = ""
+
+    /**
+     * Monotonically increasing counter incremented on every [onResult].
+     * Each grace-window coroutine captures its value at launch; if the generation
+     * has advanced by the time the delay expires the coroutine discards the result.
+     */
+    @Volatile private var utteranceGeneration: Long = 0L
 
     /**
      * Delays displaying the "Atkuriamas balso atpažinimas…" text for non-silent errors.
@@ -284,20 +313,76 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         speechRecognitionManager.onPartialResult = { partial ->
+            val ts = System.currentTimeMillis()
             Log.d(LIFECYCLE_TAG, "SR: PARTIAL='$partial'")
+            Log.d(SPEECH_TAG,
+                "onPartialResults ts=$ts partial='$partial' " +
+                "pendingGrace=${pendingGraceJob?.isActive}")
+            lastPartialText = partial
             _voiceStatusText.value = "Klausau: $partial…"
         }
 
         speechRecognitionManager.onResult = { text ->
+            val ts = System.currentTimeMillis()
+            val myGen = ++utteranceGeneration
             Log.d(LIFECYCLE_TAG,
                 "SR: RESULT='$text' gen=${speechRecognitionManager.generation} " +
                 "retries=$sessionRetryCount")
-            _sessionState.value = VoiceSessionState.Processing
-            _voiceListeningState.value = VoiceListeningState.PROCESSING
-            _voiceStatusText.value = "Išgirdau: $text"
-            _pendingRecognizedText.value = text
+            Log.d(SPEECH_TAG,
+                "onResults ts=$ts gen=$myGen final='$text' lastPartial='$lastPartialText'")
+
+            // Recovery: if the recognizer truncated a bare street name but the most recent
+            // partial already showed the full address including a house number, prefer the
+            // partial. Example: final="Taikos", partial="Taikos 61" → use "Taikos 61".
+            val savedPartial = lastPartialText
+            lastPartialText = ""   // reset for the next utterance cycle
+            val effectiveText = recoverFromTruncation(text, savedPartial)
+            if (effectiveText != text) {
+                Log.d(SPEECH_TAG,
+                    "truncationRecovered ts=$ts gen=$myGen: " +
+                    "preferPartial='$effectiveText' over final='$text'")
+            }
+
+            // Cancel any stale grace timer from a previous utterance.
+            pendingGraceJob?.cancel()
+            pendingGraceJob = null
+
             // Session produced a result → reset retry counter.
             sessionRetryCount = 0
+
+            // ── Utterance finalization policy ──────────────────────────────
+            //   Immediate:  address with a digit, or any known command.
+            //   Grace 900ms: bare destination name without a house number —
+            //                gives the recognizer time to produce a better
+            //                result in the next session rather than acting on
+            //                a truncated phrase.
+            val hasDigit  = effectiveText.any { it.isDigit() }
+            val isBareDest = !hasDigit && VoiceCommandParser.looksLikeDestination(
+                effectiveText, VoiceCommandParser.normalize(effectiveText))
+
+            Log.d(SPEECH_TAG,
+                "ts=$ts gen=$myGen effectiveText='$effectiveText' " +
+                "hasDigit=$hasDigit isBareDest=$isBareDest")
+
+            if (isBareDest) {
+                Log.d(SPEECH_TAG, "graceStarted ts=$ts gen=$myGen utterance='$effectiveText'")
+                pendingGraceJob = viewModelScope.launch {
+                    delay(UTTERANCE_GRACE_MS)
+                    if (utteranceGeneration != myGen) {
+                        Log.d(SPEECH_TAG,
+                            "graceExpired: STALE gen=$myGen currentGen=$utteranceGeneration " +
+                            "— dropped '$effectiveText'")
+                        return@launch
+                    }
+                    Log.d(SPEECH_TAG,
+                        "graceExpired: processing gen=$myGen utterance='$effectiveText'")
+                    finalizePendingUtterance(effectiveText)
+                }
+            } else {
+                Log.d(SPEECH_TAG,
+                    "immediate ts=$ts gen=$myGen utterance='$effectiveText'")
+                finalizePendingUtterance(effectiveText)
+            }
         }
 
         speechRecognitionManager.onError = { msg ->
@@ -891,12 +976,50 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         recoveringTextJob = null
         pendingRestartJob?.cancel()
         pendingRestartJob = null
+        pendingGraceJob?.cancel()
+        pendingGraceJob = null
         LocationProvider.stopUpdates(getApplication())
         speechRecognitionManager.release()
         ttsManager.release()
     }
 
     // ── Private helpers ───────────────────────────────────────────────────
+
+    /**
+     * Routes [text] into [_pendingRecognizedText] and updates the processing-state
+     * indicators. This is the single point through which any utterance enters
+     * [executeVoiceCommand] — both the immediate path and the grace-window path
+     * use this function so their behavior is identical.
+     */
+    private fun finalizePendingUtterance(text: String) {
+        _sessionState.value = VoiceSessionState.Processing
+        _voiceListeningState.value = VoiceListeningState.PROCESSING
+        _voiceStatusText.value = "Išgirdau: $text"
+        _pendingRecognizedText.value = text
+    }
+
+    /**
+     * Returns [partialText] when it represents a more complete utterance than
+     * [finalText] due to premature recognizer finalization, otherwise returns
+     * [finalText] unchanged.
+     *
+     * Criteria for preferring [partialText]:
+     * - [finalText] has no digit (bare street name: "Taikos")
+     * - [partialText] has a digit (full address: "Taikos 61")
+     * - [partialText] starts with [finalText] (continuation, not a different phrase)
+     *
+     * In all other cases [finalText] is returned unchanged.
+     *
+     * Exposed as [internal] for unit testing without coroutine infrastructure.
+     */
+    internal fun recoverFromTruncation(finalText: String, partialText: String): String {
+        if (finalText.any { it.isDigit() }) return finalText       // already has a number
+        if (partialText.isBlank())          return finalText        // no partial to compare
+        if (!partialText.any { it.isDigit() }) return finalText     // partial also incomplete
+        val finalNorm   = finalText.lowercase().trim()
+        val partialNorm = partialText.lowercase().trim()
+        return if (partialNorm.startsWith(finalNorm)) partialText else finalText
+    }
 
     /**
      * Resolve [rawDestination] via [DestinationResolver], record it as the final
@@ -910,6 +1033,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val savedPlaces = savedPlacesRepository.getAll()
         val (currentLat, currentLng, currentLocality) =
             LocationProvider.getCurrentLocation(getApplication())
+
+        // ── KentasLocationContext: log every field used in resolution ─────────────
+        val locationAgeMs = LocationProvider.cachedLocation?.let {
+            System.currentTimeMillis() - it.time
+        }
+        Log.d(LOC_CTX_TAG,
+            "resolveAndNavigate: lat=$currentLat lng=$currentLng locality='$currentLocality' " +
+            "cachedLocationAgeMs=$locationAgeMs raw='$rawDestination'")
+        if (currentLocality == null) {
+            Log.w(LOC_CTX_TAG,
+                "locality unavailable — reason: " + when {
+                    currentLat == null ->
+                        "no location fix (permission missing or cold-start)"
+                    locationAgeMs != null && locationAgeMs > LocationProvider.LOCATION_MAX_AGE_MS ->
+                        "stale fix (${locationAgeMs}ms > ${LocationProvider.LOCATION_MAX_AGE_MS}ms)"
+                    else ->
+                        "reverse-geocode failed or cache miss"
+                })
+        }
+        // ─────────────────────────────────────────────────────────────────────────
+
+        // Guard: a bare street+number query with no known city must ask the user
+        // for the city rather than attempting an unscoped nationwide search that
+        // may resolve to the wrong location.
+        if (currentLocality == null && DestinationResolver.isStreetNumberQuery(rawDestination)) {
+            Log.w(LOC_CTX_TAG,
+                "street+number query '$rawDestination' without locality — asking for city")
+            _isSolvingDestination.value = false
+            _voiceListeningState.value = VoiceListeningState.IDLE
+            _voiceStatusText.value = "Kuriame mieste yra šis adresas?"
+            if (!isMuted) ttsManager.speak("Kuriame mieste yra šis adresas?")
+            scheduleStatusClear(5_000)
+            notifyCommandDone()
+            return
+        }
+
         Log.d(DEST_TAG, "location: lat=$currentLat lng=$currentLng locality='$currentLocality'")
 
         val resolution = DestinationResolver.resolve(

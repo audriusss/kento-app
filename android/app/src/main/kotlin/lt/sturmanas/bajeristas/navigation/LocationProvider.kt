@@ -57,8 +57,20 @@ object LocationProvider {
     /** Minimum distance before a location update callback is triggered (100 m). */
     private const val UPDATE_MIN_DISTANCE_M = 100f
 
-    /** How long a cached locality result is considered fresh (5 minutes). */
-    private const val LOCALITY_CACHE_TTL_MS = 5 * 60 * 1_000L
+    /**
+     * Maximum age of a GPS/network fix that is still trusted for city (locality) derivation.
+     * Fixes older than this are coordinates-only — the locality is returned as null so the
+     * caller can ask the user for the city rather than silently routing to the wrong one.
+     * Exposed as [internal] so [MainViewModel] can include the threshold in diagnostic logs.
+     */
+    internal const val LOCATION_MAX_AGE_MS = 5 * 60 * 1_000L
+
+    /**
+     * How long a cached reverse-geocode locality result is considered fresh.
+     * 15 minutes: long enough to avoid repeated geocoder calls during a drive,
+     * short enough to catch a city change if the user travels between towns.
+     */
+    private const val LOCALITY_CACHE_TTL_MS = 15 * 60 * 1_000L
 
     /** Distance threshold beyond which the locality cache is invalidated (~500 m). */
     private const val LOCALITY_CACHE_MAX_DISTANCE_M = 500.0
@@ -207,13 +219,30 @@ object LocationProvider {
                 return@withContext Triple(null, null, null)
             }
 
-            val lat = location.latitude
-            val lng = location.longitude
+            val lat   = location.latitude
+            val lng   = location.longitude
             val ageMs = System.currentTimeMillis() - location.time
-            Log.d(TAG, "Got location: lat=$lat lng=$lng provider=${location.provider} age=${ageMs}ms")
 
-            val locality = getCachedOrFetchLocality(context, lat, lng)
-            Log.d(TAG, "Locality (cached or fresh): '$locality'")
+            Log.d(TAG, "Got location: lat=$lat lng=$lng provider=${location.provider} age=${ageMs}ms")
+            Log.d("KentasLocationContext",
+                "location lat=$lat lng=$lng provider=${location.provider} " +
+                "ageMs=$ageMs cachedLocationPresent=${cachedLocation != null}")
+
+            // A location fix older than LOCATION_MAX_AGE_MS must not supply a city name —
+            // it may come from a previous session in a different city and would silently
+            // route the user to the wrong place.  Coordinates are still returned so
+            // proximity bias (e.g. nearby POI searches) continues to work.
+            val locality: String?
+            if (ageMs > LOCATION_MAX_AGE_MS) {
+                Log.w("KentasLocationContext",
+                    "location fix is stale (${ageMs}ms > ${LOCATION_MAX_AGE_MS}ms) " +
+                    "— locality withheld to prevent wrong-city routing")
+                locality = null
+            } else {
+                locality = getCachedOrFetchLocality(context, lat, lng)
+                Log.d("KentasLocationContext",
+                    "locality='$locality' ageMs=$ageMs cachePresent=${localityCache != null}")
+            }
 
             Triple(lat, lng, locality)
         }
