@@ -1,0 +1,227 @@
+TASK: Fix only two remaining bugs:
+1. SpeechRecognizer finalizes short address phrases too early.
+2. Short address search does not reliably use the user's current city.
+
+Do not add features.
+Do not redesign architecture.
+Do not modify waypoint logic.
+Do not modify AI chat.
+Do not push automatically.
+Make the smallest safe patch.
+
+BUG 1 — ADDRESS SPEECH IS CUT OFF TOO EARLY
+
+Real-device behavior:
+
+User says:
+"Taikos 61"
+
+The app sometimes receives only:
+"Taikos"
+
+The recognizer finalizes before the house number is spoken.
+
+Required investigation:
+
+Trace and log:
+
+- onReadyForSpeech
+- onBeginningOfSpeech
+- onRmsChanged
+- onEndOfSpeech
+- onPartialResults
+- onResults
+- onError
+- exact timestamps
+- partial transcript values
+- final transcript value
+
+Use tag:
+KentasSpeechTiming
+
+Required fix:
+
+For destination/address input, do not execute navigation immediately from the first short partial or premature result.
+
+Use final SpeechRecognizer results when available.
+
+If the result looks like a street name without a number, allow a short grace window before processing.
+
+Suggested behavior:
+
+- receive "Taikos"
+- wait approximately 700–1200 ms for a continuation
+- if continuation becomes "Taikos 61", process full phrase
+- if no continuation arrives, process "Taikos" normally
+
+Do not use a fixed long delay for every command.
+
+Known commands such as:
+"kiek liko"
+"pakartok nurodymą"
+"sustabdyk navigaciją"
+
+should still execute promptly.
+
+Implement a small utterance finalization policy:
+
+- command phrases: process immediately from final result
+- probable address without number: brief grace period
+- address with number: process immediately
+- partial results must update the pending transcript, not trigger navigation
+
+Cancel stale pending jobs using a generation/token ID.
+
+Never execute both:
+"Taikos"
+and later:
+"Taikos 61"
+
+for the same utterance.
+
+Do not restart SpeechRecognizer until the pending utterance has been finalized.
+
+BUG 2 — CURRENT CITY IS NOT APPLIED RELIABLY
+
+Real-device behavior:
+
+User says or types:
+"Taikos 61"
+
+The app sometimes resolves Taikos 61 in another city.
+
+Expected:
+
+If the user is physically in Klaipėda, the first search must be scoped to Klaipėda.
+
+Required investigation:
+
+Trace the actual source of locality:
+
+- last known GPS coordinates
+- location freshness timestamp
+- reverse-geocoded locality
+- subAdminArea fallback
+- cached city
+- whether city is null at resolution time
+
+Use tag:
+KentasLocationContext
+
+Required fix:
+
+Create one reliable current-location context source for destination resolution.
+
+For every short street-number address:
+
+1. Use a recent device location if available.
+2. Reverse geocode coordinates to locality.
+3. Accept locality or subAdminArea only if non-blank.
+4. Cache the resolved city with coordinates and timestamp.
+5. Reuse the cache only while reasonably fresh.
+6. If location permission was granted after app startup, refresh location and city context.
+7. If location is stale or unavailable, do not silently search another city.
+
+Suggested freshness:
+- location: up to 5 minutes
+- city cache: up to 15 minutes, provided coordinates have not moved far
+
+When city is known:
+
+"Taikos 61"
+must generate only city-scoped candidates first:
+
+"Taikos 61, Klaipėda, Lithuania"
+"Taikos pr. 61, Klaipėda, Lithuania"
+"Taikos prospektas 61, Klaipėda, Lithuania"
+
+Reject results from another city.
+
+Do not fall back to an unscoped nationwide result without user confirmation.
+
+If current city is unavailable, ask:
+
+"Kuriame mieste yra šis adresas?"
+
+Do not navigate to a guessed city.
+
+TYPED INPUT
+
+The same locality rules must apply when the user types:
+"Taikos 61"
+
+Voice and typed destination input must use the same resolver path.
+
+LOGGING
+
+KentasSpeechTiming:
+- callback
+- timestamp
+- partial transcript
+- final transcript
+- pending transcript
+- grace timer started/cancelled
+- selected utterance
+
+KentasLocationContext:
+- location coordinates
+- location age
+- permission state
+- reverse-geocoded locality
+- subAdminArea
+- cached city and age
+- city used for resolution
+- reason city was unavailable
+
+Do not log secrets.
+
+TESTS
+
+Add only focused regression tests, approximately 8–12 total.
+
+Must cover:
+
+Speech finalization:
+- partial "Taikos" followed by final "Taikos 61" executes once with full address
+- probable address without number waits for grace period
+- address with number executes immediately
+- known command executes promptly
+- stale delayed callback cannot execute
+- one utterance cannot execute twice
+
+Location context:
+- fresh Klaipėda location scopes query to Klaipėda
+- another-city Geocoder result is rejected
+- stale location is not trusted
+- cached city is reused while fresh
+- missing city asks for city instead of nationwide guessing
+- typed and voice input use identical city scoping
+
+VERIFICATION
+
+Run Android compile and focused unit tests if gradlew exists.
+
+If gradlew is absent:
+- do not create a fake wrapper
+- do not claim build success
+
+Scan modified Kotlin files for malformed smart quotes.
+
+Commit locally.
+Do not push.
+
+FINAL REPORT
+
+Provide:
+1. Exact reason speech finalized after "Taikos"
+2. Exact locality source before the fix
+3. Files changed
+4. Utterance finalization algorithm
+5. Location freshness and city-cache rules
+6. Query behavior when city is known
+7. Behavior when city is unknown
+8. Tests added
+9. Compile/test result
+10. Real-device test checklist
+11. Commit hash
+12. Confirmation nothing was pushed
