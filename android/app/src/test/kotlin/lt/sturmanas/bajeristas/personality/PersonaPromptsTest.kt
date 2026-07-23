@@ -188,6 +188,118 @@ class PersonaPromptsTest {
         assertNotEquals(light, strong)
     }
 
+    // ── Hard speaking style — profanity permissions ───────────────────────
+
+    @Test
+    fun `SOFT prompt explicitly forbids profanity`() {
+        val prompt = PersonaPrompts.systemPrompt(SessionConfig(conversationMode = ConversationMode.SOFT))
+        // The prompt must contain the Lithuanian word for profanity AND a prohibition.
+        val hasProfanityWord = prompt.contains("keiksmažodž") // keiksmažodžiai / keiksmažodžiais
+        val hasProhibition = prompt.contains("DRAUDŽIAMI") || prompt.contains("Jokių keiksmų")
+        assertTrue("SOFT prompt must mention profanity prohibition word", hasProfanityWord)
+        assertTrue("SOFT prompt must contain a prohibition marker", hasProhibition)
+    }
+
+    @Test
+    fun `HARD prompt explicitly permits Lithuanian profanity and lists the words`() {
+        val prompt = PersonaPrompts.systemPrompt(SessionConfig(conversationMode = ConversationMode.HARD))
+        // Must list at least a subset of the approved words without asterisks.
+        assertTrue("HARD prompt must contain 'blet'",   prompt.contains("blet"))
+        assertTrue("HARD prompt must contain 'nachui'", prompt.contains("nachui"))
+        assertTrue("HARD prompt must contain 'šūdas'",  prompt.contains("šūdas"))
+        // Must instruct NOT to censor with asterisks.
+        assertTrue(
+            "HARD prompt must forbid asterisk censoring",
+            prompt.contains("žvaigždutemis") || prompt.contains("cenzūruoti"),
+        )
+    }
+
+    @Test
+    fun `HARD plus LIGHT humor says occasional mild profanity`() {
+        val prompt = PersonaPrompts.systemPrompt(
+            SessionConfig(conversationMode = ConversationMode.HARD, humorIntensity = HumorIntensity.LIGHT),
+        )
+        // Must convey "occasionally / rarely" — not constant swearing.
+        assertTrue(
+            "Hard+Light must mention occasional/rare profanity",
+            prompt.contains("retkarčiais") || prompt.contains("retas") || prompt.contains("Nuolatinis keikimas draudžiamas"),
+        )
+    }
+
+    @Test
+    fun `HARD plus NORMAL humor says regular stronger profanity`() {
+        val prompt = PersonaPrompts.systemPrompt(
+            SessionConfig(conversationMode = ConversationMode.HARD, humorIntensity = HumorIntensity.NORMAL),
+        )
+        assertTrue(
+            "Hard+Normal must mention regular profanity",
+            prompt.contains("Reguliarūs") || prompt.contains("reguliarūs"),
+        )
+        assertTrue(
+            "Hard+Normal must mention stronger sarcasm",
+            prompt.contains("Stipresnis sarkazmas"),
+        )
+    }
+
+    @Test
+    fun `HARD plus STRONG humor says frequent natural full personality`() {
+        val prompt = PersonaPrompts.systemPrompt(
+            SessionConfig(conversationMode = ConversationMode.HARD, humorIntensity = HumorIntensity.STRONG),
+        )
+        assertTrue(
+            "Hard+Strong must mention frequent profanity",
+            prompt.contains("Dažni") || prompt.contains("dažni"),
+        )
+        assertTrue(
+            "Hard+Strong must mention full personality",
+            prompt.contains("Pilna Kentaso asmenybė"),
+        )
+        // Must still require answering the actual question.
+        assertTrue(
+            "Hard+Strong must still require answering the real question",
+            prompt.contains("atsakyk į tikrą klausimą"),
+        )
+    }
+
+    @Test
+    fun `navigation exclusion is explicit in HARD prompt`() {
+        val prompt = PersonaPrompts.systemPrompt(SessionConfig(conversationMode = ConversationMode.HARD))
+        // The HARD conversationModeInstructions block explicitly calls out navigation commands
+        // as profanity-free zones.
+        assertTrue(
+            "HARD prompt must explicitly exclude navigation instructions from profanity",
+            prompt.contains("NAVIGACINIAI NURODYMAI VISADA BE KEIKSMAŽODŽIŲ") ||
+                (prompt.contains("Posūkiai") && prompt.contains("be keiksmų")),
+        )
+    }
+
+    @Test
+    fun `HARD prompt contains Lithuanian-language instruction`() {
+        val prompt = PersonaPrompts.systemPrompt(SessionConfig(conversationMode = ConversationMode.HARD))
+        // The prompt itself must be written in Lithuanian (not English).
+        assertTrue("Prompt must contain Lithuanian text", prompt.contains("lietuviški"))
+        assertTrue("Prompt must mention driving context in Lithuanian", prompt.contains("navigaci"))
+    }
+
+    @Test
+    fun `SOFT HARD LIGHT NORMAL STRONG all produce unique prompts`() {
+        val configs = listOf(
+            SessionConfig(conversationMode = ConversationMode.SOFT, humorIntensity = HumorIntensity.LIGHT),
+            SessionConfig(conversationMode = ConversationMode.SOFT, humorIntensity = HumorIntensity.NORMAL),
+            SessionConfig(conversationMode = ConversationMode.SOFT, humorIntensity = HumorIntensity.STRONG),
+            SessionConfig(conversationMode = ConversationMode.HARD, humorIntensity = HumorIntensity.LIGHT),
+            SessionConfig(conversationMode = ConversationMode.HARD, humorIntensity = HumorIntensity.NORMAL),
+            SessionConfig(conversationMode = ConversationMode.HARD, humorIntensity = HumorIntensity.STRONG),
+        )
+        val prompts = configs.map { PersonaPrompts.systemPrompt(it) }
+        val unique = prompts.toSet()
+        assertEquals(
+            "Every mode×intensity combination must produce a unique prompt (got ${unique.size} unique out of ${prompts.size})",
+            prompts.size,
+            unique.size,
+        )
+    }
+
     // ── Navigation context ────────────────────────────────────────────────
 
     @Test
