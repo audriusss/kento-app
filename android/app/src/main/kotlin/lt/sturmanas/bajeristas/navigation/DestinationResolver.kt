@@ -17,7 +17,9 @@ import android.util.Log
  * F. City-centre shorthand   "centras" → "centras, <locality>"
  * E. Category phrase         "degalinė", "kavos" → PlaceSearch
  * D. Known brand / POI       "Akropolis", "Maxima" → PlaceSearch
- * C. Street + number         "Taikos 61" → "Taikos prospektas 61[, locality]"
+ * C. Street + number         "Taikos 61"  → "Taikos 61, Klaipėda, Lithuania"
+ *                            "Pietinė 17" → "Pietinė 17, Klaipėda, Lithuania"
+ *                            (no city)    → "Taikos 61, Lithuania"
  * G. Multi-word fallback     2+ words → PlaceSearch [with locality]
  * H. Failure                 single unknown word with no context
  *
@@ -99,11 +101,12 @@ object DestinationResolver {
     )
 
     // ── Street + number pattern ────────────────────────────────────────────
-    // Matches: one or more words starting with a capital + whitespace + number[letter]
+    // Matches: one or more words (any case first letter) + whitespace + number[letter].
     // Requires no comma (comma means city is already specified → handled by B2).
+    // Case-insensitive first character: speech recognisers occasionally return lowercase.
 
     private val STREET_NUMBER_REGEX = Regex(
-        """^([A-ZĄČĘĖĮŠŲŪŽ][^,\d]*?)\s+(\d+[a-zA-Z]?)\s*$""",
+        """^([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž][^,\d]*?)\s+(\d+[a-zA-Z]?)\s*$""",
     )
 
     // ── Coordinate pair ───────────────────────────────────────────────────
@@ -261,17 +264,16 @@ object DestinationResolver {
         }
 
         // ── C. Street + number pattern ────────────────────────────────────
+        // Preserve the spoken form exactly — do not expand abbreviations here.
+        // Always append country so the Geocoder does not fall back to city centre.
+        // Format: "<street> <number>, <city>, Lithuania"  (or without city if unavailable)
         val streetMatch = STREET_NUMBER_REGEX.find(trimmed)
         if (streetMatch != null) {
             val streetPart = streetMatch.groupValues[1].trim()
             val numberPart = streetMatch.groupValues[2].trim()
-            val expanded  = expandStreetName(streetPart)
-            val query = if (currentLocality != null) {
-                "$expanded $numberPart, $currentLocality"
-            } else {
-                "$expanded $numberPart"
-            }
-            Log.d(TAG, "resolve[C]: '$streetPart' → '$expanded' number='$numberPart' query='$query'")
+            val query = buildStreetQuery(streetPart, numberPart, currentLocality)
+            Log.d(TAG, "resolve[C]: speech='$trimmed' street='$streetPart' number='$numberPart' " +
+                "locality='$currentLocality' query='$query'")
             return DestinationResolution.ExactAddress(query)
         }
 
@@ -296,11 +298,34 @@ object DestinationResolver {
      * Expand a street-name stem to its canonical form.
      * Returns [streetPart] unchanged if it already contains a type suffix
      * (gatvė, prospektas, alėja, …) or if no expansion is found.
+     *
+     * Note: step C no longer calls this — the spoken form is passed directly to the
+     * Geocoder together with city + country, which is sufficient for disambiguation.
+     * The function is retained for call sites that still need the canonical name for
+     * display or TTS purposes.
      */
     internal fun expandStreetName(streetPart: String): String {
         if (STREET_TYPE_REGEX.containsMatchIn(streetPart)) return streetPart
         val lower = streetPart.lowercase().trim()
         return STREET_EXPANSIONS[lower] ?: streetPart
+    }
+
+    /**
+     * Build an unambiguous geocoding query for a street + house number.
+     *
+     * Always appends "Lithuania" so the Geocoder cannot misroute the query to a
+     * city-centre result or a street in another country. Format:
+     * - `"<street> <number>, <city>, Lithuania"` when [locality] is known
+     * - `"<street> <number>, Lithuania"` when GPS city is unavailable
+     */
+    internal fun buildStreetQuery(
+        streetPart: String,
+        numberPart: String,
+        locality: String?,
+    ): String = if (locality != null) {
+        "$streetPart $numberPart, $locality, Lithuania"
+    } else {
+        "$streetPart $numberPart, Lithuania"
     }
 
     /** Build a location-biased query. Locality takes priority over raw coordinates. */

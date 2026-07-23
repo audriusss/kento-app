@@ -174,33 +174,77 @@ class DestinationResolverTest {
         assertTrue(result is DestinationResolution.PlaceSearch)
     }
 
-    // ── C. Street + number expansion ──────────────────────────────────────
+    // ── C. Street + number ────────────────────────────────────────────────
+    // The spoken form is preserved; "Lithuania" is always appended so the Geocoder
+    // cannot fall back to a city-centre result or a street in another country.
 
-    @Test fun `Taikos 61 with locality expands to Taikos prospektas 61 comma city`() = runBlocking {
+    @Test fun `Taikos 61 with locality builds street comma city comma Lithuania`() = runBlocking {
         val result = resolve("Taikos 61", locality = "Klaipėda")
         assertTrue(result is DestinationResolution.ExactAddress)
-        val q = (result as DestinationResolution.ExactAddress).query
-        assertEquals("Taikos prospektas 61, Klaipėda", q)
+        assertEquals("Taikos 61, Klaipėda, Lithuania",
+            (result as DestinationResolution.ExactAddress).query)
     }
 
-    @Test fun `Taikos 61 without locality expands without city`() = runBlocking {
+    @Test fun `Taikos 61 without locality appends Lithuania only`() = runBlocking {
         val result = resolve("Taikos 61")
         assertTrue(result is DestinationResolution.ExactAddress)
-        assertEquals("Taikos prospektas 61", (result as DestinationResolution.ExactAddress).query)
+        assertEquals("Taikos 61, Lithuania",
+            (result as DestinationResolution.ExactAddress).query)
     }
 
-    @Test fun `Minijos 12 expands to Minijos gatvė`() = runBlocking {
-        val result = resolve("Minijos 12")
+    @Test fun `Pietine 17 with locality builds correct query`() = runBlocking {
+        // Regression: "Pietinė 17" previously routed to city centre
+        val result = resolve("Pietinė 17", locality = "Klaipėda")
         assertTrue(result is DestinationResolution.ExactAddress)
-        assertTrue((result as DestinationResolution.ExactAddress).query.startsWith("Minijos gatvė"))
+        assertEquals("Pietinė 17, Klaipėda, Lithuania",
+            (result as DestinationResolution.ExactAddress).query)
     }
 
-    @Test fun `already-expanded street name is not double-expanded`() = runBlocking {
+    @Test fun `Pietine 17 without locality appends Lithuania only`() = runBlocking {
+        val result = resolve("Pietinė 17")
+        assertTrue(result is DestinationResolution.ExactAddress)
+        assertEquals("Pietinė 17, Lithuania",
+            (result as DestinationResolution.ExactAddress).query)
+    }
+
+    @Test fun `lowercase taikos 61 with locality is resolved`() = runBlocking {
+        // Speech recogniser may return lowercase — regex now accepts lowercase first char.
+        val result = resolve("taikos 61", locality = "Klaipėda")
+        assertTrue("lowercase street+number must still route to ExactAddress",
+            result is DestinationResolution.ExactAddress)
+        assertEquals("taikos 61, Klaipėda, Lithuania",
+            (result as DestinationResolution.ExactAddress).query)
+    }
+
+    @Test fun `lowercase pietine 17 with locality is resolved`() = runBlocking {
+        val result = resolve("pietinė 17", locality = "Klaipėda")
+        assertTrue(result is DestinationResolution.ExactAddress)
+        assertEquals("pietinė 17, Klaipėda, Lithuania",
+            (result as DestinationResolution.ExactAddress).query)
+    }
+
+    @Test fun `Minijos 12 with locality includes Lithuania`() = runBlocking {
+        val result = resolve("Minijos 12", locality = "Klaipėda")
+        assertTrue(result is DestinationResolution.ExactAddress)
+        val q = (result as DestinationResolution.ExactAddress).query
+        assertEquals("Minijos 12, Klaipėda, Lithuania", q)
+    }
+
+    @Test fun `already-fully-specified street name is passed through without duplication`() = runBlocking {
         val result = resolve("Taikos prospektas 61")
         assertTrue(result is DestinationResolution.ExactAddress)
         val q = (result as DestinationResolution.ExactAddress).query
-        // Should NOT become "Taikos prospektas prospektas 61"
+        // "prospektas" must appear exactly once — step C does not re-expand
         assertEquals(1, Regex("prospektas").findAll(q).count())
+        assertEquals("Taikos prospektas 61, Lithuania", q)
+    }
+
+    @Test fun `house number suffix letter is preserved`() = runBlocking {
+        val result = resolve("Gedimino 9a", locality = "Vilnius")
+        assertTrue(result is DestinationResolution.ExactAddress)
+        val q = (result as DestinationResolution.ExactAddress).query
+        assertTrue("Query must contain '9a'", q.contains("9a"))
+        assertEquals("Gedimino 9a, Vilnius, Lithuania", q)
     }
 
     // ── G. Multi-word fallback ─────────────────────────────────────────────
@@ -392,64 +436,99 @@ class DestinationResolverTest {
         assertEquals("Kauno gatvė", DestinationResolver.expandStreetName("kauno"))
     }
 
-    // ── No-double-expand guard for Kaunas streets ─────────────────────────
+    // ── No-duplication guard: fully-specified street names pass through ───────
 
-    @Test fun `already-expanded Savanorių prospektas is not double-expanded`() = runBlocking {
+    @Test fun `already-specified Savanorių prospektas has no duplicate word`() = runBlocking {
         val result = resolve("Savanorių prospektas 87")
         assertTrue(result is DestinationResolution.ExactAddress)
         val q = (result as DestinationResolution.ExactAddress).query
+        // Step C does not expand — "prospektas" appears exactly once
         assertEquals(1, Regex("prospektas").findAll(q).count())
+        assertEquals("Savanorių prospektas 87, Lithuania", q)
     }
 
-    @Test fun `already-expanded Jonavos gatvė is not double-expanded`() = runBlocking {
+    @Test fun `already-specified Jonavos gatvė has no duplicate word`() = runBlocking {
         val result = resolve("Jonavos gatvė 14")
         assertTrue(result is DestinationResolution.ExactAddress)
         val q = (result as DestinationResolution.ExactAddress).query
         assertEquals(1, Regex("gatvė").findAll(q).count())
+        assertEquals("Jonavos gatvė 14, Lithuania", q)
     }
 
-    @Test fun `already-expanded Partizanų gatvė is not double-expanded`() = runBlocking {
+    @Test fun `already-specified Partizanų gatvė has no duplicate word`() = runBlocking {
         val result = resolve("Partizanų gatvė 33")
         assertTrue(result is DestinationResolution.ExactAddress)
         val q = (result as DestinationResolution.ExactAddress).query
         assertEquals(1, Regex("gatvė").findAll(q).count())
+        assertEquals("Partizanų gatvė 33, Lithuania", q)
     }
 
-    // ── Kaunas street + number integration (resolve path C) ───────────────
+    // ── Kaunas street + number (resolve path C) ────────────────────────────
 
-    @Test fun `Savanorių 87 with Kaunas locality expands correctly`() = runBlocking {
+    @Test fun `Savanorių 87 with Kaunas locality builds correct query`() = runBlocking {
         val result = resolve("Savanorių 87", locality = "Kaunas")
         assertTrue(result is DestinationResolution.ExactAddress)
-        assertEquals("Savanorių prospektas 87, Kaunas",
+        assertEquals("Savanorių 87, Kaunas, Lithuania",
             (result as DestinationResolution.ExactAddress).query)
     }
 
-    @Test fun `Savanoriu no-diacritic 87 with Kaunas locality expands correctly`() = runBlocking {
+    @Test fun `Savanoriu no-diacritic 87 with Kaunas locality builds correct query`() = runBlocking {
+        // Spoken form is preserved as-is; Geocoder + country resolves the rest.
         val result = resolve("Savanoriu 87", locality = "Kaunas")
         assertTrue(result is DestinationResolution.ExactAddress)
-        assertEquals("Savanorių prospektas 87, Kaunas",
+        assertEquals("Savanoriu 87, Kaunas, Lithuania",
             (result as DestinationResolution.ExactAddress).query)
     }
 
-    @Test fun `Jonavos 14 with Kaunas locality expands correctly`() = runBlocking {
+    @Test fun `Jonavos 14 with Kaunas locality builds correct query`() = runBlocking {
         val result = resolve("Jonavos 14", locality = "Kaunas")
         assertTrue(result is DestinationResolution.ExactAddress)
-        assertEquals("Jonavos gatvė 14, Kaunas",
+        assertEquals("Jonavos 14, Kaunas, Lithuania",
             (result as DestinationResolution.ExactAddress).query)
     }
 
-    @Test fun `Partizanų 33 with Kaunas locality expands correctly`() = runBlocking {
+    @Test fun `Partizanų 33 with Kaunas locality builds correct query`() = runBlocking {
         val result = resolve("Partizanų 33", locality = "Kaunas")
         assertTrue(result is DestinationResolution.ExactAddress)
-        assertEquals("Partizanų gatvė 33, Kaunas",
+        assertEquals("Partizanų 33, Kaunas, Lithuania",
             (result as DestinationResolution.ExactAddress).query)
     }
 
-    @Test fun `Partizanu no-diacritic 33 with Kaunas locality expands correctly`() = runBlocking {
+    @Test fun `Partizanu no-diacritic 33 with Kaunas locality builds correct query`() = runBlocking {
         val result = resolve("Partizanu 33", locality = "Kaunas")
         assertTrue(result is DestinationResolution.ExactAddress)
-        assertEquals("Partizanų gatvė 33, Kaunas",
+        assertEquals("Partizanu 33, Kaunas, Lithuania",
             (result as DestinationResolution.ExactAddress).query)
+    }
+
+    // ── buildStreetQuery helper ────────────────────────────────────────────
+
+    @Test fun `buildStreetQuery with locality produces street number city Lithuania`() {
+        assertEquals(
+            "Taikos 61, Klaipėda, Lithuania",
+            DestinationResolver.buildStreetQuery("Taikos", "61", "Klaipėda"),
+        )
+    }
+
+    @Test fun `buildStreetQuery without locality produces street number Lithuania`() {
+        assertEquals(
+            "Pietinė 17, Lithuania",
+            DestinationResolver.buildStreetQuery("Pietinė", "17", null),
+        )
+    }
+
+    @Test fun `buildStreetQuery preserves suffix letter in number`() {
+        assertEquals(
+            "Gedimino 9a, Vilnius, Lithuania",
+            DestinationResolver.buildStreetQuery("Gedimino", "9a", "Vilnius"),
+        )
+    }
+
+    @Test fun `buildStreetQuery preserves fully specified street name unchanged`() {
+        assertEquals(
+            "Taikos prospektas 61, Klaipėda, Lithuania",
+            DestinationResolver.buildStreetQuery("Taikos prospektas", "61", "Klaipėda"),
+        )
     }
 
     // ── buildLocationQuery helper ──────────────────────────────────────────
