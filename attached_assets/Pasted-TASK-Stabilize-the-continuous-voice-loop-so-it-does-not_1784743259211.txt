@@ -1,0 +1,237 @@
+TASK: Stabilize the continuous voice loop so it does not visibly flicker between on/off states.
+
+REAL DEVICE BEHAVIOR
+
+Confirmed on Xiaomi:
+
+- Voice control now works.
+- Commands are recognized.
+- Continuous mode restarts.
+- But the microphone/listening state keeps cycling visibly:
+  - turns on
+  - stays briefly
+  - turns off
+  - turns on again
+- The UI and recognizer appear to flicker between states.
+- This creates a glitchy experience even when no real error occurred.
+
+GOAL
+
+Continuous mode should feel stable.
+
+Expected behavior:
+
+- User enables voice mode once.
+- UI stays in a stable "Pokalbis leidžiamas" mode.
+- Internally the recognizer may restart between utterances, but the user must not see the whole mode turning off and on.
+- Only the sub-status should change:
+  - "Įjungiamas klausymas..."
+  - "Kentas klauso..."
+  - "Kentas galvoja..."
+  - "Kentas kalba..."
+  - "Laukiu komandos..."
+- The main enabled/disabled state must not flicker during normal retry or timeout recovery.
+
+DO NOT
+
+- Do not add features.
+- Do not change navigation logic.
+- Do not change DestinationResolver.
+- Do not redesign the UI.
+- Do not push automatically.
+
+PHASE 1 — IDENTIFY WHY THE UI FLICKERS
+
+Trace every write to:
+
+- continuousSessionActive
+- session enabled flag
+- VoiceSessionState.Idle
+- VoiceSessionState.Starting
+- VoiceSessionState.RestartDelay
+- VoiceSessionState.Recovering
+- mic button active state
+- "Pokalbis leidžiamas"
+- "Pokalbis išjungtas"
+
+Find every place that temporarily sets continuous mode false during:
+
+- NO_MATCH
+- SPEECH_TIMEOUT
+- normal restart
+- TTS completion
+- recognizer recreation
+- lifecycle transitions
+- scheduleOneRestart
+- notifyCommandDone
+- onRecoverableError
+
+The enabled mode flag must only change when:
+
+1. user toggles microphone off
+2. explicit stop-listening voice command
+3. permission is lost
+4. fatal unrecoverable failure
+5. app lifecycle intentionally disables it
+
+Normal recognizer restart must NOT set enabled=false.
+
+PHASE 2 — SEPARATE MODE ENABLED FROM SESSION ACTIVE
+
+Maintain two separate concepts:
+
+- continuousModeEnabled
+- recognizerSessionActive
+
+continuousModeEnabled:
+- stays true through retries, timeouts, recreation, TTS, processing, restart delay
+
+recognizerSessionActive:
+- may change true/false internally per recognition cycle
+
+The UI microphone toggle and "Pokalbis leidžiamas" must be driven only by continuousModeEnabled.
+
+Do not drive the main mic active state from recognizerSessionActive or ListeningReady.
+
+PHASE 3 — STABILIZE UI STATE
+
+Main UI state:
+
+continuousModeEnabled = true
+→ microphone remains visually active
+
+Sub-status mapping:
+
+Starting:
+"Įjungiamas klausymas..."
+
+ListeningReady:
+"Kentas klauso..."
+
+UserSpeaking:
+"Girdžiu..."
+
+Processing:
+"Kentas galvoja..."
+
+Speaking:
+"Kentas kalba..."
+
+RestartDelay:
+"Laukiu komandos..."
+
+Recovering:
+"Atkuriamas balso atpažinimas..."
+
+Idle while continuousModeEnabled=true should not normally occur.
+If it does briefly, map it to:
+"Laukiu komandos..."
+
+Only when continuousModeEnabled=false show:
+"Pokalbis išjungtas"
+
+PHASE 4 — NORMAL TIMEOUTS MUST BE INVISIBLE
+
+NO_MATCH and SPEECH_TIMEOUT are normal in continuous mode.
+
+Behavior:
+
+- do not mark the whole session disabled
+- do not flash an error
+- do not switch the microphone icon to off
+- do not speak a message
+- wait a small delay
+- restart listening exactly once
+
+The user should only see a stable enabled mic and possibly:
+"Laukiu komandos..."
+
+PHASE 5 — DEBOUNCE RAPID UI TRANSITIONS
+
+Avoid visible flicker from very short states.
+
+Add UI debounce/minimum display durations where appropriate.
+
+Suggested:
+
+- Starting visible minimum 200–300 ms
+- RestartDelay should not flash if shorter than 300 ms
+- Recovering only show if recovery lasts more than 400–500 ms
+- transient Idle under 300 ms while mode enabled should not be rendered as disabled
+
+Do not delay actual recognizer logic unnecessarily.
+Debounce only user-visible state.
+
+PHASE 6 — CHECK DUPLICATE RESTARTS
+
+Verify scheduleOneRestart() is called only once per cycle.
+
+Add logging:
+
+KentasVoiceStability
+
+Log:
+
+- continuousModeEnabled
+- session state
+- restart job created
+- restart job cancelled
+- restart reason
+- generation ID
+- mic UI active flag
+
+Detect:
+
+- two restart jobs for same generation
+- startListening called while Starting or ListeningReady
+- state bouncing Idle → Starting → Idle → Starting
+- enabled flag changing without user action
+
+PHASE 7 — TESTS
+
+Add focused tests:
+
+1. continuousModeEnabled remains true during NO_MATCH
+2. remains true during SPEECH_TIMEOUT
+3. remains true during Recovering
+4. remains true during RestartDelay
+5. recognizerSessionActive may change without changing enabled flag
+6. mic active state is driven by enabled flag only
+7. transient Idle while enabled does not render "Pokalbis išjungtas"
+8. normal restart does not toggle mic off
+9. user toggle off disables mode
+10. permission failure disables mode
+11. fatal failure disables mode
+12. duplicate restart for same generation is ignored
+13. rapid Starting/RestartDelay transitions do not flicker UI
+14. NO_MATCH produces no visible error
+15. SPEECH_TIMEOUT produces no visible error
+
+PHASE 8 — BUILD
+
+Run:
+
+cd android
+./gradlew :app:compileDebugKotlin
+./gradlew :app:testDebugUnitTest
+
+If gradlew is missing, do not claim success.
+
+Run smart-quote scan.
+
+Commit locally only.
+
+FINAL REPORT
+
+Provide:
+
+1. exact source of flicker
+2. every place where enabled flag was incorrectly toggled
+3. new separation between mode enabled and recognizer active
+4. UI debounce behavior
+5. files changed
+6. tests added
+7. compile result
+8. unit test result
+9. local commit hash
+10. confirmation nothing was pushed
