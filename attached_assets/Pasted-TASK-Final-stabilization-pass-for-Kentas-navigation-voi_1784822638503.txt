@@ -1,0 +1,323 @@
+TASK: Final stabilization pass for Kentas navigation voice and destination accuracy.
+
+GOAL
+
+Finish the existing implementation so the app is reliable on a real Xiaomi device.
+
+Do not add new features.
+Do not redesign architecture.
+Do not touch waypoint features unless a regression is directly caused by them.
+Do not modify unrelated files.
+Do not push automatically.
+
+CURRENT REAL-DEVICE ISSUES
+
+1. Short addresses such as:
+   - "Taikos 61"
+   - "Pietinė 17"
+   sometimes still ask the user to repeat the address.
+
+2. Full addresses work more reliably than short addresses.
+
+3. Destination resolution must never accept:
+   - city-centre fallback
+   - city-only result
+   - wrong city
+   - missing street
+   - missing house number when the input includes one
+
+4. Navigation status speech must be:
+   - short
+   - factual
+   - grammatically correct Lithuanian
+   - deterministic
+   - without jokes unless explicitly requested
+
+5. Continuous voice mode must remain stable and must not be modified unless needed for a direct regression fix.
+
+SCOPE
+
+Inspect and modify only the directly relevant files, expected to include:
+
+- DestinationResolver.kt
+- GoogleNavigationEngine.kt
+- DistanceSpeech.kt
+- MainViewModel.kt
+- focused test files
+
+Modify no more than 5 production files unless you first explain why more are necessary.
+
+Do not repeatedly reread unchanged files.
+
+PHASE 1 — VERIFY CURRENT STREET RESOLUTION IMPLEMENTATION
+
+Before changing code, briefly confirm:
+
+- how "Taikos 61" is parsed
+- how "Pietinė 17" is parsed
+- which candidate queries are generated
+- how Geocoder results are validated
+- which condition currently causes "Pasakyk visą adresą su miestu."
+
+Do not guess. Trace the actual code path.
+
+PHASE 2 — FINAL STREET + NUMBER RESOLUTION
+
+For input:
+
+"Taikos 61"
+
+when current city is Klaipėda, try candidates in this order:
+
+1. "Taikos 61, Klaipėda, Lithuania"
+2. "Taikos pr. 61, Klaipėda, Lithuania"
+3. "Taikos prospektas 61, Klaipėda, Lithuania"
+
+For:
+
+"Pietinė 17"
+
+try:
+
+1. "Pietinė 17, Klaipėda, Lithuania"
+2. "Pietinės g. 17, Klaipėda, Lithuania"
+3. "Pietinė g. 17, Klaipėda, Lithuania"
+4. "Pietinė gatvė 17, Klaipėda, Lithuania"
+
+Preserve the spoken number exactly.
+
+Support:
+- lowercase speech
+- Lithuanian letters
+- house number suffixes such as:
+  - 61A
+  - 17-2
+  - 12B
+  - 5/7
+
+Do not strip or split valid number suffixes.
+
+STREET RESULT VALIDATION
+
+A Geocoder result is valid only when:
+
+- locality or subAdminArea matches the expected city, when city is known;
+- thoroughfare or featureName contains a plausible matching street;
+- house number matches through subThoroughfare, featureName, or formatted address;
+- latitude and longitude are valid;
+- the result is not city-only;
+- the result is not a broad administrative area;
+- the result is not clearly a city-centre fallback.
+
+Use normalized Lithuanian text comparison:
+
+- lowercase
+- trim
+- remove punctuation
+- tolerate common suffix variants:
+  - g.
+  - gatvė
+  - pr.
+  - prospektas
+  - al.
+  - alėja
+  - pl.
+  - plentas
+
+Do not require perfect string equality.
+
+Use a simple confidence score instead of one brittle boolean if useful.
+
+Example scoring:
+
++3 city matches
++3 street strongly matches
++3 house number matches
++1 country matches Lithuania
+-5 no street
+-5 no number
+-5 wrong city
+
+Accept only above a clear threshold.
+
+Keep this logic pure and JVM-testable.
+
+PHASE 3 — FALLBACK STRATEGY
+
+If Android Geocoder returns no verified result:
+
+- do not navigate to city centre;
+- do not silently accept a partial result;
+- do not route the query to AI chat.
+
+Say:
+
+"Adreso tiksliai rasti nepavyko. Pasakyk gatvę, numerį ir miestą."
+
+If city is unknown, ask:
+
+"Kuriame mieste yra šis adresas?"
+
+Do not implement Google Geocoding API in this task unless the project already has it configured and usable without new credentials.
+
+PHASE 4 — NATURAL LITHUANIAN NAVIGATION SPEECH
+
+Keep navigation answers deterministic.
+
+Examples:
+
+Distance:
+- 350 m:
+  "Liko apie 350 metrų."
+- 1 km:
+  "Liko apie vieną kilometrą."
+- 2 km:
+  "Liko apie du kilometrus."
+- 5.6 km:
+  "Liko apie penkis su puse kilometro."
+- 10 km:
+  "Liko apie dešimt kilometrų."
+
+Distance + ETA:
+- "Liko apie penkis su puse kilometro. Kelionė truks apie dešimt minučių."
+
+Rules:
+
+- never say "koma";
+- never output malformed forms such as "5 koma 6 kilometrai";
+- do not use AI chat for route distance or ETA;
+- do not add jokes;
+- do not add assumptions about dinner, time, mood, traffic, or user intent;
+- use one consistent wording path;
+- round values sensibly:
+  - below 1 km: nearest 50 m
+  - 1–20 km: nearest 0.5 km
+  - above 20 km: nearest 1 km
+
+Create or reuse pure formatting helpers.
+
+PHASE 5 — ETA LITHUANIAN FORMS
+
+Add deterministic ETA speech:
+
+- 1 minute:
+  "apie vieną minutę"
+- 2 minutes:
+  "apie dvi minutes"
+- 10 minutes:
+  "apie dešimt minučių"
+- 21 minutes:
+  "apie dvidešimt vieną minutę"
+- 22 minutes:
+  "apie dvidešimt dvi minutes"
+
+Support at least 1–120 minutes.
+
+Avoid digit-by-digit or awkward robotic forms when practical.
+
+PHASE 6 — LOGGING
+
+Use tag:
+
+KentasDestination
+
+Log only useful structured facts:
+
+- raw speech
+- normalized input
+- parsed street
+- parsed house number
+- current city
+- candidate query index
+- candidate query
+- returned full address
+- locality
+- thoroughfare
+- subThoroughfare
+- validation score
+- rejection reason
+- accepted coordinates
+
+Do not log secrets or API keys.
+
+Avoid duplicate logs.
+
+PHASE 7 — TESTS
+
+Add only focused regression tests.
+
+Target: 12–20 meaningful tests total for this patch.
+
+Must cover:
+
+Address parsing:
+- "taikos 61"
+- "Taikos 61A"
+- "pietinė 17"
+- "Minijos 12-2"
+- "Šilutės pl. 5/7"
+
+Candidate generation:
+- Taikos spoken / abbreviation / expanded
+- Pietinė variants
+- city known
+- city unknown
+
+Validation:
+- exact street + number + city accepted
+- city-only rejected
+- missing number rejected
+- wrong city rejected
+- matching formattedAddress accepted when subThoroughfare is empty
+- street suffix variation accepted
+- unrelated street rejected
+
+Speech:
+- 350 m
+- 1 km
+- 2 km
+- 5.6 km
+- 10 km
+- 1 / 2 / 10 / 21 / 22 minute forms
+- distance + ETA combined response has no joke text
+- response never contains "koma"
+
+Do not create duplicate or meaningless tests.
+
+PHASE 8 — VERIFICATION
+
+Inspect the repository structure once.
+
+Run from the directory containing gradlew:
+
+./gradlew :app:compileDebugKotlin
+./gradlew :app:testDebugUnitTest
+
+If gradlew is unavailable, say so clearly.
+Do not create a fake gradlew wrapper.
+Do not claim Android build success from kotlinc alone.
+
+Run a smart-quote scan on modified Kotlin files.
+
+Commit locally only after checks.
+
+Do not push.
+
+FINAL REPORT
+
+Provide:
+
+1. Exact root cause still causing short-address failures
+2. Files changed
+3. Final candidate-query order
+4. Validation/scoring rules
+5. Address formats supported
+6. Final Lithuanian distance wording
+7. Final ETA wording
+8. Tests added and count
+9. Compile result
+10. Test result
+11. Real-device test checklist
+12. Known limitations
+13. Commit hash
+14. Confirmation that nothing was pushed
