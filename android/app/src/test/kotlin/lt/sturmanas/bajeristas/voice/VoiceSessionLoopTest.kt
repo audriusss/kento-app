@@ -66,7 +66,7 @@ class VoiceSessionLoopTest {
 
     @Test
     fun `restart is scheduled when session active and TTS not speaking`() {
-        // notifyCommandDone: if (!_continuousSessionActive.value) return
+        // notifyCommandDone: if (!_continuousModeEnabled.value) return
         //                    if (ttsManager.isSpeaking) return   // onDone will handle it
         //                    scheduleOneRestart(300L)
         val sessionActive = true

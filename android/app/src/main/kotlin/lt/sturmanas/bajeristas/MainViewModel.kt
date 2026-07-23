@@ -65,6 +65,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val DEST_TAG       = "KentasDestination"
         private const val WP_TAG         = "KentasWaypoint"
         private const val LIFECYCLE_TAG  = "KentasSpeechLifecycle"
+        private const val STABILITY_TAG  = "KentasVoiceStability"
         /** Maximum consecutive recoverable SR errors before the session loop stops itself. */
         internal const val MAX_SESSION_RETRIES = 3
     }
@@ -127,12 +128,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // ── Continuous voice session ───────────────────────────────────────────
 
-    private val _continuousSessionActive = MutableStateFlow(false)
     /**
-     * True while the hands-free voice session loop is running.
-     * Observed by [MicButton] to render the persistent-active indicator ring.
+     * True while hands-free continuous mode is on.
+     * Stays true through every recognizer restart, TTS playback, timeout, and recovery.
+     * Only goes false on: user toggle off, explicit stop-listening command, fatal error,
+     * MAX_SESSION_RETRIES exhausted, or permission loss.
+     *
+     * Drives the mic button active ring and "Pokalbis leidžiamas" indicator.
+     * Use this — not [_sessionState] or [_voiceListeningState] — to determine if the
+     * user has continuous mode on.
      */
-    val continuousSessionActive: StateFlow<Boolean> = _continuousSessionActive.asStateFlow()
+    private val _continuousModeEnabled = MutableStateFlow(false)
+    val continuousModeEnabled: StateFlow<Boolean> = _continuousModeEnabled.asStateFlow()
 
     private val _sessionState = MutableStateFlow<VoiceSessionState>(VoiceSessionState.Idle)
     /**
@@ -150,6 +157,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * against multiple overlapping [SpeechRecognitionManager.startListening] calls.
      */
     private var pendingRestartJob: Job? = null
+
+    /**
+     * Delays displaying the "Atkuriamas balso atpažinimas…" text for non-silent errors.
+     * Cancelled in [scheduleOneRestart] if recovery completes within 400 ms, keeping
+     * brief glitch recoveries invisible to the user.
+     */
+    private var recoveringTextJob: Job? = null
 
     // ── Pending recognized text ───────────────────────────────────────────
 
@@ -199,8 +213,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // recognizer from picking up reverberation from the speaker.
         ttsManager.onDone = {
             Log.d(LIFECYCLE_TAG,
-                "TTS onDone: sessionActive=${_continuousSessionActive.value}")
-            if (_continuousSessionActive.value) {
+                "TTS onDone: sessionActive=${_continuousModeEnabled.value}")
+            if (_continuousModeEnabled.value) {
                 scheduleOneRestart(500L)
             }
         }
@@ -236,9 +250,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // Fired immediately when startListening() is called (before onReadyForSpeech).
         // UI shows "Įjungiamas klausymas…" — not "Kentas klauso…".
         speechRecognitionManager.onStartRequested = {
-            Log.d(LIFECYCLE_TAG, "SR: START_REQUESTED gen=${speechRecognitionManager.generation}")
+            val gen = speechRecognitionManager.generation
+            Log.d(LIFECYCLE_TAG, "SR: START_REQUESTED gen=$gen")
+            Log.d(STABILITY_TAG, "state=Starting modeEnabled=${_continuousModeEnabled.value} gen=$gen")
             _sessionState.value = VoiceSessionState.Starting
-            _voiceListeningState.value = VoiceListeningState.IDLE   // not yet LISTENING
+            // Do NOT write IDLE here — in continuous mode the mic must stay visually active
+            // (LISTENING) through restart cycles. IDLE is only written in single-press mode
+            // (continuousModeEnabled=false) where the mic isn't active yet.
+            if (!_continuousModeEnabled.value) {
+                _voiceListeningState.value = VoiceListeningState.IDLE
+            }
             _voiceStatusText.value = "Įjungiamas klausymas…"
         }
 
@@ -255,8 +276,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         speechRecognitionManager.onBeginningOfSpeech = {
             Log.d(LIFECYCLE_TAG, "SR: USER_SPEAKING gen=${speechRecognitionManager.generation}")
+            Log.d(STABILITY_TAG, "state=UserSpeaking modeEnabled=${_continuousModeEnabled.value}")
             _sessionState.value = VoiceSessionState.UserSpeaking
-            _voiceStatusText.value = "Klausau…"
+            _voiceStatusText.value = "Girdžiu…"
         }
 
         speechRecognitionManager.onPartialResult = { partial ->
@@ -287,54 +309,75 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         speechRecognitionManager.onListeningStopped = {
             Log.d(LIFECYCLE_TAG, "SR: LISTENING_STOPPED")
-            if (_voiceListeningState.value == VoiceListeningState.LISTENING) {
+            Log.d(STABILITY_TAG, "LISTENING_STOPPED modeEnabled=${_continuousModeEnabled.value} listState=${_voiceListeningState.value}")
+            // In continuous mode a stopped cycle is immediately followed by a restart —
+            // keep the mic visually active (LISTENING) so the UI does not flicker.
+            if (!_continuousModeEnabled.value &&
+                _voiceListeningState.value == VoiceListeningState.LISTENING) {
                 _voiceListeningState.value = VoiceListeningState.IDLE
             }
         }
 
         speechRecognitionManager.onRecoverableError = recoverableError@{ errorCode ->
-            val name = RecoveryPolicy.errorName(errorCode)
+            val name    = RecoveryPolicy.errorName(errorCode)
+            val silent  = RecoveryPolicy.isSilentRecovery(errorCode)
+            val delayMs = RecoveryPolicy.delayMs(errorCode)
             Log.w(LIFECYCLE_TAG,
-                "SR: RECOVERABLE_ERROR code=$errorCode ($name) " +
-                "retries=$sessionRetryCount sessionActive=${_continuousSessionActive.value}")
+                "SR: RECOVERABLE_ERROR code=$errorCode ($name) silent=$silent " +
+                "retries=$sessionRetryCount modeEnabled=${_continuousModeEnabled.value}")
+            Log.d(STABILITY_TAG,
+                "RECOVERABLE_ERROR code=$errorCode name=$name silent=$silent " +
+                "modeEnabled=${_continuousModeEnabled.value} listState=${_voiceListeningState.value}")
 
-            // Immediately leave LISTENING state — UI must not claim we're listening.
-            _voiceListeningState.value = VoiceListeningState.IDLE
-
-            if (!_continuousSessionActive.value) {
-                // Single-press mode — show brief message, no retry.
-                val msg = if (RecoveryPolicy.isSilentRecovery(errorCode))
-                    "Nieko neišgirdau. Pabandykite dar kartą."
-                else RecoveryPolicy.statusText(errorCode)
+            if (!_continuousModeEnabled.value) {
+                // Single-press mode — drop to IDLE, show brief message, no retry.
+                _voiceListeningState.value = VoiceListeningState.IDLE
+                val msg = if (silent) "Nieko neišgirdau. Pabandykite dar kartą."
+                          else RecoveryPolicy.statusText(errorCode)
                 _voiceStatusText.value = msg
                 scheduleStatusClear(3_000)
                 return@recoverableError
             }
 
-            // Continuous session: route through the SINGLE restart path.
+            // ── Continuous mode ────────────────────────────────────────────────────
+            // The mic stays visually active (LISTENING) — do NOT write IDLE here.
+            // Silent recoveries (NO_MATCH, SPEECH_TIMEOUT) are completely invisible:
+            // no state change, no status text, no TTS — user sees "Laukiu komandos…"
+            // via RestartDelay set inside scheduleOneRestart().
+
             if (sessionRetryCount < MAX_SESSION_RETRIES) {
                 sessionRetryCount++
-                _sessionState.value = VoiceSessionState.Recovering
 
-                // Silent recoveries (NO_MATCH, SPEECH_TIMEOUT) show no TTS message.
-                if (!RecoveryPolicy.isSilentRecovery(errorCode)) {
-                    _voiceStatusText.value = RecoveryPolicy.statusText(errorCode)
+                if (silent) {
+                    // NO_MATCH / SPEECH_TIMEOUT — normal in continuous mode.
+                    // Phase 4: invisible to the user. scheduleOneRestart sets RestartDelay.
+                    Log.d(LIFECYCLE_TAG,
+                        "SR: silent timeout — retry $sessionRetryCount/$MAX_SESSION_RETRIES in ${delayMs}ms")
+                    scheduleOneRestart(delayMs)
+                } else {
+                    // Real error (server disconnect, audio, etc.) — show Recovering state,
+                    // but debounce the status text by 400 ms so brief glitches are invisible.
+                    _sessionState.value = VoiceSessionState.Recovering
+                    recoveringTextJob?.cancel()
+                    recoveringTextJob = viewModelScope.launch {
+                        delay(400)
+                        if (_sessionState.value is VoiceSessionState.Recovering) {
+                            _voiceStatusText.value = "Atkuriamas balso atpažinimas…"
+                        }
+                    }
+                    Log.d(LIFECYCLE_TAG,
+                        "SR: retry $sessionRetryCount/$MAX_SESSION_RETRIES in ${delayMs}ms")
+                    scheduleOneRestart(delayMs)
                 }
-
-                val delayMs = RecoveryPolicy.delayMs(errorCode)
-                Log.d(LIFECYCLE_TAG,
-                    "SR: retry $sessionRetryCount/$MAX_SESSION_RETRIES in ${delayMs}ms")
-                scheduleOneRestart(delayMs)
             } else {
+                val errMsg = "Balso atpažinimas laikinai neveikia. Paliesk mikrofoną, kad bandytum dar kartą."
                 Log.w(LIFECYCLE_TAG,
                     "SR: MAX_RETRIES reached ($MAX_SESSION_RETRIES) — stopping session")
-                _sessionState.value = VoiceSessionState.Error(
-                    message = "Balso atpažinimas laikinai neveikia. Paliesk mikrofoną, kad bandytum dar kartą.",
-                    isFatal = false,
-                )
+                Log.d(STABILITY_TAG, "MAX_RETRIES → stopping modeEnabled=false")
+                _sessionState.value = VoiceSessionState.Error(message = errMsg, isFatal = false)
                 stopContinuousSessionInternal()
                 _voiceListeningState.value = VoiceListeningState.ERROR
-                _voiceStatusText.value = "Balso atpažinimas laikinai neveikia. Paliesk mikrofoną, kad bandytum dar kartą."
+                _voiceStatusText.value = errMsg
                 scheduleStatusClear(6_000)
             }
         }
@@ -362,8 +405,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * Must be called on the Main thread (SpeechRecognizer requirement).
      */
     fun toggleSession() {
-        Log.d("KentasFlow", "toggleSession: active=${_continuousSessionActive.value}")
-        if (_continuousSessionActive.value) {
+        Log.d("KentasFlow", "toggleSession: modeEnabled=${_continuousModeEnabled.value}")
+        Log.d(STABILITY_TAG, "toggleSession modeEnabled=${_continuousModeEnabled.value} → ${!_continuousModeEnabled.value}")
+        if (_continuousModeEnabled.value) {
             stopContinuousSession()
         } else {
             startContinuousSession()
@@ -385,10 +429,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun startContinuousSession() {
         Log.d(LIFECYCLE_TAG, "startContinuousSession: beginning session loop")
+        Log.d(STABILITY_TAG, "MODE_ENABLED → true; mic=LISTENING immediately")
         pendingRestartJob?.cancel()
         pendingRestartJob = null
+        recoveringTextJob?.cancel()
+        recoveringTextJob = null
         sessionRetryCount = 0
-        _continuousSessionActive.value = true
+        _continuousModeEnabled.value = true
+        // Set LISTENING immediately so the mic button goes red+active before the recognizer
+        // finishes initialising. Prevents a brief IDLE flash at the start of every session.
+        _voiceListeningState.value = VoiceListeningState.LISTENING
         ttsManager.stop()
         speechRecognitionManager.startListening()   // onStartRequested → Starting state
     }
@@ -407,14 +457,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * Cancels pending restart job, cancels the recognizer, and resets state.
      */
     private fun stopContinuousSessionInternal() {
+        recoveringTextJob?.cancel()
+        recoveringTextJob = null
         pendingRestartJob?.cancel()
         pendingRestartJob = null
-        _continuousSessionActive.value = false
+        _continuousModeEnabled.value = false
         _sessionState.value = VoiceSessionState.Idle
         speechRecognitionManager.cancel()
         _voiceListeningState.value = VoiceListeningState.IDLE
         _voiceStatusText.value = ""
         Log.d(LIFECYCLE_TAG, "stopContinuousSessionInternal: session stopped")
+        Log.d(STABILITY_TAG, "MODE_ENABLED → false; mic=IDLE")
     }
 
     /**
@@ -430,14 +483,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * - [notifyCommandDone] — when a command produces no TTS (muted / silent command)
      */
     private fun scheduleOneRestart(delayMs: Long) {
-        if (!_continuousSessionActive.value) return
+        if (!_continuousModeEnabled.value) return
+        recoveringTextJob?.cancel()   // fast recovery — suppress "Atkuriamas…" text
+        recoveringTextJob = null
         pendingRestartJob?.cancel()
-        Log.d(LIFECYCLE_TAG, "scheduleOneRestart: delay=${delayMs}ms")
+        Log.d(LIFECYCLE_TAG, "scheduleOneRestart: delay=${delayMs}ms gen=${speechRecognitionManager.generation}")
+        Log.d(STABILITY_TAG, "scheduleOneRestart delay=${delayMs}ms gen=${speechRecognitionManager.generation} modeEnabled=${_continuousModeEnabled.value}")
         _sessionState.value = VoiceSessionState.RestartDelay
+        _voiceStatusText.value = "Laukiu komandos…"
         pendingRestartJob = viewModelScope.launch {
             delay(delayMs)
             pendingRestartJob = null
-            if (!_continuousSessionActive.value) {
+            if (!_continuousModeEnabled.value) {
                 Log.d(LIFECYCLE_TAG, "scheduleOneRestart: session stopped during delay — abort")
                 return@launch
             }
@@ -448,6 +505,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
             Log.d(LIFECYCLE_TAG, "scheduleOneRestart: firing startListening")
+            Log.d(STABILITY_TAG, "scheduleOneRestart: startListening gen=${speechRecognitionManager.generation + 1}")
             ttsManager.stop()
             speechRecognitionManager.startListening()
         }
@@ -463,7 +521,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * dual-path design that allowed two restarts to fire for the same command.
      */
     private fun notifyCommandDone() {
-        if (!_continuousSessionActive.value) return
+        if (!_continuousModeEnabled.value) return
         if (ttsManager.isSpeaking) {
             // TTS is playing — onDone is the restart trigger. Do NOT also schedule here.
             Log.d(LIFECYCLE_TAG, "notifyCommandDone: TTS speaking → defer to onDone")
@@ -529,7 +587,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             is VoiceCommand.MuteVoice -> {
                 Log.d("KentasFlow", "command: MuteVoice")
                 ttsManager.stop()
-                _voiceListeningState.value = VoiceListeningState.IDLE
+                // In continuous mode keep the mic visually active; IDLE only in single-press.
+                if (!_continuousModeEnabled.value) _voiceListeningState.value = VoiceListeningState.IDLE
                 _voiceStatusText.value = ""
                 _pendingNavAction.value = VoiceNavAction.Mute
                 notifyCommandDone()   // no TTS produced — silent-path restart
@@ -679,7 +738,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                     Log.d("KentasFlow", "OpenAI reply: '$reply'")
                     _voiceStatusText.value = reply
-                    _voiceListeningState.value = VoiceListeningState.IDLE
+                    if (!_continuousModeEnabled.value) _voiceListeningState.value = VoiceListeningState.IDLE
                     if (!isMuted) ttsManager.speak(reply)
                     scheduleStatusClear(6_000)
                     notifyCommandDone()
@@ -689,7 +748,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             is VoiceCommand.Unknown -> {
                 Log.d("KentasFlow", "command: Unknown '${command.text}'")
-                _voiceListeningState.value = VoiceListeningState.IDLE
+                if (!_continuousModeEnabled.value) _voiceListeningState.value = VoiceListeningState.IDLE
                 _voiceStatusText.value = "Komandos neišgirdau."
             }
         }
@@ -716,8 +775,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun cancelClarification() {
         Log.d(DEST_TAG, "cancelClarification")
         _pendingClarification.value = null
-        _voiceListeningState.value = VoiceListeningState.IDLE
+        if (!_continuousModeEnabled.value) _voiceListeningState.value = VoiceListeningState.IDLE
         _voiceStatusText.value = ""
+        // Resume the continuous loop if active; otherwise this is a no-op.
+        notifyCommandDone()
     }
 
     // ── Public API — Waypoints ────────────────────────────────────────────
@@ -824,6 +885,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
+        recoveringTextJob?.cancel()
+        recoveringTextJob = null
         pendingRestartJob?.cancel()
         pendingRestartJob = null
         LocationProvider.stopUpdates(getApplication())
@@ -863,7 +926,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 Log.d(DEST_TAG, "ExactAddress: '${resolution.query}'")
                 waypointManager.setFinalDestination(StopoverEntry(resolution.query, resolution.query))
                 _finalDestinationName.value = resolution.query
-                _voiceListeningState.value = VoiceListeningState.IDLE
+                if (!_continuousModeEnabled.value) _voiceListeningState.value = VoiceListeningState.IDLE
                 _voiceStatusText.value = "Rasta: ${resolution.query}"
                 if (!isMuted) ttsManager.speak("Keliaujame į ${resolution.query}.")
                 _pendingNavAction.value = VoiceNavAction.StartNavigation(resolution.query)
@@ -874,7 +937,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 Log.d(DEST_TAG, "PlaceSearch: '${resolution.query}'")
                 waypointManager.setFinalDestination(StopoverEntry(rawDestination, resolution.query))
                 _finalDestinationName.value = rawDestination
-                _voiceListeningState.value = VoiceListeningState.IDLE
+                if (!_continuousModeEnabled.value) _voiceListeningState.value = VoiceListeningState.IDLE
                 _voiceStatusText.value = "Kentas ieško: ${resolution.query}"
                 _pendingNavAction.value = VoiceNavAction.StartNavigation(resolution.query)
                 scheduleStatusClear(5_000)
@@ -884,7 +947,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 Log.d(DEST_TAG, "SavedPlace: '${resolution.name}' → '${resolution.address}'")
                 waypointManager.setFinalDestination(StopoverEntry(resolution.name, resolution.address))
                 _finalDestinationName.value = resolution.name
-                _voiceListeningState.value = VoiceListeningState.IDLE
+                if (!_continuousModeEnabled.value) _voiceListeningState.value = VoiceListeningState.IDLE
                 _voiceStatusText.value = "Rasta: ${resolution.name}"
                 if (!isMuted) ttsManager.speak("Keliaujame ${resolution.name.lowercase()}.")
                 _pendingNavAction.value = VoiceNavAction.StartNavigation(resolution.address)
@@ -893,7 +956,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             is DestinationResolution.NeedsClarification -> {
                 Log.d(DEST_TAG, "NeedsClarification: ${resolution.suggestions.size} candidates")
-                _voiceListeningState.value = VoiceListeningState.IDLE
+                if (!_continuousModeEnabled.value) _voiceListeningState.value = VoiceListeningState.IDLE
                 _pendingClarification.value = ClarificationState(
                     originalText = resolution.originalText,
                     candidates = resolution.suggestions,
@@ -935,7 +998,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
 
         _isSolvingDestination.value = false
-        _voiceListeningState.value = VoiceListeningState.IDLE
+        if (!_continuousModeEnabled.value) _voiceListeningState.value = VoiceListeningState.IDLE
 
         Log.d(WP_TAG, "resolveAndAddWaypoint: resolution=${resolution::class.simpleName}")
 
@@ -994,7 +1057,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         waypointManager.setFinalDestination(StopoverEntry(candidate.name, candidate.address))
         _finalDestinationName.value = candidate.name
         _pendingClarification.value = null
-        _voiceListeningState.value = VoiceListeningState.IDLE
+        if (!_continuousModeEnabled.value) _voiceListeningState.value = VoiceListeningState.IDLE
         _voiceStatusText.value = "Pasirinkta: ${candidate.name}"
         if (!isMuted) ttsManager.speak("Gerai, važiuojame į ${candidate.name}.")
         _pendingNavAction.value = VoiceNavAction.StartNavigation(candidate.address)
@@ -1027,7 +1090,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun speakAndIdle(msg: String, isMuted: Boolean) {
-        _voiceListeningState.value = VoiceListeningState.IDLE
+        // In continuous mode the mic stays visually active (LISTENING) while TTS plays.
+        if (!_continuousModeEnabled.value) _voiceListeningState.value = VoiceListeningState.IDLE
         _voiceStatusText.value = msg
         if (!isMuted && msg.isNotBlank()) ttsManager.speak(msg)
     }
