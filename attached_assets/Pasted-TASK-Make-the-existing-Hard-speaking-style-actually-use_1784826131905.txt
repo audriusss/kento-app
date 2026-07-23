@@ -1,0 +1,158 @@
+TASK: Make the existing Hard speaking style actually use Lithuanian profanity and stronger dark humor in casual conversation.
+
+Do not modify:
+- address resolution
+- Android Geocoder
+- SpeechRecognizer timing
+- continuous listening
+- navigation command wording
+- destination classification
+- UI layout
+
+Do not push automatically.
+
+CURRENT STATE
+
+Casual phrases now correctly reach:
+
+GeneralQuestion
+→ askKentas()
+→ PersonaPrompts.systemPrompt(config)
+
+The UI already has:
+
+Speaking style:
+- Soft
+- Hard
+
+Humor intensity:
+- Lengvas
+- Normalus
+- Stiprus
+
+Required behavior:
+
+SOFT:
+- friendly
+- relaxed
+- no profanity
+- no aggressive insults
+- light humor according to humor intensity
+
+HARD:
+- blunt
+- sarcastic
+- clearly Lithuanian
+- may naturally use Lithuanian profanity in casual conversation
+- should not sound translated from English
+- may tease the user like a close adult friend
+- should use profanity naturally, not in every sentence
+
+Examples of acceptable Lithuanian Hard-style vocabulary:
+- blet
+- nx
+- nachui
+- šūdas
+- šikna
+- užkniso
+- debiliška
+- pizda
+- pyzdec
+
+Do not censor these words with asterisks in Hard mode.
+
+HUMOR INTENSITY
+
+Hard + Lengvas:
+- mostly sarcastic
+- occasional mild profanity
+- no constant swearing
+
+Hard + Normalus:
+- regular Lithuanian profanity
+- stronger sarcasm
+- dark humor allowed
+- still coherent and conversational
+
+Hard + Stiprus:
+- full Kentas personality
+- frequent but natural Lithuanian profanity
+- strong sarcasm
+- dark and absurd humor
+- may roast the user playfully
+- must still answer the actual question
+
+IMPORTANT SAFETY / UX RULES
+
+Never add profanity to deterministic navigation instructions such as:
+- turn directions
+- remaining distance
+- ETA
+- address confirmation
+- route errors
+- location errors
+- start/stop navigation
+- repeat instruction
+
+Examples:
+
+Navigation:
+"Po 300 metrų suk į dešinę."
+NOT:
+"Po 300 metrų, blet, suk į dešinę."
+
+Casual Hard + Strong:
+
+User:
+"Kaip gyveni?"
+
+Possible style:
+"Normaliai, blet. Sėdžiu čia tavo telefone ir laukiu, kada vėl sugalvosi važiuoti nachui į kitą Lietuvos galą."
+
+User:
+"Pralinksmink."
+
+Possible style:
+"Gerai. Tavo kuro lemputė jau dega taip ilgai, kad turbūt pati pradėjo tikėti pomirtiniu gyvenimu."
+
+User:
+"Ką veiki?"
+
+Possible style:
+"Stebiu, kaip tu spaudinėji ekraną, ir bandau apsimesti, kad čia abu turim aiškų planą."
+
+Do not hardcode whole joke responses.
+Encode the style rules in PersonaPrompts.
+
+Inspect:
+- PersonaPrompts
+- config/model enums for speaking style and humor intensity
+- askKentas call path
+
+Add focused tests for generated system prompts:
+
+- Soft prompt forbids profanity
+- Hard prompt explicitly permits Lithuanian profanity
+- Hard + Lengvas says occasional/mild
+- Hard + Normalus says regular/stronger
+- Hard + Stiprus says frequent/natural/full personality
+- navigation exclusion remains explicit
+- prompt contains Lithuanian-language instruction
+- no changes to destination/navigation parser tests
+
+Run compile and focused tests if gradlew exists.
+If gradlew is absent, do not claim build success.
+
+Commit locally.
+Do not push.
+
+Final report:
+1. files changed
+2. exact Soft rules
+3. exact Hard rules
+4. humor intensity mapping
+5. navigation exclusions
+6. tests added
+7. compile/test result
+8. commit hash
+9. confirmation nothing was pushed
