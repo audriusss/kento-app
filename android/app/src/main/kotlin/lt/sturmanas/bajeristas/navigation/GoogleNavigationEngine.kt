@@ -99,13 +99,17 @@ class GoogleNavigationEngine : NavigationEngine {
     companion object {
         const val TAG = "GoogleNavEngine"
 
+        /** Minimum confidence score for a geocoder result to be accepted. */
+        const val SCORE_THRESHOLD = 3
+
         /**
          * Detects geocoding queries produced by [DestinationResolver] step C
          * (street + house number WITH a city component).
          * Capture groups: [1] street stem · [2] house number · [3] city name.
+         * Number group supports "61", "61A", "17-2", "12B", "5/7".
          */
         internal val STREET_QUERY_WITH_CITY = Regex(
-            """^([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž][^,\d]*?)\s+(\d+[a-zA-Z]?),\s*(.+?),\s*Lithuania\s*$"""
+            """^([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž][^,\d]*?)\s+(\d+(?:[a-zA-ZĄČĘĖĮŠŲŪŽąčęėįšųūž]|[-\/]\d+)?),\s*(.+?),\s*Lithuania\s*$"""
         )
 
         /**
@@ -113,19 +117,104 @@ class GoogleNavigationEngine : NavigationEngine {
          * Capture groups: [1] street stem · [2] house number.
          */
         internal val STREET_QUERY_NO_CITY = Regex(
-            """^([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž][^,\d]*?)\s+(\d+[a-zA-Z]?),\s*Lithuania\s*$"""
+            """^([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž][^,\d]*?)\s+(\d+(?:[a-zA-ZĄČĘĖĮŠŲŪŽąčęėįšųūž]|[-\/]\d+)?),\s*Lithuania\s*$"""
         )
 
         /**
-         * Validates raw geocoder result fields for a street + house-number lookup.
+         * Confidence score for a geocoder result against a street + house-number query.
          *
-         * Rejects when:
-         * - [thoroughfare] is blank → city-centre / administrative fallback, no real street
-         * - [subThoroughfare] is blank when [expectedNumber] was provided → house number missing
-         * - [locality] does not overlap [expectedLocality] → wrong city
+         * Scoring table:
+         *   +3  city matches   (locality or subAdminArea ⊇ expectedLocality, or vice versa)
+         *   +3  street matches (thoroughfare or featureName, after stripping type suffixes,
+         *                       contains the expected street stem)
+         *   +3  number matches (subThoroughfare, featureName, or formattedAddress ⊇ expectedNumber)
+         *   +1  Lithuania confirmed (formattedAddress mentions "Lietuva"/"Lithuania")
+         *   −5  no thoroughfare → city-only / administrative area result
+         *   −5  expected number absent from all address fields
+         *   −5  locality is present and does not match expected city
          *
-         * Intentionally takes plain String arguments (not Android [Address]) so that
-         * the validation logic is fully testable on the JVM without Robolectric.
+         * Accepts when score ≥ [SCORE_THRESHOLD].
+         * All arguments are plain Strings — no Android dependency — for full JVM testability.
+         */
+        internal fun scoreStreetResult(
+            thoroughfare: String?,
+            subThoroughfare: String?,
+            locality: String?,
+            subAdminArea: String?,
+            featureName: String?,
+            formattedAddress: String?,
+            expectedStreet: String?,
+            expectedNumber: String?,
+            expectedLocality: String?,
+        ): Int {
+            var score = 0
+            val tag = "KentasDestination"
+
+            // ── Thoroughfare / street match ────────────────────────────────
+            if (thoroughfare.isNullOrBlank()) {
+                score -= 5
+                Log.d(tag, "score: −5 no thoroughfare (city-centre fallback?)")
+            } else if (!expectedStreet.isNullOrBlank()) {
+                val normExp     = normalizeStreetText(expectedStreet)
+                val normStreet  = normalizeStreetText(thoroughfare)
+                val normFeature = normalizeStreetText(featureName ?: "")
+                val streetMatch = normStreet.contains(normExp) || normExp.contains(normStreet) ||
+                    (normFeature.isNotBlank() &&
+                        (normFeature.contains(normExp) || normExp.contains(normFeature)))
+                if (streetMatch) {
+                    score += 3
+                    Log.d(tag, "score: +3 street match thoroughfare='$thoroughfare'")
+                } else {
+                    Log.d(tag, "score: ±0 street mismatch '$thoroughfare' vs expected '$expectedStreet'")
+                }
+            }
+
+            // ── House number ───────────────────────────────────────────────
+            if (!expectedNumber.isNullOrBlank()) {
+                val numFound = listOf(subThoroughfare, featureName, formattedAddress)
+                    .any { it?.contains(expectedNumber, ignoreCase = true) == true }
+                if (numFound) {
+                    score += 3
+                    Log.d(tag, "score: +3 house number '$expectedNumber' found")
+                } else {
+                    score -= 5
+                    Log.d(tag, "score: −5 house number '$expectedNumber' not found in any field")
+                }
+            }
+
+            // ── City ───────────────────────────────────────────────────────
+            if (!expectedLocality.isNullOrBlank()) {
+                val normExp   = expectedLocality.trim().lowercase()
+                val cityMatch = listOf(locality, subAdminArea).any { loc ->
+                    if (loc.isNullOrBlank()) false
+                    else {
+                        val nl = loc.trim().lowercase()
+                        nl.contains(normExp) || normExp.contains(nl)
+                    }
+                }
+                if (cityMatch) {
+                    score += 3
+                    Log.d(tag, "score: +3 city match '${locality ?: subAdminArea}'")
+                } else if (!locality.isNullOrBlank()) {
+                    score -= 5
+                    Log.d(tag, "score: −5 wrong city locality='$locality' expected='$expectedLocality'")
+                }
+            }
+
+            // ── Country ────────────────────────────────────────────────────
+            if (formattedAddress?.contains("Lietuva", ignoreCase = true) == true ||
+                formattedAddress?.contains("Lithuania", ignoreCase = true) == true) {
+                score += 1
+                Log.d(tag, "score: +1 Lithuania confirmed")
+            }
+
+            Log.d(tag, "score: total=$score (threshold=$SCORE_THRESHOLD)")
+            return score
+        }
+
+        /**
+         * Thin boolean wrapper around [scoreStreetResult] for call sites that only
+         * have the basic geocoder fields.
          */
         internal fun isValidStreetResult(
             thoroughfare: String?,
@@ -133,28 +222,30 @@ class GoogleNavigationEngine : NavigationEngine {
             locality: String?,
             expectedNumber: String?,
             expectedLocality: String?,
-        ): Boolean {
-            if (thoroughfare.isNullOrBlank()) {
-                Log.d("KentasDestination",
-                    "isValidStreetResult: REJECT — no thoroughfare (city-centre fallback?)")
-                return false
-            }
-            if (!expectedNumber.isNullOrBlank() && subThoroughfare.isNullOrBlank()) {
-                Log.d("KentasDestination",
-                    "isValidStreetResult: REJECT — no subThoroughfare for expected number '$expectedNumber'")
-                return false
-            }
-            if (!expectedLocality.isNullOrBlank() && !locality.isNullOrBlank()) {
-                val cityMatch = locality.contains(expectedLocality, ignoreCase = true) ||
-                    expectedLocality.contains(locality, ignoreCase = true)
-                if (!cityMatch) {
-                    Log.d("KentasDestination",
-                        "isValidStreetResult: REJECT — locality='$locality' ≠ expected='$expectedLocality'")
-                    return false
-                }
-            }
-            return true
-        }
+        ): Boolean = scoreStreetResult(
+            thoroughfare     = thoroughfare,
+            subThoroughfare  = subThoroughfare,
+            locality         = locality,
+            subAdminArea     = null,
+            featureName      = null,
+            formattedAddress = null,
+            expectedStreet   = null,
+            expectedNumber   = expectedNumber,
+            expectedLocality = expectedLocality,
+        ) >= SCORE_THRESHOLD
+
+        /**
+         * Strips Lithuanian street-type suffixes and normalises a street name for
+         * fuzzy comparison (lowercase, remove type words, collapse whitespace).
+         */
+        private fun normalizeStreetText(text: String): String =
+            text.lowercase().trim()
+                .replace(
+                    Regex("""\b(g\.|gatvė|gatvę|gatve|pr\.|prospektas|prospektą|al\.|alėja|alėją|aleja|pl\.|plentas|plentą)\b"""),
+                    "",
+                )
+                .replace(Regex("""\s+"""), " ")
+                .trim()
 
         /**
          * Returns the query stripped of its locality suffix (everything before the
@@ -163,11 +254,6 @@ class GoogleNavigationEngine : NavigationEngine {
          * Used by the locality-stripped retry in [resolveAddress] to convert a
          * PlaceSearch query like "degalinė, Klaipėda" into just "degalinė" when
          * all full-query geocoding attempts have returned zero results.
-         *
-         * Examples:
-         *   "degalinė, Klaipėda" → "degalinė"
-         *   "degalinė near 55.7,21.1" → null  (no ", " separator)
-         *   "degalinė"           → null
          */
         internal fun stripLocalitySuffix(query: String): String? {
             val idx = query.indexOf(", ")
@@ -223,9 +309,10 @@ class GoogleNavigationEngine : NavigationEngine {
         val requestId    = ++currentRequestId
         // Detect street+number queries produced by DestinationResolver step C so we
         // can give a more actionable error message when all candidates fail.
-        val isStreetQuery = STREET_QUERY_WITH_CITY.containsMatchIn(destination) ||
-            STREET_QUERY_NO_CITY.containsMatchIn(destination)
-        Log.d(TAG, "startNavigation: requestId=$requestId isStreetQuery=$isStreetQuery")
+        val streetWithCityDetected = STREET_QUERY_WITH_CITY.containsMatchIn(destination)
+        val isStreetQuery          = streetWithCityDetected || STREET_QUERY_NO_CITY.containsMatchIn(destination)
+        val isStreetWithKnownCity  = streetWithCityDetected
+        Log.d(TAG, "startNavigation: requestId=$requestId isStreetQuery=$isStreetQuery isStreetWithKnownCity=$isStreetWithKnownCity")
 
         _state.value = _state.value.copy(
             destinationName = destination,
@@ -250,11 +337,15 @@ class GoogleNavigationEngine : NavigationEngine {
                         phase = NavigationPhase.IDLE,
                         errorMessage = "Adresas nerastas: $destination",
                     )
-                    // Street queries get a directed prompt; generic queries get the search failure.
-                    val errorMsg = if (isStreetQuery)
-                        "Pasakyk visą adresą su miestu."
-                    else
-                        "Nepavyko rasti \"$destination\". Pabandykite kitaip."
+                    // Street queries get a directed prompt based on whether the city was known.
+                    val errorMsg = when {
+                        isStreetQuery && isStreetWithKnownCity ->
+                            "Adreso tiksliai rasti nepavyko. Pasakyk gatvę, numerį ir miestą."
+                        isStreetQuery ->
+                            "Kuriame mieste yra šis adresas?"
+                        else ->
+                            "Nepavyko rasti \"$destination\". Pabandykite kitaip."
+                    }
                     onError(errorMsg)
                     return@withContext
                 }
@@ -584,22 +675,37 @@ class GoogleNavigationEngine : NavigationEngine {
             Log.d("KentasDestination",
                 "resolveStreetAddress: ${addresses.size} Geocoder result(s) for '$candidate'")
             for (addr in addresses) {
+                val formattedAddr = runCatching {
+                    (0..addr.maxAddressLineIndex).joinToString(", ") { addr.getAddressLine(it) }
+                }.getOrElse { "" }
                 Log.d("KentasDestination",
                     "resolveStreetAddress: result " +
                     "thoroughfare='${addr.thoroughfare}' " +
                     "subThoroughfare='${addr.subThoroughfare}' " +
                     "locality='${addr.locality}' " +
+                    "subAdminArea='${addr.subAdminArea}' " +
                     "featureName='${addr.featureName}' " +
+                    "formattedAddress='$formattedAddr' " +
                     "lat=${addr.latitude} lng=${addr.longitude}")
-                if (isValidStreetResult(
-                        addr.thoroughfare, addr.subThoroughfare, addr.locality,
-                        numberPart, cityPart,
-                    )
-                ) {
+                val score = scoreStreetResult(
+                    thoroughfare     = addr.thoroughfare,
+                    subThoroughfare  = addr.subThoroughfare,
+                    locality         = addr.locality,
+                    subAdminArea     = addr.subAdminArea,
+                    featureName      = addr.featureName,
+                    formattedAddress = formattedAddr,
+                    expectedStreet   = streetPart,
+                    expectedNumber   = numberPart,
+                    expectedLocality = cityPart,
+                )
+                if (score >= SCORE_THRESHOLD) {
                     val displayName = buildDisplayName(addr, "$streetPart $numberPart")
                     Log.d("KentasDestination",
-                        "resolveStreetAddress: ACCEPTED via Geocoder '$candidate' → name='$displayName'")
+                        "resolveStreetAddress: ACCEPTED score=$score via Geocoder '$candidate' → name='$displayName'")
                     return Triple(addr.latitude, addr.longitude, displayName)
+                } else {
+                    Log.d("KentasDestination",
+                        "resolveStreetAddress: REJECTED score=$score for '$candidate'")
                 }
             }
 

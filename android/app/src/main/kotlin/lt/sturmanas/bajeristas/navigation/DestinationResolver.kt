@@ -106,7 +106,19 @@ object DestinationResolver {
     // Case-insensitive first character: speech recognisers occasionally return lowercase.
 
     private val STREET_NUMBER_REGEX = Regex(
-        """^([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž][^,\d]*?)\s+(\d+[a-zA-Z]?)\s*$""",
+        // street part: starts with a Lithuanian letter, no commas or digits
+        // number part: base digits + optional single letter OR hyphen/slash + digits
+        //   e.g. "61", "61A", "17-2", "12B", "5/7"
+        """^([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž][^,\d]*?)\s+(\d+(?:[a-zA-ZĄČĘĖĮŠŲŪŽąčęėįšųūž]|[-\/]\d+)?)\s*$""",
+    )
+
+    // ── Abbreviated street-type detection ─────────────────────────────────────
+    // Matches abbreviated type suffixes already present in the street part
+    // (g., pr., al., pl.). When matched, gatvė variants are NOT appended.
+
+    private val STREET_ABBREV_REGEX = Regex(
+        """\b(?:g|pr|al|pl|blv|krant)\.""",
+        RegexOption.IGNORE_CASE,
     )
 
     // ── Coordinate pair ───────────────────────────────────────────────────
@@ -362,12 +374,38 @@ object DestinationResolver {
                 if (abbrev != null) add(abbrev)
                 // 3. Fully expanded canonical name
                 add("$expanded $numberPart$suffix")
-            } else if (!STREET_TYPE_REGEX.containsMatchIn(streetPart)) {
-                // 4. Unknown street — append "gatvė" (most common LT street type)
+            } else if (!STREET_TYPE_REGEX.containsMatchIn(streetPart) &&
+                       !STREET_ABBREV_REGEX.containsMatchIn(streetPart)) {
+                // 4. Unknown street without type suffix — generate gatvė variants.
+                //
+                // Lithuanian feminine adjectival street names (e.g. "Pietinė") require
+                // the genitive case before abbreviations: "Pietinė" → "Pietinės g."
+                // Rule applied: -ė ending → genitive by appending "s".
+                val genitive = genitiveForm(streetPart)
+                if (genitive != null) {
+                    // 4a. Genitive + "g." — most common abbreviated form in LT maps
+                    add("$genitive g. $numberPart$suffix")
+                }
+                // 4b. Original + "g." — nominative form; some geocoders accept it
+                add("$streetPart g. $numberPart$suffix")
+                // 4c. Original + "gatvė" — fully expanded, last resort
                 add("$streetPart gatvė $numberPart$suffix")
             }
         }.distinct()
     }
+
+    /**
+     * Returns the Lithuanian genitive form of an adjectival street-name stem for
+     * use before abbreviated type words (e.g. "g.", "al.").
+     *
+     * Rule: feminine adjectival stems ending in "-ė" form their genitive by
+     * appending "s" → "-ės".
+     * Example: "Pietinė" → "Pietinės", "Šiaurinė" → "Šiaurinės".
+     *
+     * Returns `null` when no known transformation applies.
+     */
+    private fun genitiveForm(stem: String): String? =
+        if (stem.endsWith("ė") || stem.endsWith("Ė")) "${stem}s" else null
 
     /**
      * Build an unambiguous geocoding query for a street + house number.

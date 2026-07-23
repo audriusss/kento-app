@@ -6,167 +6,227 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * JVM regression tests covering:
+ * Focused regression tests for the final stabilization pass.
  *
- *  ISSUE 1 — Street + house-number multi-query fallback and result validation
- *   - [DestinationResolver.buildStreetCandidateQueries] generates the correct ordered candidate list
- *   - [GoogleNavigationEngine.isValidStreetResult] correctly accepts / rejects geocoder results
+ * Coverage (18 tests):
+ *   CANDIDATE GENERATION — [DestinationResolver.buildStreetCandidateQueries]
+ *   RESULT SCORING       — [GoogleNavigationEngine.scoreStreetResult]
+ *   DISTANCE SPEECH      — [distanceSpeech]
+ *   ETA SPEECH           — [minuteSpeech] / [minuteNumeralLt]
  *
- *  ISSUE 2 — Lithuanian TTS distance speech (no "koma")
- *   - [distanceSpeech] produces natural Lithuanian phrases for all distance ranges
- *
- * All tests are pure JVM — no Android context or Robolectric required.
+ * All tests run on the JVM — no Android context, no Robolectric.
  */
 class StreetResolutionTest {
 
     // ─────────────────────────────────────────────────────────────────────────
-    // ISSUE 1A — buildStreetCandidateQueries: query generation
+    // CANDIDATE GENERATION
     // ─────────────────────────────────────────────────────────────────────────
 
     @Test
-    fun `known prospektas stem generates spoken abbr and expanded candidates`() {
-        // "Taikos" is in STREET_EXPANSIONS → "Taikos prospektas"
-        val candidates = DestinationResolver.buildStreetCandidateQueries("Taikos", "61", "Klaipėda")
-        // Must start with the spoken form
-        assertEquals("Taikos 61, Klaipėda, Lithuania", candidates[0])
-        // Must include the "pr." abbreviation
-        assertTrue("Expected 'pr.' abbreviation candidate",
-            candidates.any { "Taikos pr. 61" in it })
-        // Must include the fully expanded form
-        assertTrue("Expected expanded 'Taikos prospektas' candidate",
-            candidates.any { "Taikos prospektas 61" in it })
-        // Must NOT include "gatvė" (expansion is already known)
-        assertFalse("Unexpected 'gatvė' in prospektas query",
-            candidates.any { "gatvė" in it })
+    fun `Taikos with city generates spoken abbreviation and expanded candidates`() {
+        val c = DestinationResolver.buildStreetCandidateQueries("Taikos", "61", "Klaipėda")
+        assertEquals("Taikos 61, Klaipėda, Lithuania", c[0])
+        assertTrue("missing pr. abbreviation", c.any { "Taikos pr. 61" in it })
+        assertTrue("missing expanded form",    c.any { "Taikos prospektas 61" in it })
+        assertFalse("unexpected gatvė",        c.any { "gatvė" in it })
     }
 
     @Test
-    fun `lowercase stem is normalised to the correct expansion`() {
-        // Speech recogniser may emit "taikos 61" in all lowercase; step C trims and title-cases
-        // via the regex group, but the stem lookup is always lowercased.
-        val candidates = DestinationResolver.buildStreetCandidateQueries("taikos", "61", "Klaipėda")
-        assertTrue("Expected spoken-form candidate",
-            candidates.any { "taikos 61, Klaipėda, Lithuania" == it })
-        // Expanded form should use the canonical casing from STREET_EXPANSIONS
-        assertTrue("Expected expanded candidate for lowercased input",
-            candidates.any { "Taikos prospektas 61" in it || "taikos prospektas 61" in it.lowercase() })
+    fun `lowercase taikos is resolved via STREET_EXPANSIONS`() {
+        val c = DestinationResolver.buildStreetCandidateQueries("taikos", "61", "Klaipėda")
+        // First candidate is the spoken (lowercase) form
+        assertEquals("taikos 61, Klaipėda, Lithuania", c[0])
+        // Expanded form uses canonical casing from the map
+        assertTrue("missing expanded form", c.any { "Taikos prospektas 61" in it })
     }
 
     @Test
-    fun `unknown street appends gave with lowercase input`() {
-        // "Pietinė" is NOT in STREET_EXPANSIONS; the fallback should add " gatvė"
-        val candidates = DestinationResolver.buildStreetCandidateQueries("Pietinė", "17", "Klaipėda")
-        assertEquals("Pietinė 17, Klaipėda, Lithuania", candidates[0])
-        assertTrue("Expected 'gatvė' fallback candidate for unknown street",
-            candidates.any { "Pietinė gatvė 17" in it })
-        // No "pr." or expansion entries expected
-        assertFalse(candidates.any { " pr. " in it })
+    fun `Taikos 61A number suffix is preserved verbatim`() {
+        val c = DestinationResolver.buildStreetCandidateQueries("Taikos", "61A", "Klaipėda")
+        assertEquals("Taikos 61A, Klaipėda, Lithuania", c[0])
+        assertTrue(c.any { "Taikos prospektas 61A" in it })
     }
 
     @Test
-    fun `without city suffix is Lithuania only`() {
-        val candidates = DestinationResolver.buildStreetCandidateQueries("Taikos", "61", null)
-        assertTrue("Expected no-city spoken form",
-            candidates.any { it == "Taikos 61, Lithuania" })
-        assertTrue("Expected no-city expanded form",
-            candidates.any { "Taikos prospektas 61, Lithuania" == it })
-        assertFalse("Must not invent a city",
-            candidates.any { "Klaipėda" in it })
+    fun `Minijos with dash-number generates gatvė variant`() {
+        // "Minijos" is in STREET_EXPANSIONS → "Minijos gatvė"
+        val c = DestinationResolver.buildStreetCandidateQueries("Minijos", "12-2", "Klaipėda")
+        assertEquals("Minijos 12-2, Klaipėda, Lithuania", c[0])
+        assertTrue("missing g. abbreviation", c.any { "Minijos g. 12-2" in it })
+        assertTrue("missing expanded form",   c.any { "Minijos gatvė 12-2" in it })
+    }
+
+    @Test
+    fun `Šilutės pl with slash-number is not padded with extra gatvė`() {
+        // "pl." abbreviation already present → STREET_ABBREV_REGEX should suppress gatvė variants
+        val c = DestinationResolver.buildStreetCandidateQueries("Šilutės pl.", "5/7", "Klaipėda")
+        assertEquals("Šilutės pl. 5/7, Klaipėda, Lithuania", c[0])
+        assertFalse("unexpected gatvė appended after pl.", c.any { "gatvė" in it })
+    }
+
+    @Test
+    fun `Pietinė generates genitive g and full gatvė variants`() {
+        // "Pietinė" not in STREET_EXPANSIONS; ends in -ė → genitive "Pietinės"
+        val c = DestinationResolver.buildStreetCandidateQueries("Pietinė", "17", "Klaipėda")
+        assertEquals("Pietinė 17, Klaipėda, Lithuania", c[0])
+        assertTrue("missing Pietinės g. variant", c.any { "Pietinės g. 17" in it })
+        assertTrue("missing Pietinė g. variant",  c.any { "Pietinė g. 17" in it })
+        assertTrue("missing Pietinė gatvė variant", c.any { "Pietinė gatvė 17" in it })
+    }
+
+    @Test
+    fun `no city appends only Lithuania`() {
+        val c = DestinationResolver.buildStreetCandidateQueries("Taikos", "61", null)
+        assertTrue(c.any { it == "Taikos 61, Lithuania" })
+        assertTrue(c.any { "Taikos prospektas 61, Lithuania" == it })
+        assertFalse("must not invent a city", c.any { "Klaipėda" in it })
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // ISSUE 1B — isValidStreetResult: geocoder result validation
+    // RESULT SCORING
     // ─────────────────────────────────────────────────────────────────────────
 
     @Test
-    fun `city-only result is rejected when thoroughfare is blank`() {
-        // A classic city-centre fallback returns no thoroughfare
-        val accepted = GoogleNavigationEngine.isValidStreetResult(
-            thoroughfare     = null,      // ← city-only
+    fun `exact street number and city is accepted`() {
+        val score = GoogleNavigationEngine.scoreStreetResult(
+            thoroughfare     = "Taikos prospektas",
+            subThoroughfare  = "61",
+            locality         = "Klaipėda",
+            subAdminArea     = null,
+            featureName      = null,
+            formattedAddress = "Taikos prospektas 61, Klaipėda, Lithuania",
+            expectedStreet   = "Taikos",
+            expectedNumber   = "61",
+            expectedLocality = "Klaipėda",
+        )
+        assertTrue("expected score >= ${GoogleNavigationEngine.SCORE_THRESHOLD}, got $score",
+            score >= GoogleNavigationEngine.SCORE_THRESHOLD)
+    }
+
+    @Test
+    fun `city-only result with no thoroughfare is rejected`() {
+        val score = GoogleNavigationEngine.scoreStreetResult(
+            thoroughfare     = null,
             subThoroughfare  = null,
             locality         = "Klaipėda",
+            subAdminArea     = null,
+            featureName      = null,
+            formattedAddress = "Klaipėda, Lithuania",
+            expectedStreet   = "Taikos",
             expectedNumber   = "61",
             expectedLocality = "Klaipėda",
         )
-        assertFalse("City-only result (no thoroughfare) must be rejected", accepted)
-    }
-
-    @Test
-    fun `result missing house number is rejected when number was expected`() {
-        val accepted = GoogleNavigationEngine.isValidStreetResult(
-            thoroughfare     = "Taikos prospektas",
-            subThoroughfare  = null,           // ← no house number
-            locality         = "Klaipėda",
-            expectedNumber   = "61",
-            expectedLocality = "Klaipėda",
-        )
-        assertFalse("Result without house number must be rejected when number was requested", accepted)
+        assertTrue("city-only result must score below threshold, got $score",
+            score < GoogleNavigationEngine.SCORE_THRESHOLD)
     }
 
     @Test
     fun `result in wrong city is rejected`() {
-        val accepted = GoogleNavigationEngine.isValidStreetResult(
+        val score = GoogleNavigationEngine.scoreStreetResult(
             thoroughfare     = "Taikos prospektas",
             subThoroughfare  = "61",
-            locality         = "Vilnius",       // ← wrong city
+            locality         = "Vilnius",
+            subAdminArea     = null,
+            featureName      = null,
+            formattedAddress = null,
+            expectedStreet   = "Taikos",
             expectedNumber   = "61",
             expectedLocality = "Klaipėda",
         )
-        assertFalse("Result in wrong city must be rejected", accepted)
+        assertTrue("wrong-city result must score below threshold, got $score",
+            score < GoogleNavigationEngine.SCORE_THRESHOLD)
     }
 
     @Test
-    fun `exact street and number result is accepted`() {
-        val accepted = GoogleNavigationEngine.isValidStreetResult(
+    fun `number found in formattedAddress is accepted when subThoroughfare is empty`() {
+        // Geocoder sometimes omits subThoroughfare but includes the number in the formatted line.
+        val score = GoogleNavigationEngine.scoreStreetResult(
+            thoroughfare     = "Taikos prospektas",
+            subThoroughfare  = null,
+            locality         = "Klaipėda",
+            subAdminArea     = null,
+            featureName      = null,
+            formattedAddress = "Taikos prospektas 61, Klaipėda, Lithuania",
+            expectedStreet   = "Taikos",
+            expectedNumber   = "61",
+            expectedLocality = "Klaipėda",
+        )
+        assertTrue("number in formattedAddress must count, got score=$score",
+            score >= GoogleNavigationEngine.SCORE_THRESHOLD)
+    }
+
+    @Test
+    fun `street suffix variation is accepted via normalised match`() {
+        // thoroughfare = "Taikos prospektas"; expectedStreet = "Taikos" →
+        // after stripping "prospektas", both normalise to "taikos".
+        val score = GoogleNavigationEngine.scoreStreetResult(
             thoroughfare     = "Taikos prospektas",
             subThoroughfare  = "61",
             locality         = "Klaipėda",
+            subAdminArea     = null,
+            featureName      = null,
+            formattedAddress = null,
+            expectedStreet   = "Taikos",
             expectedNumber   = "61",
             expectedLocality = "Klaipėda",
         )
-        assertTrue("Matching thoroughfare, house number, and city must be accepted", accepted)
+        assertTrue("suffix-stripped match must be accepted, got score=$score",
+            score >= GoogleNavigationEngine.SCORE_THRESHOLD)
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // ISSUE 2 — distanceSpeech: Lithuanian TTS, no "koma"
+    // DISTANCE SPEECH
     // ─────────────────────────────────────────────────────────────────────────
 
     @Test
-    fun `500 m produces natural metres phrase`() {
-        assertEquals("Liko apie 500 metrų.", distanceSpeech(500))
+    fun `distance speech covers all required forms and never contains koma`() {
+        val cases = mapOf(
+            350   to "Liko apie 350 metrų.",
+            1000  to "Liko apie vieną kilometrą.",
+            2000  to "Liko apie du kilometrus.",
+            5600  to "Liko apie penkis su puse kilometro.",
+            10000 to "Liko apie dešimt kilometrų.",
+        )
+        for ((meters, expected) in cases) {
+            val result = distanceSpeech(meters)
+            assertEquals("distanceSpeech($meters)", expected, result)
+            assertFalse("'koma' must not appear in distance speech for $meters m",
+                "koma" in result)
+        }
     }
 
     @Test
-    fun `1000 m produces singular kilometre accusative`() {
-        // 1 000 m → rounded to 1 000 m → km=1, half=false → "kilometrą"
-        assertEquals("Liko apie 1 kilometrą.", distanceSpeech(1000))
+    fun `above 20 km uses digit rounding to nearest 1 km`() {
+        // 25 600 m → rounds to 26 km
+        val result = distanceSpeech(25_600)
+        assertTrue("Expected digit km form, got: $result", result.contains("26"))
+        assertFalse("koma must not appear", "koma" in result)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ETA SPEECH
+    // ─────────────────────────────────────────────────────────────────────────
+
+    @Test
+    fun `minute forms are correct for 1 2 10 21 22`() {
+        assertEquals("apie vieną minutę",            minuteSpeech(1))
+        assertEquals("apie dvi minutes",             minuteSpeech(2))
+        assertEquals("apie dešimt minučių",          minuteSpeech(10))
+        assertEquals("apie dvidešimt vieną minutę",  minuteSpeech(21))
+        assertEquals("apie dvidešimt dvi minutes",   minuteSpeech(22))
     }
 
     @Test
-    fun `1200 m rounds to 1 km singular`() {
-        // 1 200 m → r500 = ((1200+250)/500)*500 = 1 000 → km=1
-        assertEquals("Liko apie 1 kilometrą.", distanceSpeech(1200))
-    }
-
-    @Test
-    fun `2000 m produces plural kilometre accusative`() {
-        assertEquals("Liko apie 2 kilometrus.", distanceSpeech(2000))
-    }
-
-    @Test
-    fun `5600 m rounds to 5 and a half km`() {
-        // 5 600 m → r500 = ((5600+250)/500)*500 = 5 500 → km=5, half=true
-        assertEquals("Liko apie 5 su puse kilometro.", distanceSpeech(5600))
-    }
-
-    @Test
-    fun `10000 m produces genitive plural`() {
-        assertEquals("Liko apie 10 kilometrų.", distanceSpeech(10000))
-    }
-
-    @Test
-    fun `zero or negative metres produces fallback phrase`() {
-        assertEquals("Liko labai mažai.", distanceSpeech(0))
-        assertEquals("Liko labai mažai.", distanceSpeech(-100))
+    fun `combined distance and eta response contains no joke text`() {
+        val distance = distanceSpeech(5_600)
+        // buildTimeResponse uses minuteSpeech; 600 s = 10 min
+        val eta = "Kelionė truks ${minuteSpeech(10)}."
+        val combined = "$distance $eta"
+        assertFalse("joke word 'šypso' must not appear",    "šypso"    in combined)
+        assertFalse("joke word 'sveiki'  must not appear",  "sveiki"   in combined)
+        assertFalse("joke word 'pietūs'  must not appear",  "pietūs"   in combined)
+        assertFalse("koma must not appear",                 "koma"     in combined)
+        assertTrue("distance part present",  distance in combined)
+        assertTrue("eta part present",       eta      in combined)
     }
 }

@@ -13,6 +13,7 @@ import kotlinx.coroutines.launch
 import lt.sturmanas.bajeristas.voice.RecoveryPolicy
 import lt.sturmanas.bajeristas.navigation.CandidatePlace
 import lt.sturmanas.bajeristas.navigation.distanceSpeech
+import lt.sturmanas.bajeristas.navigation.minuteSpeech
 import lt.sturmanas.bajeristas.navigation.DestinationResolution
 import lt.sturmanas.bajeristas.navigation.DestinationResolver
 import lt.sturmanas.bajeristas.navigation.LocationProvider
@@ -1115,17 +1116,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     internal fun buildDistanceResponse(meters: Int): String = distanceSpeech(meters)
 
     internal fun buildTimeResponse(seconds: Int): String = when {
-        seconds <= 0  -> "Atvykimo laikas nežinomas."
-        seconds < 120 -> "Liko apie minutę."
+        seconds <= 0 -> "Atvykimo laikas nežinomas."
         else -> {
-            val mins = seconds / 60
-            "Atvyksime maždaug po $mins ${minutesForm(mins)}."
+            val mins = maxOf(1, (seconds + 30) / 60)   // round to nearest minute, min 1
+            "Kelionė truks ${minuteSpeech(mins)}."
         }
-    }
-
-    private fun minutesForm(n: Int): String = when {
-        n % 10 == 1 && n % 100 != 11         -> "minutės"
-        else                                   -> "minučių"
     }
 
     internal fun sustojimasForm(n: Int): String = when {
