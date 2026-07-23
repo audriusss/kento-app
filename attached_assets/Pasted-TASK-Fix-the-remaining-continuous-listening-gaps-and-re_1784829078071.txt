@@ -1,0 +1,251 @@
+TASK: Fix the remaining continuous-listening gaps and recognizer restart race on the navigation map screen.
+
+Do not modify:
+- address candidate generation
+- Geocoder scoring
+- route calculation
+- Lithuanian distance/ETA formatting
+- personality rules
+- UI layout except listening-state accuracy
+
+Do not push automatically.
+
+REAL DEVICE BEHAVIOR
+
+After a destination is found and the navigation map opens:
+
+- the app appears to be listening;
+- SpeechRecognizer repeatedly stops and restarts;
+- the listening state feels jerky;
+- the user must catch the exact moment when the recognizer is active;
+- speech is still sometimes cut off before the full sentence is captured.
+
+The user must be able to begin speaking naturally at almost any moment when Kentas is not speaking.
+
+ROOT PROBLEM TO TRACE
+
+Inspect every path that calls:
+
+- startListening
+- stopListening
+- cancel
+- destroy
+- scheduleOneRestart
+- notifyCommandDone
+- TTS onDone
+- navigation-screen lifecycle callbacks
+- continuous-mode enable/disable
+- onEndOfSpeech
+- onResults
+- onError
+
+Find whether multiple independent paths schedule recognizer restarts.
+
+Add temporary structured logging with tag:
+
+KentasVoiceLoop
+
+Log:
+
+- monotonic timestamp
+- recognizer generation ID
+- voice state
+- restart job ID/reason
+- startListening caller/reason
+- stop/cancel/destroy caller/reason
+- TTS speaking state
+- pending utterance state
+- callback received
+- callback ignored reason
+
+Do not spam RMS values.
+
+REQUIRED ARCHITECTURE
+
+Create one single owner for the continuous listening loop.
+
+Only one function may schedule the next recognizer start.
+
+Suggested API:
+
+requestListeningRestart(
+    reason: RestartReason,
+    delayMs: Long
+)
+
+It must:
+
+1. Cancel the previous restart job.
+2. Increment a restart token.
+3. Refuse to start while:
+   - TTS is speaking
+   - state is THINKING
+   - state is PROCESSING
+   - state is FINALIZING
+   - an utterance grace job is active
+   - continuous mode is disabled
+4. Start only if no recognizer session is currently active.
+5. Ignore stale jobs by token/generation.
+6. Never create two simultaneous SpeechRecognizer instances.
+
+Remove or delegate all other direct restart scheduling.
+
+VOICE LOOP STATES
+
+Use one authoritative state machine:
+
+IDLE
+STARTING
+LISTENING
+USER_SPEAKING
+FINALIZING
+PROCESSING
+THINKING
+SPEAKING
+RESTART_WAIT
+ERROR
+
+Rules:
+
+- startListening requested → STARTING
+- onReadyForSpeech → LISTENING
+- onBeginningOfSpeech → USER_SPEAKING
+- onEndOfSpeech → FINALIZING
+- utterance delivered → PROCESSING
+- AI request pending → THINKING
+- TTS begins → SPEAKING
+- TTS ends → RESTART_WAIT
+- restart succeeds → STARTING → LISTENING
+
+Never set IDLE between normal continuous-mode phases.
+
+The UI must show “Kentas klauso” only in:
+
+- LISTENING
+- USER_SPEAKING
+
+During STARTING or RESTART_WAIT show a neutral state such as:
+
+“Kentas ruošiasi klausyti…”
+
+Do not lie that the microphone is listening when it is not ready.
+
+AFTER NAVIGATION STARTS
+
+When the destination is accepted and the map opens:
+
+- do not destroy and recreate the recognizer because of composable navigation;
+- keep continuous mode ownership in MainViewModel or another lifecycle-stable owner;
+- cancel obsolete restart jobs from the previous screen;
+- schedule exactly one fresh recognizer start after the map is ready;
+- wait approximately 500–800 ms after route confirmation TTS finishes;
+- then remain in the listening loop.
+
+Do not let both:
+- navigation screen lifecycle
+and
+- TTS onDone
+
+schedule separate recognizer starts.
+
+LONGER LISTENING WINDOW
+
+Keep the existing silence extras, but increase only if needed:
+
+- possibly complete silence: 1800 ms
+- complete silence: 2800 ms
+- minimum speech length: 1800 ms
+
+Address and casual speech must not finalize after a short natural pause.
+
+If the device ignores the extras:
+
+- use the longest partial transcript;
+- do not deliver a bare street immediately;
+- allow up to 1800 ms grace for a probable incomplete address;
+- do not restart the recognizer during that grace.
+
+NO-MATCH / TIMEOUT LOOP
+
+For ERROR_NO_MATCH and ERROR_SPEECH_TIMEOUT:
+
+- do not enter IDLE;
+- transition to RESTART_WAIT;
+- restart once after 300–500 ms;
+- reset retry count after onReadyForSpeech;
+- do not announce an error to the user;
+- do not stack restart jobs.
+
+For ERROR_RECOGNIZER_BUSY:
+
+- cancel pending restart;
+- destroy the current recognizer once;
+- recreate after 800 ms;
+- prevent a destroy/recreate loop.
+
+For ERROR_CLIENT:
+
+- log the previous state and caller;
+- retry only once after 1000 ms;
+- do not loop continuously.
+
+OPTIONAL READY CUE
+
+Do not add spoken TTS cues.
+
+If a visual cue already exists, make it accurate:
+- pulsing red only while really listening;
+- stable neutral during restart wait.
+
+Do not add sounds or vibration in this task.
+
+TESTS
+
+Add focused tests for the voice-loop coordinator:
+
+- two restart requests result in only the newest one executing
+- stale restart token is ignored
+- restart blocked during TTS
+- restart blocked during FINALIZING
+- restart blocked while grace job is active
+- restart blocked when recognizer session is already active
+- TTS onDone schedules exactly one restart
+- map-screen activation schedules exactly one restart
+- NO_MATCH schedules one bounded retry
+- repeated NO_MATCH does not stack jobs
+- onReadyForSpeech resets retry count
+- UI listening flag is true only for LISTENING and USER_SPEAKING
+- continuous mode does not transition through IDLE during a normal loop
+
+Do not build a huge test suite.
+
+VERIFICATION
+
+Run:
+
+./gradlew :app:compileDebugKotlin
+./gradlew :app:testDebugUnitTest
+
+If gradlew is unavailable, state that clearly.
+
+Scan modified Kotlin files for malformed quotes.
+
+Commit locally.
+Do not push.
+
+FINAL REPORT
+
+Provide:
+
+1. Exact duplicate restart paths found
+2. Exact reason the map screen caused listening gaps
+3. Files changed
+4. Single-owner restart algorithm
+5. Final state transition table
+6. Final silence thresholds
+7. NO_MATCH / TIMEOUT / BUSY behavior
+8. Tests added
+9. Compile and test result
+10. Real-device checklist
+11. Commit hash
+12. Confirmation nothing was pushed
