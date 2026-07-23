@@ -100,6 +100,63 @@ class GoogleNavigationEngine : NavigationEngine {
         const val TAG = "GoogleNavEngine"
 
         /**
+         * Detects geocoding queries produced by [DestinationResolver] step C
+         * (street + house number WITH a city component).
+         * Capture groups: [1] street stem · [2] house number · [3] city name.
+         */
+        internal val STREET_QUERY_WITH_CITY = Regex(
+            """^([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž][^,\d]*?)\s+(\d+[a-zA-Z]?),\s*(.+?),\s*Lithuania\s*$"""
+        )
+
+        /**
+         * Same pattern but WITHOUT a city component: e.g. "Taikos 61, Lithuania".
+         * Capture groups: [1] street stem · [2] house number.
+         */
+        internal val STREET_QUERY_NO_CITY = Regex(
+            """^([A-ZĄČĘĖĮŠŲŪŽa-ząčęėįšųūž][^,\d]*?)\s+(\d+[a-zA-Z]?),\s*Lithuania\s*$"""
+        )
+
+        /**
+         * Validates raw geocoder result fields for a street + house-number lookup.
+         *
+         * Rejects when:
+         * - [thoroughfare] is blank → city-centre / administrative fallback, no real street
+         * - [subThoroughfare] is blank when [expectedNumber] was provided → house number missing
+         * - [locality] does not overlap [expectedLocality] → wrong city
+         *
+         * Intentionally takes plain String arguments (not Android [Address]) so that
+         * the validation logic is fully testable on the JVM without Robolectric.
+         */
+        internal fun isValidStreetResult(
+            thoroughfare: String?,
+            subThoroughfare: String?,
+            locality: String?,
+            expectedNumber: String?,
+            expectedLocality: String?,
+        ): Boolean {
+            if (thoroughfare.isNullOrBlank()) {
+                Log.d("KentasDestination",
+                    "isValidStreetResult: REJECT — no thoroughfare (city-centre fallback?)")
+                return false
+            }
+            if (!expectedNumber.isNullOrBlank() && subThoroughfare.isNullOrBlank()) {
+                Log.d("KentasDestination",
+                    "isValidStreetResult: REJECT — no subThoroughfare for expected number '$expectedNumber'")
+                return false
+            }
+            if (!expectedLocality.isNullOrBlank() && !locality.isNullOrBlank()) {
+                val cityMatch = locality.contains(expectedLocality, ignoreCase = true) ||
+                    expectedLocality.contains(locality, ignoreCase = true)
+                if (!cityMatch) {
+                    Log.d("KentasDestination",
+                        "isValidStreetResult: REJECT — locality='$locality' ≠ expected='$expectedLocality'")
+                    return false
+                }
+            }
+            return true
+        }
+
+        /**
          * Returns the query stripped of its locality suffix (everything before the
          * first ", ") if one is present, or `null` if there is nothing to strip.
          *
@@ -163,8 +220,12 @@ class GoogleNavigationEngine : NavigationEngine {
             return
         }
 
-        val requestId = ++currentRequestId
-        Log.d(TAG, "startNavigation: requestId=$requestId")
+        val requestId    = ++currentRequestId
+        // Detect street+number queries produced by DestinationResolver step C so we
+        // can give a more actionable error message when all candidates fail.
+        val isStreetQuery = STREET_QUERY_WITH_CITY.containsMatchIn(destination) ||
+            STREET_QUERY_NO_CITY.containsMatchIn(destination)
+        Log.d(TAG, "startNavigation: requestId=$requestId isStreetQuery=$isStreetQuery")
 
         _state.value = _state.value.copy(
             destinationName = destination,
@@ -189,7 +250,12 @@ class GoogleNavigationEngine : NavigationEngine {
                         phase = NavigationPhase.IDLE,
                         errorMessage = "Adresas nerastas: $destination",
                     )
-                    onError("Nepavyko rasti \"$destination\". Pabandykite kitaip.")
+                    // Street queries get a directed prompt; generic queries get the search failure.
+                    val errorMsg = if (isStreetQuery)
+                        "Pasakyk visą adresą su miestu."
+                    else
+                        "Nepavyko rasti \"$destination\". Pabandykite kitaip."
+                    onError(errorMsg)
                     return@withContext
                 }
 
@@ -388,6 +454,23 @@ class GoogleNavigationEngine : NavigationEngine {
             }
         }
 
+        // ── 1b. Street + number path ─────────────────────────────────────
+        // Queries from DestinationResolver step C always end with ", Lithuania".
+        // Route them to a dedicated path that tries multiple canonical variants and
+        // validates each Geocoder result (rejects city-only / no house number / wrong city).
+        val streetWithCity = STREET_QUERY_WITH_CITY.find(destination)
+        val streetNoCity   = STREET_QUERY_NO_CITY.find(destination)
+        val streetMatch    = streetWithCity ?: streetNoCity
+        if (streetMatch != null) {
+            val streetPart = streetMatch.groupValues[1].trim()
+            val numberPart = streetMatch.groupValues[2].trim()
+            val cityPart   = if (streetWithCity != null) streetMatch.groupValues[3].trim() else null
+            Log.d("KentasDestination",
+                "resolveAddress: routing to street+number path street='$streetPart' " +
+                "number='$numberPart' city='$cityPart'")
+            return resolveStreetAddress(context, streetPart, numberPart, cityPart)
+        }
+
         // ── 2–5. Android Geocoder (multi-attempt) ────────────────────────
         val hasLietuva = destination.contains("Lietuva", ignoreCase = true) ||
             destination.contains("Lithuania", ignoreCase = true)
@@ -464,6 +547,80 @@ class GoogleNavigationEngine : NavigationEngine {
             }
         }
 
+        return null
+    }
+
+    /**
+     * Resolves a street + house-number address by trying an ordered list of geocoding
+     * candidates produced by [DestinationResolver.buildStreetCandidateQueries].
+     *
+     * Each Android Geocoder result is validated with [isValidStreetResult]; results
+     * lacking a thoroughfare (city-centre fallback), missing a house number, or placed
+     * in the wrong city are rejected with a detailed log entry. Google Geocoding API is
+     * tried as a per-candidate fallback for devices where the system Geocoder is unreliable.
+     *
+     * Logs every attempt and rejection under tag "KentasDestination".
+     *
+     * @return `Triple(lat, lng, displayName)` for the first accepted result, or `null`
+     *   when all candidates fail (caller will speak "Pasakyk visą adresą su miestu.").
+     */
+    private suspend fun resolveStreetAddress(
+        context: Context,
+        streetPart: String,
+        numberPart: String,
+        cityPart: String?,
+    ): Triple<Double, Double, String>? {
+        val apiKey     = BuildConfig.GOOGLE_MAPS_API_KEY
+        val candidates = DestinationResolver.buildStreetCandidateQueries(streetPart, numberPart, cityPart)
+        Log.d("KentasDestination",
+            "resolveStreetAddress: ${candidates.size} candidate(s) for " +
+            "street='$streetPart' number='$numberPart' city='$cityPart': $candidates")
+
+        for (candidate in candidates) {
+            Log.d("KentasDestination", "resolveStreetAddress: trying '$candidate'")
+
+            // ── Android Geocoder ──────────────────────────────────────────
+            val addresses = geocodeWithAndroid(context, candidate)
+            Log.d("KentasDestination",
+                "resolveStreetAddress: ${addresses.size} Geocoder result(s) for '$candidate'")
+            for (addr in addresses) {
+                Log.d("KentasDestination",
+                    "resolveStreetAddress: result " +
+                    "thoroughfare='${addr.thoroughfare}' " +
+                    "subThoroughfare='${addr.subThoroughfare}' " +
+                    "locality='${addr.locality}' " +
+                    "featureName='${addr.featureName}' " +
+                    "lat=${addr.latitude} lng=${addr.longitude}")
+                if (isValidStreetResult(
+                        addr.thoroughfare, addr.subThoroughfare, addr.locality,
+                        numberPart, cityPart,
+                    )
+                ) {
+                    val displayName = buildDisplayName(addr, "$streetPart $numberPart")
+                    Log.d("KentasDestination",
+                        "resolveStreetAddress: ACCEPTED via Geocoder '$candidate' → name='$displayName'")
+                    return Triple(addr.latitude, addr.longitude, displayName)
+                }
+            }
+
+            // ── Google Geocoding API fallback (per candidate) ─────────────
+            if (apiKey.isNotBlank()) {
+                Log.d("KentasDestination", "resolveStreetAddress: Google API fallback for '$candidate'")
+                val result = geocodeWithGoogleApi(candidate, apiKey)
+                if (result != null) {
+                    Log.d("KentasDestination",
+                        "resolveStreetAddress: ACCEPTED via Google API '$candidate' " +
+                        "→ lat=${result.first} lng=${result.second} name='${result.third}'")
+                    return result
+                }
+                Log.d("KentasDestination",
+                    "resolveStreetAddress: Google API — no result for '$candidate'")
+            }
+        }
+
+        Log.w("KentasDestination",
+            "resolveStreetAddress: all ${candidates.size} candidate(s) failed/rejected " +
+            "for street='$streetPart' number='$numberPart' city='$cityPart'")
         return null
     }
 

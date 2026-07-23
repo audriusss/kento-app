@@ -264,17 +264,20 @@ object DestinationResolver {
         }
 
         // ── C. Street + number pattern ────────────────────────────────────
-        // Preserve the spoken form exactly — do not expand abbreviations here.
-        // Always append country so the Geocoder does not fall back to city centre.
-        // Format: "<street> <number>, <city>, Lithuania"  (or without city if unavailable)
+        // Build an ordered fallback list of geocoding queries. The first candidate
+        // (spoken form) is returned as ExactAddress; GoogleNavigationEngine will try
+        // all candidates in order and validate each result.
         val streetMatch = STREET_NUMBER_REGEX.find(trimmed)
         if (streetMatch != null) {
             val streetPart = streetMatch.groupValues[1].trim()
             val numberPart = streetMatch.groupValues[2].trim()
-            val query = buildStreetQuery(streetPart, numberPart, currentLocality)
-            Log.d(TAG, "resolve[C]: speech='$trimmed' street='$streetPart' number='$numberPart' " +
-                "locality='$currentLocality' query='$query'")
-            return DestinationResolution.ExactAddress(query)
+            val candidates = buildStreetCandidateQueries(streetPart, numberPart, currentLocality)
+            Log.d(TAG, "resolve[C]: speech='$trimmed' street='$streetPart' " +
+                "number='$numberPart' locality='$currentLocality'")
+            candidates.forEachIndexed { i, q ->
+                Log.d(TAG, "resolve[C]: candidate[$i]='$q'")
+            }
+            return DestinationResolution.ExactAddress(candidates.first())
         }
 
         // ── G. Multi-word fallback ─────────────────────────────────────────
@@ -311,22 +314,71 @@ object DestinationResolver {
     }
 
     /**
-     * Build an unambiguous geocoding query for a street + house number.
+     * Builds an ordered list of geocoding query strings for a street + house number.
      *
-     * Always appends "Lithuania" so the Geocoder cannot misroute the query to a
-     * city-centre result or a street in another country. Format:
-     * - `"<street> <number>, <city>, Lithuania"` when [locality] is known
-     * - `"<street> <number>, Lithuania"` when GPS city is unavailable
+     * The navigation engine tries each candidate in sequence and accepts the first
+     * result that passes validation (has a thoroughfare + house number, correct city).
+     *
+     * Priority order:
+     * 1. Spoken form — user's exact words, always tried first
+     * 2. Abbreviation (pr., g., al., pl.) — derived from [STREET_EXPANSIONS]
+     * 3. Fully expanded canonical name — from [STREET_EXPANSIONS]
+     * 4. With " gatvė" appended — for unknown streets where the type is implied
+     *    but not spoken (covers the majority of Lithuanian street names)
+     *
+     * Always appends "Lithuania" for unambiguous country-scoped geocoding.
+     *
+     * Examples:
+     * - "Taikos", "61", "Klaipėda" →
+     *     ["Taikos 61, Klaipėda, Lithuania",
+     *      "Taikos pr. 61, Klaipėda, Lithuania",
+     *      "Taikos prospektas 61, Klaipėda, Lithuania"]
+     * - "Pietinė", "17", "Klaipėda" →
+     *     ["Pietinė 17, Klaipėda, Lithuania",
+     *      "Pietinė gatvė 17, Klaipėda, Lithuania"]
+     */
+    internal fun buildStreetCandidateQueries(
+        streetPart: String,
+        numberPart: String,
+        locality: String?,
+    ): List<String> {
+        val suffix   = if (locality != null) ", $locality, Lithuania" else ", Lithuania"
+        val stem     = streetPart.lowercase().trim()
+        val expanded = STREET_EXPANSIONS[stem]   // e.g. "Taikos prospektas" or null
+
+        return buildList {
+            // 1. Spoken form — always first
+            add("$streetPart $numberPart$suffix")
+
+            if (expanded != null) {
+                // 2. Common abbreviation for the resolved street type
+                val abbrev: String? = when {
+                    "prospektas" in expanded -> "$streetPart pr. $numberPart$suffix"
+                    "alėja"      in expanded -> "$streetPart al. $numberPart$suffix"
+                    "plentas"    in expanded -> "$streetPart pl. $numberPart$suffix"
+                    "gatvė"      in expanded -> "$streetPart g. $numberPart$suffix"
+                    else                     -> null
+                }
+                if (abbrev != null) add(abbrev)
+                // 3. Fully expanded canonical name
+                add("$expanded $numberPart$suffix")
+            } else if (!STREET_TYPE_REGEX.containsMatchIn(streetPart)) {
+                // 4. Unknown street — append "gatvė" (most common LT street type)
+                add("$streetPart gatvė $numberPart$suffix")
+            }
+        }.distinct()
+    }
+
+    /**
+     * Build an unambiguous geocoding query for a street + house number.
+     * Returns the primary (spoken-form) candidate — identical to
+     * `buildStreetCandidateQueries(...).first()`.
      */
     internal fun buildStreetQuery(
         streetPart: String,
         numberPart: String,
         locality: String?,
-    ): String = if (locality != null) {
-        "$streetPart $numberPart, $locality, Lithuania"
-    } else {
-        "$streetPart $numberPart, Lithuania"
-    }
+    ): String = buildStreetCandidateQueries(streetPart, numberPart, locality).first()
 
     /** Build a location-biased query. Locality takes priority over raw coordinates. */
     internal fun buildLocationQuery(

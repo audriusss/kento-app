@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import lt.sturmanas.bajeristas.voice.RecoveryPolicy
 import lt.sturmanas.bajeristas.navigation.CandidatePlace
+import lt.sturmanas.bajeristas.navigation.distanceSpeech
 import lt.sturmanas.bajeristas.navigation.DestinationResolution
 import lt.sturmanas.bajeristas.navigation.DestinationResolver
 import lt.sturmanas.bajeristas.navigation.LocationProvider
@@ -1107,17 +1108,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // ── Response builders ─────────────────────────────────────────────────
 
-    internal fun buildDistanceResponse(meters: Int): String = when {
-        meters <= 0 || meters == Int.MAX_VALUE -> "Liko labai mažai."
-        meters < 100  -> "Liko apie $meters metrų."
-        meters < 1000 -> "Liko apie ${(meters / 50) * 50} metrų."
-        else -> {
-            val km = meters / 1000
-            val rem = (meters % 1000) / 100
-            if (rem == 0) "Liko apie $km ${kilometraiForm(km)}."
-            else "Liko apie $km koma $rem ${kilometraiForm(km)}."
-        }
-    }
+    /**
+     * Delegates to [distanceSpeech] — the single authoritative Lithuanian distance
+     * formatter. Never says "koma"; rounds to nearest 500 m bracket.
+     */
+    internal fun buildDistanceResponse(meters: Int): String = distanceSpeech(meters)
 
     internal fun buildTimeResponse(seconds: Int): String = when {
         seconds <= 0  -> "Atvykimo laikas nežinomas."
@@ -1126,12 +1121,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val mins = seconds / 60
             "Atvyksime maždaug po $mins ${minutesForm(mins)}."
         }
-    }
-
-    private fun kilometraiForm(n: Int): String = when {
-        n % 10 == 1 && n % 100 != 11         -> "kilometras"
-        n % 10 in 2..9 && n % 100 !in 11..19 -> "kilometrai"
-        else                                   -> "kilometrų"
     }
 
     private fun minutesForm(n: Int): String = when {

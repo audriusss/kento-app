@@ -1,0 +1,142 @@
+TASK: Fix only two remaining issues:
+1. short street-number address resolution;
+2. incorrect Lithuanian navigation speech.
+
+Do not add new features.
+Do not modify the continuous voice state machine.
+Do not redesign architecture.
+Modify only directly relevant files.
+Do not push automatically.
+
+ISSUE 1 — SHORT ADDRESS RESOLUTION
+
+Real-device behavior:
+
+"Taikos 61"
+sometimes asks to repeat the address or resolves only to Klaipėda.
+
+Expected:
+
+"Taikos 61"
+while current city is Klaipėda
+must resolve to the actual street address, not city centre.
+
+Required fix:
+
+For inputs matching:
+
+<street name> <house number>
+
+build and try an ordered query list:
+
+1. spoken form:
+   "Taikos 61, Klaipėda, Lithuania"
+
+2. common abbreviation:
+   "Taikos pr. 61, Klaipėda, Lithuania"
+
+3. expanded form:
+   "Taikos prospektas 61, Klaipėda, Lithuania"
+
+For ordinary streets also try:
+
+"Pietinė 17, Klaipėda, Lithuania"
+"Pietinės g. 17, Klaipėda, Lithuania"
+"Pietinė gatvė 17, Klaipėda, Lithuania"
+
+Do not blindly accept the first Geocoder result.
+
+Reject results that:
+- contain only the city name;
+- have no street/thoroughfare;
+- have no feature/building number when the input included one;
+- are clearly a city-centre fallback;
+- are outside the detected city when a city is known.
+
+Prefer results where:
+- locality matches current city;
+- thoroughfare name strongly matches spoken street;
+- feature name or subThoroughfare matches the house number.
+
+Log with KentasDestination:
+- raw input
+- parsed street
+- parsed number
+- detected city
+- every attempted query
+- every returned Address field
+- rejection reason
+- accepted result
+
+If no verified result remains, ask:
+"Pasakyk visą adresą su miestu."
+
+Do not route to a city-only result.
+
+ISSUE 2 — LITHUANIAN NAVIGATION SPEECH
+
+Current bad output examples:
+
+"Liko apie 5 koma 6 kilometrai."
+
+"Matyt, kažkas neturi laiko. Bet dabar važiuojam tiesiai apie šešis kilometrus. Gal spėsi dar pavakarieniauti!"
+
+Expected style:
+
+Short, factual, grammatically correct Lithuanian.
+
+Examples:
+
+"Liko 5,6 kilometro. Kelionė truks apie 10 minučių."
+
+"Liko apie 500 metrų."
+
+"Liko 1 kilometras."
+
+"Liko 2 kilometrai."
+
+"Liko 10 kilometrų."
+
+Rules:
+
+- Do not say "koma".
+- Use decimal comma in displayed text, but speak naturally.
+- Prefer rounding for TTS:
+  - 5.6 km -> "apie penkis su puse kilometro"
+  - 1.2 km -> "apie vieną kilometrą"
+  - below 1000 m -> meters
+- Use correct Lithuanian noun forms:
+  - 1 kilometras
+  - 2–9 kilometrai
+  - 10+ kilometrų
+- Keep route-status responses deterministic.
+- Do not send ETA/distance status through the AI personality prompt.
+- Do not add jokes or commentary to navigation facts.
+- AI jokes are allowed only when the user explicitly asks for a joke.
+
+Add 6–10 focused regression tests only.
+
+Tests must cover:
+- lowercase "taikos 61"
+- lowercase "pietinė 17"
+- city-only Geocoder result is rejected
+- wrong-city result is rejected
+- exact street+number result is accepted
+- 5.6 km TTS wording
+- 500 m wording
+- 1 km / 2 km / 10 km Lithuanian forms
+
+Run available tests once.
+If gradlew is unavailable, state that clearly.
+Commit locally.
+Do not push.
+
+FINAL REPORT:
+- root cause
+- files changed
+- exact query fallback order
+- result validation rules
+- new Lithuanian speech formatting
+- tests added
+- commit hash
+- confirmation nothing was pushed
