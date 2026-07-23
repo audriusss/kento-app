@@ -38,24 +38,37 @@ import lt.sturmanas.bajeristas.voice.VoiceListeningState
 /**
  * Reusable microphone button used on both [StartScreen] and [NavigationScreen].
  *
- * Visual states:
- * - [VoiceListeningState.IDLE]       — primary colour, mic icon
- * - [VoiceListeningState.LISTENING]  — red, pulsing scale animation, "Kentas klauso…"
- * - [VoiceListeningState.PROCESSING] — primary colour, spinner overlay
- * - [VoiceListeningState.ERROR]      — error colour, mic icon, error message
+ * ## Visual states
  *
- * When [sessionActive] is true and the state is IDLE (i.e. the session loop is running
- * but currently waiting for a restart), a green border ring is drawn around the button
- * to indicate that hands-free mode is on.
+ * | State           | Colour  | Animation | Inner widget   |
+ * |-----------------|---------|-----------|----------------|
+ * | IDLE            | primary | none      | mic icon       |
+ * | STARTING        | primary | none      | mic icon       |
+ * | LISTENING       | red     | pulsing   | mic icon       |
+ * | USER_SPEAKING   | red     | pulsing   | mic icon       |
+ * | FINALIZING      | red     | pulsing   | mic icon       |
+ * | PROCESSING      | primary | none      | spinner        |
+ * | THINKING        | primary | none      | spinner        |
+ * | SPEAKING        | primary | none      | mic icon       |
+ * | RESTART_WAIT    | primary | none      | mic icon       |
+ * | ERROR           | error   | none      | mic icon       |
+ *
+ * LISTENING / USER_SPEAKING / FINALIZING are the only states where the mic is
+ * genuinely hot — only they show red + pulsing.
+ *
+ * STARTING / RESTART_WAIT show a neutral primary colour so the user is never
+ * told "Kentas klauso" when the recognizer is not yet ready.
+ *
+ * The green session ring is shown when [sessionActive] is true and the state is
+ * one of IDLE, STARTING, RESTART_WAIT, SPEAKING — i.e. the hands-free loop is
+ * running but the mic is not currently active.
  *
  * @param state         Current recognition state, drives visuals.
- * @param statusText    Text shown below the button (partial result, error, "Išgirdau: …").
- * @param enabled       False when the safety system blocks conversation or the engine
- *                      is still initialising.
+ * @param statusText    Text shown below the button.
+ * @param enabled       False when permission is missing or engine not ready.
  * @param sessionActive True when the continuous hands-free session loop is running.
- *                      Adds a persistent indicator ring so the user knows mic is always-on.
  * @param size          Diameter of the circular button. Defaults to 64.dp.
- * @param onClick       Called when the button is tapped. Calls [MainViewModel.toggleSession].
+ * @param onClick       Called when the button is tapped.
  */
 @Composable
 fun MicButton(
@@ -67,12 +80,12 @@ fun MicButton(
     size: Dp = 64.dp,
     sessionActive: Boolean = false,
 ) {
-    // LISTENING and FINALIZING both show the "active mic" appearance (red, pulsing).
-    // FINALIZING = onEndOfSpeech received, waiting for onResults — still hot.
+    // Red + pulsing only while the microphone is genuinely hot.
     val isListening = state == VoiceListeningState.LISTENING ||
+                      state == VoiceListeningState.USER_SPEAKING ||
                       state == VoiceListeningState.FINALIZING
 
-    // Pulsing scale animation — runs while LISTENING or FINALIZING.
+    // Pulse animation — runs while mic is active.
     val infiniteTransition = rememberInfiniteTransition(label = "mic_pulse")
     val pulseScale by infiniteTransition.animateFloat(
         initialValue = 1f,
@@ -86,22 +99,20 @@ fun MicButton(
 
     val bgColor = when {
         !enabled -> Color.Gray
-        state == VoiceListeningState.LISTENING ||
-        state == VoiceListeningState.FINALIZING -> Color(0xFFD32F2F) // red while active
-        state == VoiceListeningState.ERROR       -> MaterialTheme.colorScheme.error
-        else -> MaterialTheme.colorScheme.primary
+        isListening -> Color(0xFFD32F2F)                      // red while mic is hot
+        state == VoiceListeningState.ERROR -> MaterialTheme.colorScheme.error
+        else -> MaterialTheme.colorScheme.primary             // neutral for all other states
     }
 
-    // Session-active ring: visible when hands-free loop is on but state is IDLE
-    // (loop is between TTS and next listen window).
-    val showSessionRing = sessionActive && state == VoiceListeningState.IDLE
+    // Session-active ring: shown when hands-free is on but the mic is not currently hot.
+    // Covers IDLE (stopped between sessions), STARTING, RESTART_WAIT, SPEAKING.
+    val showSessionRing = sessionActive && !isListening && state != VoiceListeningState.ERROR
     val sessionRingColor = Color(0xFF43A047) // green
 
     Column(
         modifier = modifier,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        // Outer box carries the session-active ring; inner box carries bg + scale animation.
         Box(
             modifier = if (showSessionRing)
                 Modifier
@@ -112,42 +123,48 @@ fun MicButton(
                 Modifier.size(size),
             contentAlignment = Alignment.Center,
         ) {
-        Box(
-            modifier = Modifier
-                .size(size)
-                .scale(pulseScale)
-                .background(color = bgColor, shape = CircleShape),
-            contentAlignment = Alignment.Center,
-        ) {
-            when (state) {
-                VoiceListeningState.PROCESSING -> {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(size * 0.55f),
-                        color = Color.White,
-                        strokeWidth = 3.dp,
-                    )
-                }
-                else -> {
-                    IconButton(
-                        onClick = { if (enabled) onClick() },
-                        modifier = Modifier.size(size),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Mic,
-                            contentDescription = when (state) {
-                                VoiceListeningState.LISTENING  -> "Kentas klauso"
-                                VoiceListeningState.FINALIZING -> "Kentas klauso"
-                                VoiceListeningState.PROCESSING -> "Apdorojama"
-                                VoiceListeningState.ERROR      -> "Klaida"
-                                VoiceListeningState.IDLE       -> "Kalbėti"
-                            },
-                            tint = Color.White,
-                            modifier = Modifier.size(size * 0.5f),
+            Box(
+                modifier = Modifier
+                    .size(size)
+                    .scale(pulseScale)
+                    .background(color = bgColor, shape = CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                when (state) {
+                    VoiceListeningState.PROCESSING,
+                    VoiceListeningState.THINKING -> {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(size * 0.55f),
+                            color = Color.White,
+                            strokeWidth = 3.dp,
                         )
+                    }
+                    else -> {
+                        IconButton(
+                            onClick = { if (enabled) onClick() },
+                            modifier = Modifier.size(size),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Mic,
+                                contentDescription = when (state) {
+                                    VoiceListeningState.LISTENING     -> "Kentas klauso"
+                                    VoiceListeningState.USER_SPEAKING -> "Kentas klauso"
+                                    VoiceListeningState.FINALIZING    -> "Kentas klauso"
+                                    VoiceListeningState.STARTING      -> "Kentas ruošiasi"
+                                    VoiceListeningState.RESTART_WAIT  -> "Kentas ruošiasi"
+                                    VoiceListeningState.SPEAKING      -> "Kentas kalba"
+                                    VoiceListeningState.PROCESSING    -> "Apdorojama"
+                                    VoiceListeningState.THINKING      -> "Kentas galvoja"
+                                    VoiceListeningState.ERROR         -> "Klaida"
+                                    VoiceListeningState.IDLE          -> "Kalbėti"
+                                },
+                                tint = Color.White,
+                                modifier = Modifier.size(size * 0.5f),
+                            )
+                        }
                     }
                 }
             }
-        }
         } // end outer session-ring Box
 
         if (statusText.isNotBlank()) {
@@ -170,7 +187,7 @@ fun MicButton(
 
 /**
  * Compact mic button row used on [StartScreen].
- * Shows the button centred with an "arba kalbėkite" label beside it.
+ * Shows the button centred with status text below.
  */
 @Composable
 fun StartScreenMicRow(

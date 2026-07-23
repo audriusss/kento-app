@@ -49,9 +49,15 @@ class TtsManager(context: Context) {
         private set
 
     /**
+     * Called when the TTS engine begins synthesising speech (onStart).
+     * Set from [MainViewModel] init to transition the voice loop to SPEAKING state.
+     */
+    var onStart: (() -> Unit)? = null
+
+    /**
      * Called when the current utterance finishes (success, error, or interrupted).
-     * Set once from [MainViewModel.setupRecognitionCallbacks] to restart the
-     * continuous listening loop after Kentas completes a TTS response.
+     * Set once from [MainViewModel] init to restart the continuous listening loop
+     * after Kentas completes a TTS response.
      */
     var onDone: (() -> Unit)? = null
 
@@ -153,6 +159,7 @@ class TtsManager(context: Context) {
             override fun onStart(utteranceId: String?) {
                 isSpeaking = true
                 Log.d(TAG, "utterance started: $utteranceId")
+                onStart?.invoke()
             }
 
             override fun onDone(utteranceId: String?) {

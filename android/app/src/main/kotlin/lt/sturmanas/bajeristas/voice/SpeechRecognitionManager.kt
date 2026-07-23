@@ -260,9 +260,15 @@ class SpeechRecognitionManager(private val appContext: Context) {
             //
             // String-key form used because some MIUI and Samsung ROMs require it
             // instead of the EXTRA_ constants.
-            putExtra("android.speech.extra.SPEECH_INPUT_MINIMUM_LENGTH_MILLIS", 1500)
-            putExtra("android.speech.extra.SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS", 1400)
-            putExtra("android.speech.extra.SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS", 2000)
+            // Increased from 1500/1400/2000 to 1800/1800/2800.
+            // Lithuanian addresses frequently have a natural pause between a street
+            // name and house number ("Taikos … 61") and casual sentences trail off
+            // naturally. Longer thresholds give the user room to finish without the
+            // recognizer cutting them off. The grace-window fallback in MainViewModel
+            // (requestListeningRestart guards) handles devices that ignore these extras.
+            putExtra("android.speech.extra.SPEECH_INPUT_MINIMUM_LENGTH_MILLIS", 1800)
+            putExtra("android.speech.extra.SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS", 1800)
+            putExtra("android.speech.extra.SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS", 2800)
         }
 
     /**
