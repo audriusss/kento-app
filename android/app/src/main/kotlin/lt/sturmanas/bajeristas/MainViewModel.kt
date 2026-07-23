@@ -74,10 +74,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         internal const val MAX_SESSION_RETRIES = 3
         /**
          * Grace window for a bare-street utterance (no house number detected).
-         * The recognizer is held idle for this long before processing "Taikos" alone,
-         * allowing a follow-up partial ("Taikos 61") to supersede the truncated result.
+         * Kept for backward compatibility with existing unit tests.
+         * New code should use the per-case constants below.
          */
         internal const val UTTERANCE_GRACE_MS = 900L
+
+        /**
+         * Grace window applied to a bare street name (no house number).
+         * Longer than [UTTERANCE_GRACE_MS] to complement the 2 000 ms
+         * [EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS] silence threshold —
+         * the recognizer may still fire before the user says the number.
+         */
+        internal const val GRACE_BARE_STREET_MS = 1400L
+
+        /**
+         * Grace window applied when the utterance ends with a Lithuanian conjunction
+         * ("ir", "bet", "nes", "kad", …) — the user is mid-sentence.
+         */
+        internal const val GRACE_INCOMPLETE_CONJUNCTION_MS = 1500L
+
+        /**
+         * Grace window applied to a short casual phrase that is neither a known
+         * navigation command nor a destination name.
+         * Provides a small buffer for natural sentence endings without delaying
+         * deterministic commands.
+         */
+        internal const val GRACE_CASUAL_SENTENCE_MS = 800L
     }
 
     // ── Audio output ──────────────────────────────────────────────────────
@@ -230,9 +252,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // ── True while microphone is listening ────────────────────────────────
 
-    /** True while LISTENING — blocks new TTS maneuver announcements. */
+    /**
+     * True while the microphone is active (LISTENING or FINALIZING).
+     * Blocks new TTS maneuver announcements so Kentas does not talk over the user.
+     *
+     * FINALIZING = onEndOfSpeech received, waiting for onResults — the recognizer is
+     * still processing audio so TTS must still be suppressed.
+     */
     val isSpeechBlocked: Boolean
-        get() = _voiceListeningState.value == VoiceListeningState.LISTENING
+        get() = _voiceListeningState.value.let {
+            it == VoiceListeningState.LISTENING || it == VoiceListeningState.FINALIZING
+        }
 
     // ── Init ──────────────────────────────────────────────────────────────
 
@@ -350,24 +380,58 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // Session produced a result → reset retry counter.
             sessionRetryCount = 0
 
-            // ── Utterance finalization policy ──────────────────────────────
-            //   Immediate:  address with a digit, or any known command.
-            //   Grace 900ms: bare destination name without a house number —
-            //                gives the recognizer time to produce a better
-            //                result in the next session rather than acting on
-            //                a truncated phrase.
-            val hasDigit  = effectiveText.any { it.isDigit() }
-            val isBareDest = !hasDigit && VoiceCommandParser.looksLikeDestination(
-                effectiveText, VoiceCommandParser.normalize(effectiveText))
+            // ── Per-case utterance finalization timing ─────────────────────
+            //
+            // Grace window is chosen based on the content of the utterance so
+            // that deterministic navigation commands remain snappy while bare
+            // street names and conjunction-ending casual sentences have enough
+            // time to receive a continuation before we act on a truncated phrase.
+            //
+            //  hasDigit            → 0 ms (immediate) — address already complete
+            //  isBareDest          → GRACE_BARE_STREET_MS (1 400 ms)
+            //  endsWithConjunction → GRACE_INCOMPLETE_CONJUNCTION_MS (1 500 ms)
+            //  known nav command   → 0 ms (immediate)
+            //  casual phrase       → GRACE_CASUAL_SENTENCE_MS (800 ms)
+            val normalizedText = VoiceCommandParser.normalize(effectiveText)
+            val hasDigit       = effectiveText.any { it.isDigit() }
+            val isBareDest     = !hasDigit &&
+                VoiceCommandParser.looksLikeDestination(effectiveText, normalizedText)
+            val endsConjunction = !hasDigit &&
+                VoiceCommandParser.endsWithIncompleteConjunction(normalizedText)
+
+            val graceMs: Long
+            val graceReason: String
+            when {
+                hasDigit -> {
+                    graceMs = 0L; graceReason = "hasDigit"
+                }
+                isBareDest -> {
+                    graceMs = GRACE_BARE_STREET_MS; graceReason = "bareStreet"
+                }
+                endsConjunction -> {
+                    graceMs = GRACE_INCOMPLETE_CONJUNCTION_MS; graceReason = "conjunction"
+                }
+                else -> {
+                    // Quick-classify to separate deterministic commands (0 ms) from
+                    // casual phrases that deserve a small trailing buffer (800 ms).
+                    val parsed = VoiceCommandParser.parse(effectiveText)
+                    val isNavCmd = parsed !is VoiceCommand.StartNavigation &&
+                        parsed !is VoiceCommand.GeneralQuestion
+                    graceMs = if (isNavCmd) 0L else GRACE_CASUAL_SENTENCE_MS
+                    graceReason = if (isNavCmd) "navCommand" else "casual"
+                }
+            }
 
             Log.d(SPEECH_TAG,
                 "ts=$ts gen=$myGen effectiveText='$effectiveText' " +
-                "hasDigit=$hasDigit isBareDest=$isBareDest")
+                "hasDigit=$hasDigit isBareDest=$isBareDest endsConj=$endsConjunction " +
+                "graceMs=$graceMs reason=$graceReason")
 
-            if (isBareDest) {
-                Log.d(SPEECH_TAG, "graceStarted ts=$ts gen=$myGen utterance='$effectiveText'")
+            if (graceMs > 0L) {
+                Log.d(SPEECH_TAG,
+                    "graceStarted ts=$ts gen=$myGen ms=$graceMs utterance='$effectiveText'")
                 pendingGraceJob = viewModelScope.launch {
-                    delay(UTTERANCE_GRACE_MS)
+                    delay(graceMs)
                     if (utteranceGeneration != myGen) {
                         Log.d(SPEECH_TAG,
                             "graceExpired: STALE gen=$myGen currentGen=$utteranceGeneration " +
@@ -395,12 +459,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         speechRecognitionManager.onListeningStopped = {
-            Log.d(LIFECYCLE_TAG, "SR: LISTENING_STOPPED")
-            Log.d(STABILITY_TAG, "LISTENING_STOPPED modeEnabled=${_continuousModeEnabled.value} listState=${_voiceListeningState.value}")
-            // In continuous mode a stopped cycle is immediately followed by a restart —
-            // keep the mic visually active (LISTENING) so the UI does not flicker.
-            if (!_continuousModeEnabled.value &&
-                _voiceListeningState.value == VoiceListeningState.LISTENING) {
+            Log.d(LIFECYCLE_TAG, "SR: LISTENING_STOPPED → FINALIZING")
+            Log.d(STABILITY_TAG,
+                "LISTENING_STOPPED modeEnabled=${_continuousModeEnabled.value} " +
+                "listState=${_voiceListeningState.value}")
+            if (_continuousModeEnabled.value) {
+                // Continuous mode: onResults has not arrived yet — enter FINALIZING.
+                // The mic visual stays red (same appearance as LISTENING) so the user
+                // sees no flicker. The recognizer must NOT restart until onResults fires.
+                _voiceListeningState.value = VoiceListeningState.FINALIZING
+            } else if (_voiceListeningState.value == VoiceListeningState.LISTENING) {
                 _voiceListeningState.value = VoiceListeningState.IDLE
             }
         }
@@ -571,6 +639,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     private fun scheduleOneRestart(delayMs: Long) {
         if (!_continuousModeEnabled.value) return
+        // Do not restart while an utterance finalization grace window is in flight.
+        // The grace coroutine will call finalizePendingUtterance() and then the normal
+        // command-done path (notifyCommandDone / ttsManager.onDone) triggers the next start.
+        if (pendingGraceJob?.isActive == true) {
+            Log.d(LIFECYCLE_TAG,
+                "scheduleOneRestart: pendingGraceJob active — deferring restart until grace completes")
+            return
+        }
         recoveringTextJob?.cancel()   // fast recovery — suppress "Atkuriamas…" text
         recoveringTextJob = null
         pendingRestartJob?.cancel()

@@ -67,9 +67,12 @@ fun MicButton(
     size: Dp = 64.dp,
     sessionActive: Boolean = false,
 ) {
-    val isListening = state == VoiceListeningState.LISTENING
+    // LISTENING and FINALIZING both show the "active mic" appearance (red, pulsing).
+    // FINALIZING = onEndOfSpeech received, waiting for onResults — still hot.
+    val isListening = state == VoiceListeningState.LISTENING ||
+                      state == VoiceListeningState.FINALIZING
 
-    // Pulsing scale animation — only runs while LISTENING.
+    // Pulsing scale animation — runs while LISTENING or FINALIZING.
     val infiniteTransition = rememberInfiniteTransition(label = "mic_pulse")
     val pulseScale by infiniteTransition.animateFloat(
         initialValue = 1f,
@@ -83,7 +86,8 @@ fun MicButton(
 
     val bgColor = when {
         !enabled -> Color.Gray
-        state == VoiceListeningState.LISTENING  -> Color(0xFFD32F2F) // red while listening
+        state == VoiceListeningState.LISTENING ||
+        state == VoiceListeningState.FINALIZING -> Color(0xFFD32F2F) // red while active
         state == VoiceListeningState.ERROR       -> MaterialTheme.colorScheme.error
         else -> MaterialTheme.colorScheme.primary
     }
@@ -132,6 +136,7 @@ fun MicButton(
                             imageVector = Icons.Default.Mic,
                             contentDescription = when (state) {
                                 VoiceListeningState.LISTENING  -> "Kentas klauso"
+                                VoiceListeningState.FINALIZING -> "Kentas klauso"
                                 VoiceListeningState.PROCESSING -> "Apdorojama"
                                 VoiceListeningState.ERROR      -> "Klaida"
                                 VoiceListeningState.IDLE       -> "Kalbėti"

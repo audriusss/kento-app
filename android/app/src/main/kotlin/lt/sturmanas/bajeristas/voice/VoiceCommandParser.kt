@@ -564,6 +564,43 @@ object VoiceCommandParser {
         patterns.any { text.contains(it) }
 
     /**
+     * True when [normalized] ends with a Lithuanian coordinating or subordinating
+     * conjunction that strongly suggests the speaker has not finished the sentence.
+     *
+     * Examples of trailing conjunctions that indicate incomplete speech:
+     *   "einam ir …"   → "ir"
+     *   "važiuojam nes…" → "nes"
+     *   "sakyk kai …"   → "kai"
+     *
+     * Used by [MainViewModel] to apply a longer grace window before finalizing
+     * an utterance whose last word is a dangling conjunction.
+     *
+     * @param normalized Lowercase, punctuation-stripped text (output of [normalize]).
+     */
+    internal fun endsWithIncompleteConjunction(normalized: String): Boolean {
+        val lastWord = normalized.trim().split(Regex("\\s+")).lastOrNull() ?: return false
+        return lastWord in INCOMPLETE_CONJUNCTIONS
+    }
+
+    private val INCOMPLETE_CONJUNCTIONS = setOf(
+        "ir",      // "and"
+        "bet",     // "but"
+        "nes",     // "because"
+        "kad",     // "that / so that"
+        "jeigu",   // "if"
+        "jei",     // "if" (short form)
+        "kai",     // "when / as"
+        "kur",     // "where"
+        "kaip",    // "how / as"
+        "kodėl",   // "why"
+        "tačiau",  // "however"
+        "arba",    // "or"
+        "nors",    // "although"
+        "kol",     // "while / until"
+        "iki",     // "until"
+    )
+
+    /**
      * Normalise for pattern matching:
      * lowercase → replace punctuation with space → collapse whitespace.
      * Lithuanian characters (ą č ę ė į š ų ū ž) are preserved.

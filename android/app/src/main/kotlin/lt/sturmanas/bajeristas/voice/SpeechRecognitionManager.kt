@@ -244,6 +244,25 @@ class SpeechRecognitionManager(private val appContext: Context) {
             putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, "lt-LT")
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+
+            // ── Silence thresholds ────────────────────────────────────────────
+            // Lithuanian speech often has a natural pause between a street name
+            // and the house number ("Taikos … 61") and between casual sentence
+            // fragments. Without these extras the platform default (~500 ms) cuts
+            // the utterance before the number is spoken.
+            //
+            // Values are intentionally generous so navigation commands still feel
+            // responsive while addresses and longer sentences have room to finish.
+            //
+            // Not all devices honour every extra — missing support is silent.
+            // RecognitionListener.onResults still arrives when the device decides
+            // the utterance is complete; these extras only extend the upper bound.
+            //
+            // String-key form used because some MIUI and Samsung ROMs require it
+            // instead of the EXTRA_ constants.
+            putExtra("android.speech.extra.SPEECH_INPUT_MINIMUM_LENGTH_MILLIS", 1500)
+            putExtra("android.speech.extra.SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS", 1400)
+            putExtra("android.speech.extra.SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS", 2000)
         }
 
     /**
