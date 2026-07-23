@@ -1,0 +1,309 @@
+TASK: Final voice-conversation stabilization for Kentas.
+
+Fix only:
+1. SpeechRecognizer cuts the user off too early.
+2. Conversation turn-taking feels jerky and interrupts longer sentences.
+3. Kentas casual replies should sound more naturally human in Lithuanian.
+
+Do not modify:
+- address resolution rules
+- Geocoder validation
+- navigation route logic
+- UI layout
+- waypoint logic
+- deterministic navigation wording
+
+Do not push automatically.
+
+REAL DEVICE PROBLEMS
+
+1. User says:
+   "Taikos 61"
+
+Sometimes only:
+   "Taikos"
+
+is captured.
+
+2. Longer casual sentences are interrupted before the user finishes.
+
+3. Kentas starts responding too quickly after a short silence.
+
+4. Continuous conversation feels jerky:
+   listening → stopped → answer → listening
+   transitions are too abrupt.
+
+5. Humor exists, but replies sometimes sound generated or forced rather than like a real Lithuanian person.
+
+PHASE 1 — TRACE THE REAL SPEECH LIFECYCLE
+
+Inspect the actual SpeechRecognizer Intent configuration and all callbacks:
+
+- EXTRA_PARTIAL_RESULTS
+- EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS
+- EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS
+- EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS
+- language model
+- calling package
+- onReadyForSpeech
+- onBeginningOfSpeech
+- onRmsChanged
+- onBufferReceived
+- onEndOfSpeech
+- onPartialResults
+- onResults
+- onError
+
+Use tag:
+KentasSpeechTiming
+
+Log timestamps and state transitions once, without duplicate spam.
+
+Before changing code, identify:
+- which callback currently causes the listening state to end;
+- whether the recognizer Intent uses explicit silence thresholds;
+- whether restartListening() happens before the utterance is finalized;
+- whether TTS completion triggers listening too quickly.
+
+PHASE 2 — MAKE THE RECOGNIZER WAIT LONGER
+
+Configure SpeechRecognizer for natural Lithuanian speech.
+
+Use these initial values unless device behavior proves they are unsupported:
+
+EXTRA_PARTIAL_RESULTS = true
+
+EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS:
+1500–2000 ms
+
+EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS:
+1200–1600 ms
+
+EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS:
+1800–2500 ms
+
+The goal is:
+- short navigation commands still feel responsive;
+- addresses have enough time for the number;
+- normal sentences are not cut after the first short pause.
+
+Do not rely on one fixed 900 ms post-result delay as the primary solution.
+
+Handle devices that ignore these extras gracefully.
+
+PHASE 3 — UTTERANCE AGGREGATION
+
+Implement a small utterance aggregator.
+
+Track:
+- latest partial transcript
+- latest final transcript
+- time of latest meaningful transcript change
+- recognizer generation/session ID
+- whether speech has actually begun
+- whether TTS is active
+- whether the utterance was already delivered
+
+Rules:
+
+1. Partial results update the candidate transcript only.
+2. Do not execute commands from partial results.
+3. Prefer the longest coherent transcript between partial and final.
+4. If final text is shorter than the latest partial and the partial starts with the final text, prefer the partial.
+5. If text looks incomplete, wait briefly for continuation.
+6. Never deliver the same utterance twice.
+7. A callback from an old recognizer generation must never execute.
+8. Do not restart the recognizer while an utterance finalization job is pending.
+9. Cancel all stale jobs on stop, error, screen disposal, or new recognizer generation.
+
+INCOMPLETE UTTERANCE HEURISTICS
+
+Treat as probably incomplete:
+- street word without a house number during destination input;
+- sentence ending with words such as:
+  "ir", "bet", "nes", "kad", "jeigu", "kai", "kur", "kaip", "kodėl";
+- one very short content word;
+- a transcript that changed within the last 700–1000 ms.
+
+Treat as complete:
+- destination with a number;
+- known navigation command;
+- question that has a complete interrogative structure;
+- explicit command such as:
+  "sustabdyk navigaciją"
+  "kiek liko"
+  "pakartok nurodymą"
+
+Use different timing:
+- known command: immediate after final result
+- address with number: immediate after final result
+- likely incomplete phrase: 1200–1800 ms grace
+- normal casual sentence: 700–1200 ms grace
+
+Do not add a long delay to every command.
+
+PHASE 4 — NATURAL TURN-TAKING
+
+Create explicit voice states if not already present:
+
+IDLE
+LISTENING
+USER_SPEAKING
+FINALIZING
+THINKING
+SPEAKING
+RECOVERING
+
+Rules:
+
+- onBeginningOfSpeech → USER_SPEAKING
+- onEndOfSpeech → FINALIZING, not immediately IDLE
+- while FINALIZING, do not restart recognizer
+- while THINKING, recognizer remains stopped
+- while TTS SPEAKING, recognizer remains stopped unless real barge-in is intentionally supported
+- after TTS completes, wait 300–600 ms before restarting listening
+- do not produce visible IDLE flicker between continuous-session phases
+- one state owner only; avoid multiple places writing conflicting state values
+
+Do not introduce full-duplex listening in this task.
+
+PHASE 5 — ERROR RECOVERY
+
+Handle:
+- ERROR_NO_MATCH
+- ERROR_SPEECH_TIMEOUT
+- ERROR_CLIENT
+- ERROR_RECOGNIZER_BUSY
+- ERROR_INSUFFICIENT_PERMISSIONS
+- ERROR_NETWORK
+- ERROR_SERVER
+
+Rules:
+
+- NO_MATCH / SPEECH_TIMEOUT:
+  quietly restart in continuous mode after a small backoff
+- RECOGNIZER_BUSY:
+  destroy and recreate once, then retry
+- CLIENT:
+  do not enter a tight retry loop
+- stale callbacks:
+  ignore by generation ID
+- never show "Kentas klauso" when the recognizer is actually stopped
+
+Use bounded retry counts and exponential or staged backoff.
+
+PHASE 6 — MAKE CASUAL SPEECH SOUND HUMAN
+
+Modify only the casual/personality prompt, not deterministic navigation replies.
+
+Kentas should:
+
+- answer the actual question first;
+- use short natural Lithuanian sentences;
+- vary sentence length;
+- avoid repeating the user's wording;
+- avoid explaining his persona;
+- avoid sounding like an assistant policy;
+- avoid forced joke setup in every response;
+- use humor contextually;
+- sometimes respond plainly without a joke;
+- use Lithuanian slang naturally in Hard mode;
+- not insert profanity mechanically into every sentence;
+- avoid translated English idioms;
+- avoid excessive metaphors;
+- avoid ending every answer with a question;
+- remember the immediately preceding conversational turn if context is already available.
+
+HARD + STRONG should sound like a real Lithuanian friend:
+- direct
+- sarcastic
+- spontaneous
+- sometimes dark
+- may swear naturally
+- must still be understandable
+- must not manufacture a joke when a normal response is better
+
+Example style:
+
+User:
+"Kaip gyveni?"
+
+Natural:
+"Normaliai, blet. Sėdžiu čia ir laukiu, kur tu mane šiandien nutempsi."
+
+Avoid:
+"Gyvenu puikiai! Štai humoristinis atsakymas pagal tavo pasirinktą režimą..."
+
+User:
+"Šiandien sunkiai dirbau."
+
+Natural:
+"Tai bent atsikvėpk. Nes dar truputį ir pats pradėsi mirksėt kaip alyvos lemputė."
+
+It does not need to swear in every reply.
+
+PHASE 7 — TESTS
+
+Add focused pure unit tests where possible.
+
+Target 12–18 tests.
+
+Speech aggregation:
+- final "Taikos", partial "Taikos 61" → selects "Taikos 61"
+- final and partial identical → executes once
+- stale generation callback ignored
+- pending grace cancelled by newer transcript
+- known command bypasses long grace
+- address with number bypasses long grace
+- bare street gets longer grace
+- incomplete conjunction ending gets longer grace
+- utterance cannot execute twice
+
+Turn-taking:
+- recognizer is not restarted during FINALIZING
+- recognizer is not restarted during TTS
+- listening restarts after TTS completion delay
+- NO_MATCH does not create a tight retry loop
+
+Prompt:
+- Hard prompt requests natural Lithuanian speech
+- Hard prompt says profanity must not appear mechanically in every reply
+- prompt says answer first, humor second
+- deterministic navigation remains excluded from AI
+
+Do not add huge integration suites.
+
+PHASE 8 — VERIFICATION
+
+Run from the directory containing gradlew:
+
+./gradlew :app:compileDebugKotlin
+./gradlew :app:testDebugUnitTest
+
+If gradlew is absent:
+- say so clearly
+- do not create a fake wrapper
+- do not claim build success
+
+Scan modified Kotlin files for malformed smart quotes.
+
+Commit locally.
+Do not push.
+
+FINAL REPORT
+
+Provide:
+1. Exact reason the user was cut off
+2. Existing SpeechRecognizer silence settings before the fix
+3. New silence settings
+4. Files changed
+5. Utterance aggregation algorithm
+6. State transition diagram
+7. Restart and retry behavior
+8. Human-sounding personality changes
+9. Tests added
+10. Compile/test result
+11. Real-device test checklist
+12. Known device limitations
+13. Commit hash
+14. Confirmation nothing was pushed
