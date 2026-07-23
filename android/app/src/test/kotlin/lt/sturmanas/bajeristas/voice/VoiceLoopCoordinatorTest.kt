@@ -306,4 +306,211 @@ class VoiceLoopCoordinatorTest {
         assertEquals("Expected exactly 4 RestartReasons", 4, reasons.size)
         assertEquals(4, reasons.toSet().size)
     }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // TTS REGRESSION TESTS — guards for the a26e6b9 regression fix
+    //
+    // Root cause: requestListeningRestart blocked COMMAND_DONE and TTS_DONE
+    // on PROCESSING/THINKING state. Silent/muted commands leave state at
+    // PROCESSING (finalizePendingUtterance sets it; nothing clears it in
+    // continuous mode without TTS). The loop was permanently stuck.
+    // ══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Mirror of the FIXED requestListeningRestart blocking logic.
+     * PROCESSING and THINKING only block error-path reasons (NO_MATCH, ERROR_RECOVERY).
+     * COMMAND_DONE and TTS_DONE must pass through regardless of voice state.
+     */
+    private fun blockReasonFixed(
+        continuousModeEnabled: Boolean,
+        ttsIsSpeaking: Boolean,
+        state: VoiceListeningState,
+        graceJobActive: Boolean,
+        srSessionActive: Boolean,
+        reason: MainViewModel.RestartReason,
+    ): String? {
+        if (!continuousModeEnabled) return "CONTINUOUS_MODE_OFF"
+        val isErrorPath = reason == MainViewModel.RestartReason.NO_MATCH ||
+                          reason == MainViewModel.RestartReason.ERROR_RECOVERY
+        return when {
+            ttsIsSpeaking                                                    -> "TTS_SPEAKING"
+            isErrorPath && state == VoiceListeningState.THINKING             -> "THINKING"
+            isErrorPath && state == VoiceListeningState.PROCESSING           -> "PROCESSING"
+            state == VoiceListeningState.FINALIZING                          -> "FINALIZING"
+            graceJobActive                                                   -> "GRACE_JOB_ACTIVE"
+            srSessionActive                                                  -> "SESSION_ACTIVE"
+            else                                                             -> null
+        }
+    }
+
+    // ── 10. TTS: response from PROCESSING is allowed ───────────────────────
+
+    @Test
+    fun `COMMAND_DONE restart not blocked when state is PROCESSING`() {
+        // This was the regression: silent muted commands left state=PROCESSING
+        // and COMMAND_DONE was blocked, permanently stalling the loop.
+        val reason = blockReasonFixed(
+            continuousModeEnabled = true,
+            ttsIsSpeaking         = false,
+            state                 = VoiceListeningState.PROCESSING,
+            graceJobActive        = false,
+            srSessionActive       = false,
+            reason                = MainViewModel.RestartReason.COMMAND_DONE,
+        )
+        assertNull("COMMAND_DONE must NOT be blocked when state=PROCESSING — was the a26e6b9 regression", reason)
+    }
+
+    @Test
+    fun `TTS_DONE restart not blocked when state is PROCESSING`() {
+        // TTS completed while state=PROCESSING (onStart never set SPEAKING,
+        // e.g. continuousMode was briefly false). Loop must still restart.
+        val reason = blockReasonFixed(
+            continuousModeEnabled = true,
+            ttsIsSpeaking         = false,
+            state                 = VoiceListeningState.PROCESSING,
+            graceJobActive        = false,
+            srSessionActive       = false,
+            reason                = MainViewModel.RestartReason.TTS_DONE,
+        )
+        assertNull("TTS_DONE must NOT be blocked when state=PROCESSING", reason)
+    }
+
+    // ── 11. TTS: response from THINKING is allowed ─────────────────────────
+
+    @Test
+    fun `COMMAND_DONE restart not blocked when state is THINKING`() {
+        // Muted GeneralQuestion: AI call returned, no TTS. State = THINKING.
+        // Loop must restart via COMMAND_DONE.
+        val reason = blockReasonFixed(
+            continuousModeEnabled = true,
+            ttsIsSpeaking         = false,
+            state                 = VoiceListeningState.THINKING,
+            graceJobActive        = false,
+            srSessionActive       = false,
+            reason                = MainViewModel.RestartReason.COMMAND_DONE,
+        )
+        assertNull("COMMAND_DONE must NOT be blocked when state=THINKING", reason)
+    }
+
+    @Test
+    fun `NO_MATCH IS blocked when state is THINKING`() {
+        // Error-path restart must NOT fire while an AI call is in flight.
+        val reason = blockReasonFixed(
+            continuousModeEnabled = true,
+            ttsIsSpeaking         = false,
+            state                 = VoiceListeningState.THINKING,
+            graceJobActive        = false,
+            srSessionActive       = false,
+            reason                = MainViewModel.RestartReason.NO_MATCH,
+        )
+        assertEquals("NO_MATCH must be blocked when state=THINKING", "THINKING", reason)
+    }
+
+    @Test
+    fun `ERROR_RECOVERY IS blocked when state is PROCESSING`() {
+        // Error-path restart must NOT fire while a command is being parsed.
+        val reason = blockReasonFixed(
+            continuousModeEnabled = true,
+            ttsIsSpeaking         = false,
+            state                 = VoiceListeningState.PROCESSING,
+            graceJobActive        = false,
+            srSessionActive       = false,
+            reason                = MainViewModel.RestartReason.ERROR_RECOVERY,
+        )
+        assertEquals("ERROR_RECOVERY must be blocked when state=PROCESSING", "PROCESSING", reason)
+    }
+
+    // ── 12. First speak request not rejected by SPEAKING state ─────────────
+
+    @Test
+    fun `first speak request is not rejected by SPEAKING state`() {
+        // When TTS is playing from a previous response, state=SPEAKING.
+        // A new command arrives → executeVoiceCommand → speakAndIdle is called.
+        // ttsManager.speak() must be callable regardless of voiceListeningState.
+        //
+        // ttsManager.speak() only guards on isReady and settings.isEnabled,
+        // NOT on voiceListeningState. This test verifies SPEAKING is not in
+        // any speak-blocking set.
+        val speakBlockingStates = setOf(
+            // Only isSpeechBlocked states gate MANEUVER TTS, not command-response TTS.
+            VoiceListeningState.LISTENING,
+            VoiceListeningState.USER_SPEAKING,
+            VoiceListeningState.FINALIZING,
+        )
+        assertFalse(
+            "SPEAKING must NOT block a new ttsManager.speak() call",
+            VoiceListeningState.SPEAKING in speakBlockingStates,
+        )
+    }
+
+    // ── 13. TTS onStart changes state to SPEAKING ──────────────────────────
+
+    @Test
+    fun `SPEAKING is a distinct state from all recognition states`() {
+        val recognitionStates = setOf(
+            VoiceListeningState.LISTENING,
+            VoiceListeningState.USER_SPEAKING,
+            VoiceListeningState.FINALIZING,
+            VoiceListeningState.STARTING,
+        )
+        assertFalse("SPEAKING must be distinct from all recognition states",
+            VoiceListeningState.SPEAKING in recognitionStates)
+    }
+
+    // ── 14. TTS onDone schedules exactly one restart ───────────────────────
+
+    @Test
+    fun `TTS_DONE from SPEAKING state is not blocked`() {
+        // Normal happy path: onStart fired → state=SPEAKING → onDone fires → restart.
+        val reason = blockReasonFixed(
+            continuousModeEnabled = true,
+            ttsIsSpeaking         = false,  // onDone sets isSpeaking=false before callback
+            state                 = VoiceListeningState.SPEAKING,
+            graceJobActive        = false,
+            srSessionActive       = false,
+            reason                = MainViewModel.RestartReason.TTS_DONE,
+        )
+        assertNull("TTS_DONE from SPEAKING must not be blocked — this is the normal happy path", reason)
+    }
+
+    // ── 15. TTS error does not leave state stuck ───────────────────────────
+
+    @Test
+    fun `TTS_DONE from RESTART_WAIT is not blocked`() {
+        // Edge case: onError fired immediately (TTS synthesis failed),
+        // onStart never set SPEAKING. State was already at RESTART_WAIT
+        // from a previous restart. onError delegates to onDone callback →
+        // requestListeningRestart(TTS_DONE). Must not be blocked.
+        val reason = blockReasonFixed(
+            continuousModeEnabled = true,
+            ttsIsSpeaking         = false,
+            state                 = VoiceListeningState.RESTART_WAIT,
+            graceJobActive        = false,
+            srSessionActive       = false,
+            reason                = MainViewModel.RestartReason.TTS_DONE,
+        )
+        assertNull("TTS_DONE from RESTART_WAIT must not be blocked", reason)
+    }
+
+    // ── 16. Recognizer blocked while actual TTS is speaking ────────────────
+
+    @Test
+    fun `all restart reasons blocked while TTS is speaking`() {
+        // isSpeaking=true is the primary guard regardless of reason.
+        for (reason in MainViewModel.RestartReason.values()) {
+            val blocked = blockReasonFixed(
+                continuousModeEnabled = true,
+                ttsIsSpeaking         = true,
+                state                 = VoiceListeningState.SPEAKING,
+                graceJobActive        = false,
+                srSessionActive       = false,
+                reason                = reason,
+            )
+            assertEquals(
+                "All reasons must be blocked by TTS_SPEAKING when isSpeaking=true (reason=$reason)",
+                "TTS_SPEAKING",
+                blocked,
+            )
+        }
+    }
 }

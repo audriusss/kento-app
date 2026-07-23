@@ -94,13 +94,27 @@ class TtsManager(context: Context) {
      * responses never queue up behind each other.
      */
     fun speak(text: String) {
-        if (!isReady || !settings.isEnabled) return
+        val ts = System.currentTimeMillis()
+        if (!isReady) {
+            Log.w(TTS_FLOW_TAG, "speak SKIPPED ts=$ts reason=TTS_NOT_READY text='${text.take(40)}'")
+            return
+        }
+        if (!settings.isEnabled) {
+            Log.w(TTS_FLOW_TAG, "speak SKIPPED ts=$ts reason=TTS_SETTINGS_DISABLED text='${text.take(40)}'")
+            return
+        }
         val cleaned = text.trim()
-        if (cleaned.isBlank()) return
-        // Set synchronously so callers (e.g. scheduleRestartIfSessionActive) can
-        // check isSpeaking immediately after speak() returns, before onStart fires.
-        // onStart will set it again (no-op); onDone/onError reset it to false.
+        if (cleaned.isBlank()) {
+            Log.w(TTS_FLOW_TAG, "speak SKIPPED ts=$ts reason=BLANK_TEXT")
+            return
+        }
+        // Set synchronously so callers can check isSpeaking immediately after speak()
+        // returns, before onStart fires. onStart will set it again (no-op).
+        // onDone / onError reset it to false.
         isSpeaking = true
+        Log.d(TTS_FLOW_TAG,
+            "speak REQUESTED ts=$ts isSpeaking=true length=${cleaned.length} " +
+            "text='${cleaned.take(60)}'")
         tts?.speak(cleaned, TextToSpeech.QUEUE_FLUSH, null, UTTERANCE_ID)
     }
 
@@ -157,34 +171,44 @@ class TtsManager(context: Context) {
     private fun registerProgressListener() {
         tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) {
+                val ts = System.currentTimeMillis()
                 isSpeaking = true
                 Log.d(TAG, "utterance started: $utteranceId")
+                Log.d(TTS_FLOW_TAG, "onStart ts=$ts utteranceId=$utteranceId isSpeaking=true")
                 onStart?.invoke()
             }
 
             override fun onDone(utteranceId: String?) {
+                val ts = System.currentTimeMillis()
                 isSpeaking = false
                 Log.d(TAG, "utterance done: $utteranceId")
+                Log.d(TTS_FLOW_TAG, "onDone ts=$ts utteranceId=$utteranceId isSpeaking=false → invoking onDone callback")
                 onDone?.invoke()
             }
 
-            @Deprecated("Required override — delegate to onError(String)")
+            @Deprecated("Required override — delegate to onError(String, Int)")
             override fun onError(utteranceId: String?) {
+                val ts = System.currentTimeMillis()
                 isSpeaking = false
                 Log.w(TAG, "utterance error (deprecated callback): $utteranceId")
+                Log.w(TTS_FLOW_TAG, "onError(deprecated) ts=$ts utteranceId=$utteranceId → delegating to onDone callback for recovery")
                 onDone?.invoke()
             }
 
             override fun onError(utteranceId: String?, errorCode: Int) {
+                val ts = System.currentTimeMillis()
                 isSpeaking = false
                 Log.w(TAG, "utterance error: utteranceId=$utteranceId errorCode=$errorCode")
+                Log.w(TTS_FLOW_TAG, "onError ts=$ts utteranceId=$utteranceId errorCode=$errorCode → delegating to onDone callback for recovery")
                 onDone?.invoke()
             }
         })
     }
 
     companion object {
-        private const val TAG = "TtsManager"
+        private const val TAG          = "TtsManager"
+        /** Temporary diagnostic tag — traces the full TTS invocation chain. */
+        private const val TTS_FLOW_TAG = "KentasTtsFlow"
         // A stable, non-null utterance ID is required to avoid the deprecated 3-arg speak() overload.
         private const val UTTERANCE_ID = "kentas"
     }

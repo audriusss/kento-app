@@ -76,7 +76,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
          * Every [requestListeningRestart] call and every blocking guard logs here with
          * monotonic timestamp, reason, token, and state so the full loop is traceable.
          */
-        private const val LOOP_TAG = "KentasVoiceLoop"
+        private const val LOOP_TAG     = "KentasVoiceLoop"
+
+        /**
+         * Temporary diagnostic tag — traces the full TTS invocation chain from
+         * recognized text through command parsing, speak request, UtteranceProgressListener
+         * callbacks, and the listening restart triggered by onDone.
+         * Search logcat with `KentasTtsFlow` to reconstruct one complete cycle.
+         */
+        private const val TTS_FLOW_TAG = "KentasTtsFlow"
 
         /** Maximum consecutive recoverable SR errors before the session loop stops itself. */
         internal const val MAX_SESSION_RETRIES = 3
@@ -312,9 +320,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         ttsManager.onStart = {
             val ts = System.currentTimeMillis()
             Log.d(LOOP_TAG, "TTS onStart ts=$ts continuousMode=${_continuousModeEnabled.value}")
+            Log.d(TTS_FLOW_TAG,
+                "onStart→MainViewModel ts=$ts continuousMode=${_continuousModeEnabled.value} " +
+                "voiceState=${_voiceListeningState.value}")
             if (_continuousModeEnabled.value) {
                 _voiceListeningState.value = VoiceListeningState.SPEAKING
                 _sessionState.value = VoiceSessionState.Speaking
+                Log.d(TTS_FLOW_TAG, "onStart→MainViewModel: state set to SPEAKING")
+            } else {
+                Log.d(TTS_FLOW_TAG, "onStart→MainViewModel: continuousMode=off, SPEAKING not set")
             }
         }
 
@@ -323,9 +337,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         ttsManager.onDone = {
             val ts = System.currentTimeMillis()
             Log.d(LOOP_TAG, "TTS onDone ts=$ts continuousMode=${_continuousModeEnabled.value}")
+            Log.d(TTS_FLOW_TAG,
+                "onDone→MainViewModel ts=$ts continuousMode=${_continuousModeEnabled.value} " +
+                "voiceState=${_voiceListeningState.value}")
             Log.d(LIFECYCLE_TAG, "TTS onDone: sessionActive=${_continuousModeEnabled.value}")
             if (_continuousModeEnabled.value) {
+                Log.d(TTS_FLOW_TAG, "onDone→MainViewModel: requesting restart TTS_DONE delay=500ms")
                 requestListeningRestart(RestartReason.TTS_DONE, 500L)
+            } else {
+                Log.d(TTS_FLOW_TAG, "onDone→MainViewModel: continuousMode=off, no restart")
             }
         }
     }
@@ -709,14 +729,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             Log.d(LOOP_TAG, "restart[$reason] ts=$ts: BLOCKED continuousMode=off")
             return
         }
+        // PROCESSING / THINKING block only error-recovery restarts (NO_MATCH, ERROR_RECOVERY)
+        // to prevent a stale retry from interrupting an in-progress command or AI call.
+        //
+        // COMMAND_DONE and TTS_DONE are NEVER blocked by these states:
+        //  - COMMAND_DONE: state is still PROCESSING after a silent/muted command completes
+        //    because finalizePendingUtterance sets PROCESSING and nothing clears it when
+        //    TTS is not called. Blocking here would permanently stall the loop.
+        //  - TTS_DONE: TTS already finished; safe to restart regardless of voice state.
+        val isErrorPath = reason == RestartReason.NO_MATCH ||
+                          reason == RestartReason.ERROR_RECOVERY
+
         val blocked = when {
-            ttsManager.isSpeaking                             -> "TTS_SPEAKING"
-            state == VoiceListeningState.THINKING             -> "THINKING"
-            state == VoiceListeningState.PROCESSING           -> "PROCESSING"
-            state == VoiceListeningState.FINALIZING           -> "FINALIZING"
-            pendingGraceJob?.isActive == true                 -> "GRACE_JOB_ACTIVE"
-            speechRecognitionManager.isSessionActive          -> "SESSION_ACTIVE"
-            else                                              -> null
+            ttsManager.isSpeaking                                        -> "TTS_SPEAKING"
+            isErrorPath && state == VoiceListeningState.THINKING         -> "THINKING"
+            isErrorPath && state == VoiceListeningState.PROCESSING       -> "PROCESSING"
+            state == VoiceListeningState.FINALIZING                      -> "FINALIZING"
+            pendingGraceJob?.isActive == true                            -> "GRACE_JOB_ACTIVE"
+            speechRecognitionManager.isSessionActive                     -> "SESSION_ACTIVE"
+            else                                                         -> null
         }
         if (blocked != null) {
             Log.d(LOOP_TAG, "restart[$reason] ts=$ts: BLOCKED by $blocked — skip")
@@ -773,18 +804,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      *
      * - If TTS is speaking: [ttsManager.onDone] will fire [requestListeningRestart] —
      *   nothing to do here (avoid scheduling a duplicate restart).
-     * - If TTS is not speaking: request a restart now via the single owner.
-     *   [requestListeningRestart] will block the request if any other condition
-     *   (PROCESSING, FINALIZING, grace job, session active) is true.
+     * - If TTS is not speaking (silent / muted command): request a restart now via the
+     *   single owner. [requestListeningRestart] with reason COMMAND_DONE is NOT blocked
+     *   by PROCESSING or THINKING state — a silent command leaves state at PROCESSING
+     *   because there is no TTS onStart to transition it to SPEAKING, and blocking here
+     *   would permanently stall the loop.
      */
     private fun notifyCommandDone() {
         if (!_continuousModeEnabled.value) return
-        val ts = System.currentTimeMillis()
+        val ts    = System.currentTimeMillis()
+        val state = _voiceListeningState.value
         if (ttsManager.isSpeaking) {
-            Log.d(LOOP_TAG, "notifyCommandDone ts=$ts: TTS speaking → defer to onDone")
+            Log.d(LOOP_TAG,    "notifyCommandDone ts=$ts: TTS speaking → defer to onDone")
+            Log.d(TTS_FLOW_TAG, "notifyCommandDone ts=$ts: isSpeaking=true → no restart (onDone will handle)")
             return
         }
-        Log.d(LOOP_TAG, "notifyCommandDone ts=$ts: silent path → requestListeningRestart(COMMAND_DONE, 300ms)")
+        Log.d(LOOP_TAG,    "notifyCommandDone ts=$ts: silent path state=$state → requestListeningRestart(COMMAND_DONE, 300ms)")
+        Log.d(TTS_FLOW_TAG, "notifyCommandDone ts=$ts: isSpeaking=false state=$state → COMMAND_DONE restart")
         requestListeningRestart(RestartReason.COMMAND_DONE, 300L)
     }
 
@@ -805,6 +841,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val command = VoiceCommandParser.parse(text)
         Log.d(TAG, "parsed command: ${command::class.simpleName} from '$text'")
         Log.d("KentasFlow", "voice command parsed: ${command::class.simpleName}")
+        Log.d(TTS_FLOW_TAG,
+            "executeVoiceCommand recognizedText='${text.take(80)}' " +
+            "command=${command::class.simpleName} isMuted=$isMuted " +
+            "voiceState=${_voiceListeningState.value} isSpeaking=${ttsManager.isSpeaking}")
 
         when (command) {
             is VoiceCommand.RemainingDistance -> {
@@ -1424,10 +1464,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun speakAndIdle(msg: String, isMuted: Boolean) {
-        // In continuous mode the mic stays visually active (LISTENING) while TTS plays.
+        val ts = System.currentTimeMillis()
+        val stateBeforeSpeak = _voiceListeningState.value
+        val isSpeakingBefore = ttsManager.isSpeaking
+        Log.d(TTS_FLOW_TAG,
+            "speakAndIdle ts=$ts isMuted=$isMuted msgLength=${msg.length} " +
+            "voiceStateBefore=$stateBeforeSpeak isSpeakingBefore=$isSpeakingBefore " +
+            "continuousMode=${_continuousModeEnabled.value} text='${msg.take(60)}'")
+
+        // In continuous mode the mic stays visually active while TTS plays.
         if (!_continuousModeEnabled.value) _voiceListeningState.value = VoiceListeningState.IDLE
         _voiceStatusText.value = msg
-        if (!isMuted && msg.isNotBlank()) ttsManager.speak(msg)
+
+        if (isMuted) {
+            Log.d(TTS_FLOW_TAG, "speakAndIdle ts=$ts: SPEAK SKIPPED reason=MUTED")
+        } else if (msg.isBlank()) {
+            Log.d(TTS_FLOW_TAG, "speakAndIdle ts=$ts: SPEAK SKIPPED reason=BLANK_MSG")
+        } else {
+            Log.d(TTS_FLOW_TAG, "speakAndIdle ts=$ts: calling ttsManager.speak()")
+            ttsManager.speak(msg)
+        }
     }
 
     private fun scheduleStatusClear(delayMs: Long) {
