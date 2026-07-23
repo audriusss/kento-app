@@ -1,0 +1,93 @@
+REGRESSION FIX ONLY: Kentas now listens correctly but produces no spoken TTS response after commit a26e6b9.
+
+Do not change the working SpeechRecognizer restart coordinator.
+Do not modify address recognition, silence thresholds, navigation logic, personality prompts, or UI layout.
+Do not push.
+
+Trace one complete successful flow:
+
+recognized user text
+→ command parsing
+→ AI/navigation response created
+→ speak function requested
+→ TtsManager.speak()
+→ UtteranceProgressListener.onStart
+→ onDone
+→ listening restart
+
+Add temporary logs using tag:
+
+KentasTtsFlow
+
+Log:
+- recognized text
+- parsed command type
+- response text length
+- every speak request
+- reason a speak request is skipped
+- voice state before speak
+- ttsManager.isSpeaking
+- UtteranceProgressListener onStart/onDone/onError
+- restart request after onDone
+
+Inspect the regression introduced in:
+- VoiceListeningState.kt
+- TtsManager.kt
+- MainViewModel.kt
+
+Most likely checks:
+
+1. Verify TtsManager.onStart was added without replacing or breaking the existing onDone/onError listener behavior.
+
+2. Verify speak() still calls:
+   textToSpeech.speak(...)
+
+3. Verify MainViewModel does not block TTS merely because state is PROCESSING or THINKING.
+   Speech recognition blocking and TTS permission are separate concepts.
+
+4. Verify the response callback transitions:
+   PROCESSING/THINKING
+   → call ttsManager.speak(response)
+   → SPEAKING only from the actual TTS onStart callback.
+
+5. Do not set SPEAKING before calling speak() if that causes the speak guard to reject the request.
+
+6. Verify any guard such as:
+   if (isSpeechBlocked())
+   if (voiceState == ...)
+   if (ttsManager.isSpeaking)
+does not reject the first legitimate response.
+
+7. Verify navigation deterministic responses and casual AI responses both use the same functioning speak path.
+
+8. If TTS initialization is asynchronous, preserve queued speech requests until initialization succeeds.
+
+Required fix:
+- Keep recognizer stopped while TTS speaks.
+- Allow the first valid TTS request from PROCESSING or THINKING.
+- Set SPEAKING from TTS onStart.
+- On TTS onDone, transition to RESTART_WAIT and request exactly one listening restart.
+- On TTS error, recover to RESTART_WAIT and restart listening without getting stuck.
+
+Add focused tests:
+- response produced in THINKING is allowed to call speak
+- response produced in PROCESSING is allowed to call speak
+- first speak request is not rejected by SPEAKING state
+- TTS onStart changes state to SPEAKING
+- TTS onDone schedules exactly one restart
+- TTS error does not leave state stuck
+- recognizer remains blocked while actual TTS is speaking
+
+Run compile/tests if gradlew exists.
+Scan modified Kotlin files.
+Commit locally, do not push.
+
+Final report:
+1. exact regression cause
+2. files changed
+3. broken state transition before fix
+4. corrected state transition
+5. tests
+6. compile result
+7. commit hash
+8. confirmation nothing pushed
