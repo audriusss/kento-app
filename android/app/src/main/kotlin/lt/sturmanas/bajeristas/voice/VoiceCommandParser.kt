@@ -308,6 +308,53 @@ object VoiceCommandParser {
         "sustabdyk klausyma",
     )
 
+    // ── Casual / personality patterns ─────────────────────────────────────
+    // These phrases express entertainment, emotion, or personal conversation.
+    // They are checked in parse() right before looksLikeDestination so that
+    // phrases without a clear navigation/address signal reach GeneralQuestion
+    // (→ AI personality) rather than being mis-routed to DestinationResolver.
+    //
+    // Pattern philosophy: err on the side of personality — if a phrase cannot
+    // be a place name or navigation command, forward it to Kentas.
+
+    internal val CASUAL_PATTERNS = listOf(
+        // Entertainment requests
+        "pralinksmink",     // "cheer me up"
+        "palinksmin",       // "entertain me"
+        "linksmink",
+        "prajuokink",
+        "juokink",
+        "anekdot",          // "tell me a joke"
+        "juoką",
+        "juokų",
+        "juokis",
+        "bažer",            // "bajeris" = story/joke (colloquial)
+        "bajerį",
+        "bajer",
+        "istoriją",         // "tell me a story"
+        // Personal questions about Kentas
+        "ką veiki",         // "what are you doing"
+        "ka veiki",
+        "kaip gyveni",      // "how are you living"
+        "kaip laikais",     // "how are you doing"
+        "kaip sekasi",      // "how's it going"
+        "kas tu",           // "who are you"
+        "kas esi",
+        "apie save",        // "tell me about yourself"
+        "apie kentas",
+        "kokia nuotaika",   // "what's your mood"
+        "ką myli",          // "what do you love"
+        "ka myli",
+        "ką mėgsti",        // "what do you like"
+        "ka megsti",
+        // Greetings / well-being that miss CONVERSATIONAL_PATTERNS
+        "sveikas",          // casual greeting (singular)
+        "labas rytas",
+        "laba diena",
+        "labas vakaras",
+        "labos",
+    )
+
     // ── Destination classifier lists ───────────────────────────────────────
     // Used by looksLikeDestination() to distinguish plain place names from
     // conversational questions before routing to GeneralQuestion / OpenAI.
@@ -484,7 +531,17 @@ object VoiceCommandParser {
         if (matchesAny(normalized, UNMUTE_PATTERNS))      return VoiceCommand.UnmuteVoice
         if (matchesAny(normalized, STOP_PATTERNS))        return VoiceCommand.StopNavigation
 
-        // ── 6. Destination classifier — before OpenAI fallthrough ──────────
+        // ── 6. Casual / personality request — before destination classifier ──
+        // Phrases with entertainment or personal intent reach Kentas's AI
+        // personality regardless of whether navigation is active.
+        // CASUAL_PATTERNS is checked here (after all navigation patterns) so
+        // it never shadows a real navigation command.
+        if (matchesAny(normalized, CASUAL_PATTERNS)) {
+            Log.d(TAG, "parse: casual request → GeneralQuestion('$trimmed')")
+            return VoiceCommand.GeneralQuestion(trimmed)
+        }
+
+        // ── 7. Destination classifier — before OpenAI fallthrough ──────────
         // Plain inputs like "Akropolis", "Taikos 61", "Lidl", "degalinė" are
         // routed to DestinationResolver as StartNavigation instead of OpenAI.
         if (looksLikeDestination(trimmed, normalized)) {
@@ -492,7 +549,7 @@ object VoiceCommandParser {
             return VoiceCommand.StartNavigation(trimmed)
         }
 
-        // ── 7. Fallthrough — forward to OpenAI ────────────────────────────
+        // ── 8. Fallthrough — forward to OpenAI ────────────────────────────
         Log.d(TAG, "parse: no pattern matched → GeneralQuestion")
         return VoiceCommand.GeneralQuestion(trimmed)
     }
@@ -522,15 +579,20 @@ object VoiceCommandParser {
      * Heuristic classifier: returns true when [trimmed] looks like a destination
      * name that [DestinationResolver] should handle rather than OpenAI.
      *
-     * Called only after all deterministic patterns have been checked (step 6),
-     * so known commands can never be mis-routed here.
+     * Called only after all deterministic navigation patterns AND [CASUAL_PATTERNS]
+     * have been checked (steps 1–6), so known commands and personality requests
+     * can never be mis-routed here.
      *
      * ## Logic (checked in order, first match wins)
      * 1. Contains a digit → street address ("Taikos 61", "Gedimino pr. 3").
      * 2. Starts with a known brand keyword → brand POI ("Lidl", "Maxima").
      * 3. Contains a known category word → category POI ("degalinė", "kavinė").
      * 4. Matches a conversational pattern → NOT a destination (return false).
-     * 5. 1–3 words, no conversational signals → generic place name ("Lazdynai").
+     * 5a. Single word that starts with a lowercase letter → imperative verb or
+     *     casual utterance, NOT a destination ("pralinksmink", "ką", …).
+     *     Single words that start with an uppercase letter are treated as proper
+     *     nouns / place names ("Akropolis", "Lazdynai").
+     * 5b. 2–3 words, no conversational signals → generic place name or POI.
      *
      * @param trimmed   The original trimmed input (preserves Lithuanian case).
      * @param normalized The lowercased, punctuation-stripped version for matching.
@@ -549,8 +611,18 @@ object VoiceCommandParser {
         // 4. Conversational pattern → definitely not a destination
         if (CONVERSATIONAL_PATTERNS.any { normalized.contains(it) }) return false
 
-        // 5. Short input (1–3 words) with no conversational signals → place name
-        val wordCount = normalized.trim().split(Regex("\\s+")).size
-        return wordCount in 1..3
+        // 5. Short input with no conversational signals.
+        val words = normalized.trim().split(Regex("\\s+"))
+        return when (words.size) {
+            // 5a. Single word: only treat as a destination if it starts with an
+            //     uppercase letter in the original speech (proper noun / place name).
+            //     Lowercase single words are typically imperative verbs or greetings
+            //     ("pralinksmink", "linksmink") and belong in GeneralQuestion.
+            1 -> trimmed.firstOrNull()?.isUpperCase() == true
+            // 5b. 2–3 words: broad heuristic — if no conversational signal was
+            //     detected in step 4, treat as a place name or POI query.
+            in 2..3 -> true
+            else -> false
+        }
     }
 }
