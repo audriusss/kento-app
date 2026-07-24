@@ -373,7 +373,7 @@ private fun SturmanasApp(
     // Rerouting stays in NAVIGATING → flag stays set (correct).
     LaunchedEffect(navState.phase) {
         val shouldKeepOn = navState.phase == NavigationPhase.NAVIGATING
-        Log.d(FLOW_TAG, "screen-on: phase=${navState.phase} keepOn=$shouldKeepOn")
+        Log.d(MainActivity.FLOW_TAG, "screen-on: phase=${navState.phase} keepOn=$shouldKeepOn")
         if (shouldKeepOn) {
             activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         } else {
