@@ -2,7 +2,6 @@ package lt.sturmanas.bajeristas.voice
 
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -16,8 +15,8 @@ import lt.sturmanas.bajeristas.voice.askKentas
  * Manages the continuous push-to-talk conversation loop:
  *
  *   Button tap → listen → (speech recognised) → AI call → speak → re-listen
- *                        → (no speech / silence) → re-listen (reset timer)
- *                        → (recoverable error) → retry once → re-listen or stop
+ *                        → (no speech / silence) → wait → re-listen → keep alive
+ *                        → (infra failure) → infra retry → re-listen or stop
  *
  * ## Multi-turn guarantee
  *
@@ -29,31 +28,47 @@ import lt.sturmanas.bajeristas.voice.askKentas
  * from the TTS callback thread causes the recogniser to fail silently, ending the
  * conversation after exactly one turn.
  *
- * ## Inactivity timeout
+ * ## Error policy — two separate categories
  *
- * The 30-second timer represents time the user has to speak — NOT AI generation
- * time or Kentas TTS time.  The timer is reset after TTS finishes (in the
- * [onDone] callback), not when the speech result is received, so AI + TTS
- * duration never eats into the user's silence budget.
+ * ### Normal speech events (never close the conversation)
+ *
+ * - [RecoveryPolicy.E_NO_MATCH] — recognizer heard audio but could not match words.
+ *   Happens after every breath, background sound, or sentence fragment.  Logged as
+ *   NO_MATCH_RELISTEN; never increments [infraRetryCount].
+ * - [RecoveryPolicy.E_SPEECH_TIMEOUT] — no speech detected within the silence window.
+ *   Logged as SPEECH_TIMEOUT_RELISTEN; never increments [infraRetryCount].
+ *
+ * Both restart listening after a short delay and keep the same session alive.
+ *
+ * ### Infrastructure failures (counted toward [MAX_INFRA_RETRIES])
+ *
+ * All other recoverable errors ([RecoveryPolicy.E_SERVER], [RecoveryPolicy.E_SERVER_DISCONNECTED],
+ * [RecoveryPolicy.E_NETWORK], etc.) increment [infraRetryCount].  The counter is reset to
+ * zero whenever the recognizer successfully reaches [onReadyForSpeech], [onBeginningOfSpeech],
+ * or [onResults] — meaning a successful recovery wipes the slate clean.
+ *
+ * ## Inactivity timer — real listening time only
+ *
+ * The 30-second timer represents time the user has to speak — not AI generation time,
+ * Kentas TTS time, navigation TTS time, or time spent restarting the recognizer.
+ *
+ * Timer lifecycle:
+ * - STARTED / RESUMED: when [onReadyForSpeech] fires (recognizer is genuinely ready).
+ * - PAUSED: when AI generation starts, TTS starts, an error triggers a restart, or nav interrupts.
+ *
+ * The timer never starts from [startConversation]; it waits for the first [onReadyForSpeech]
+ * from the new listening session.
  *
  * ## Session isolation
  *
- * Every [startConversation] call increments [generation].  All callbacks and
- * coroutine bodies guard with `isCurrentGenValue(myGen)` so stale callbacks
- * from a previous session are no-ops.
+ * Every [startConversation] call increments [generation].  All callbacks and coroutine
+ * bodies guard with `isCurrentGenValue(myGen)` so stale callbacks from a previous session
+ * are complete no-ops.
  *
- * ## Navigation interruption
- *
- * [speakNavigation] pre-empts conversational TTS (QUEUE_FLUSH) and clears the
- * conversation onDone callback.  After the navigation utterance finishes,
- * [resumeAfterNavInterrupt] is called, which resets the inactivity timer and
- * schedules one new listening request via [requestRelisten] — again dispatched
- * to the Main thread.  The session is never closed or reset by a nav interrupt.
- *
- * @param scope           CoroutineScope tied to ViewModel lifetime (Main dispatcher).
- * @param speechManager   SR wrapper (must already be initialised).
- * @param speechCoordinator  Centralised TTS owner.
- * @param apiKey          OpenAI API key; blank → fixed Lithuanian error string.
+ * @param scope             CoroutineScope tied to ViewModel lifetime (Main dispatcher).
+ * @param speechManager     SR wrapper (must already be initialised).
+ * @param speechCoordinator Centralised TTS owner.
+ * @param apiKey            OpenAI API key; blank → fixed Lithuanian error string.
  */
 class KentasConversationController(
     private val scope: CoroutineScope,
@@ -65,11 +80,19 @@ class KentasConversationController(
     companion object {
         private const val TAG = "KentasConversation"
 
-        /** Inactivity window before the conversation auto-stops. */
+        /** Inactivity window while the recognizer is actively listening. */
         const val INACTIVITY_TIMEOUT_MS = 30_000L
 
-        /** Maximum consecutive recoverable SR errors before the conversation stops. */
-        const val MAX_RETRIES = 1
+        /**
+         * Maximum consecutive **infrastructure** failures before the conversation stops.
+         * Normal speech events ([RecoveryPolicy.E_NO_MATCH], [RecoveryPolicy.E_SPEECH_TIMEOUT])
+         * do NOT count toward this limit — they are expected during ordinary use and simply
+         * trigger a new listening session.
+         *
+         * A "consecutive" run is broken by any successful recovery signal:
+         * [onReadyForSpeech], [onBeginningOfSpeech], or [onResults].
+         */
+        const val MAX_INFRA_RETRIES = 3
 
         /** Max conversation history entries kept (10 = 5 exchanges). */
         const val MAX_HISTORY = 10
@@ -97,7 +120,14 @@ class KentasConversationController(
     // ── Internal ──────────────────────────────────────────────────────────
 
     @Volatile private var generation = 0L
-    @Volatile private var retryCount = 0
+
+    /**
+     * Consecutive infrastructure failure count.
+     *
+     * Incremented only on errors that are NOT [RecoveryPolicy.isSilentRecovery].
+     * Reset to zero on [onReadyForSpeech], [onBeginningOfSpeech], and [onResults].
+     */
+    @Volatile private var infraRetryCount = 0
 
     private var inactivityJob: Job? = null
     private var aiJob: Job? = null
@@ -110,8 +140,6 @@ class KentasConversationController(
      *  - prevent duplicate re-listen calls (cancel any pending job before scheduling a new one)
      *  - allow [stopConversation] to cancel a pending re-listen immediately so a stale
      *    TTS callback cannot reopen a session that was manually closed
-     *
-     * Created by [requestRelisten]; cancelled in [stopConversation] and [release].
      */
     private var pendingRelistenJob: Job? = null
 
@@ -122,8 +150,7 @@ class KentasConversationController(
 
     /**
      * Start a conversation session (or stop the current one if already active).
-     * Safe to call from any thread — all operations are dispatched to coroutines
-     * or are @MainThread-safe SpeechRecognitionManager calls.
+     * Safe to call from any thread.
      */
     fun toggleConversation() {
         if (_isActive.value) {
@@ -143,28 +170,29 @@ class KentasConversationController(
         stopConversation(reason = "vm-cleared")
         pendingRelistenJob?.cancel()
         pendingRelistenJob = null
-        speechManager.onStartRequested   = null
-        speechManager.onReadyForSpeech   = null
+        speechManager.onStartRequested    = null
+        speechManager.onReadyForSpeech    = null
         speechManager.onBeginningOfSpeech = null
-        speechManager.onPartialResult    = null
-        speechManager.onResult           = null
-        speechManager.onRecoverableError = null
-        speechManager.onFatalError       = null
-        speechManager.onListeningStopped = null
+        speechManager.onPartialResult     = null
+        speechManager.onResult            = null
+        speechManager.onRecoverableError  = null
+        speechManager.onFatalError        = null
+        speechManager.onListeningStopped  = null
     }
 
     // ── Private: session start ─────────────────────────────────────────────
 
     private fun startConversation() {
         _isActive.value = true
-        retryCount = 0
+        infraRetryCount = 0
         generation++
         history.clear()
         pendingRelistenJob?.cancel()
         pendingRelistenJob = null
         val myGen = generation
         Log.i(TAG, "CONVERSATION_SESSION_OPENED session=$myGen")
-        resetInactivityTimer(myGen, "session-start")
+        // Do NOT start inactivity timer here — wait for onReadyForSpeech.
+        // The timer only counts time the user has to speak; startup latency is not that.
         installCallbacks(myGen)
         requestRelisten(myGen, "session-start")
     }
@@ -178,7 +206,7 @@ class KentasConversationController(
         generation++            // invalidate all in-flight callbacks
         pendingRelistenJob?.cancel()
         pendingRelistenJob = null
-        inactivityJob?.cancel()
+        pauseInactivityTimer("session-closed")
         aiJob?.cancel()
         speechManager.cancel()
         speechCoordinator.stop()
@@ -191,14 +219,12 @@ class KentasConversationController(
     /**
      * Called by [MainViewModel] when a navigation TTS utterance has finished.
      *
-     * Resumes exactly one listening session if the conversation is still active.
-     * Restarts the 30-second inactivity timer so the nav-TTS duration does not
-     * count against the user's silence budget.
+     * Pauses the inactivity timer (nav TTS duration must not count as user inactivity)
+     * and schedules one new listening session via [requestRelisten] — dispatched to
+     * the Main thread through `scope.launch`, because this callback fires on the TTS
+     * background thread.
      *
-     * Uses [requestRelisten] to dispatch to the Main thread — this callback fires
-     * on the TTS [UtteranceProgressListener] background thread and [SpeechRecognizer]
-     * requires the Main thread.
-     *
+     * The inactivity timer restarts when the new session's [onReadyForSpeech] fires.
      * No-op if the conversation was stopped or the generation has advanced.
      */
     fun resumeAfterNavInterrupt() {
@@ -208,13 +234,14 @@ class KentasConversationController(
         }
         val myGen = generation
         Log.i(TAG, "CONVERSATION_RESUMED_AFTER_NAV session=$myGen")
-        resetInactivityTimer(myGen, "nav-interrupt-resume")
+        pauseInactivityTimer("nav-interrupted")
         requestRelisten(myGen, "nav-interrupt-resume")
     }
 
     // ── Callbacks ─────────────────────────────────────────────────────────
 
     private fun installCallbacks(myGen: Long) {
+
         speechManager.onStartRequested = {
             if (isCurrentGen(myGen, "onStartRequested")) {
                 _state.value = ConversationState.LISTENING
@@ -223,14 +250,27 @@ class KentasConversationController(
 
         speechManager.onReadyForSpeech = {
             if (isCurrentGen(myGen, "onReadyForSpeech")) {
+                // Infrastructure is healthy — reset the consecutive failure counter.
+                if (infraRetryCount > 0) {
+                    Log.i(TAG, "INFRA_RETRY_RESET reason=onReady session=$myGen prevCount=$infraRetryCount")
+                    infraRetryCount = 0
+                }
                 _state.value = ConversationState.LISTENING
+                // Start (or resume) the inactivity timer — this is the first moment
+                // the user actually has an opportunity to speak.
+                startOrResumeInactivityTimer(myGen)
             }
         }
 
         speechManager.onBeginningOfSpeech = {
             if (isCurrentGen(myGen, "onBeginningOfSpeech")) {
+                // User is speaking — infrastructure is clearly working.
+                if (infraRetryCount > 0) {
+                    Log.i(TAG, "INFRA_RETRY_RESET reason=onBeginning session=$myGen prevCount=$infraRetryCount")
+                    infraRetryCount = 0
+                }
                 _state.value = ConversationState.USER_SPEAKING
-                resetInactivityTimer(myGen, "beginning-of-speech")
+                // Timer keeps running — user is actively using their window.
             }
         }
 
@@ -239,24 +279,61 @@ class KentasConversationController(
         speechManager.onResult = { text ->
             if (isCurrentGen(myGen, "onResult")) {
                 Log.i(TAG, "USER_SPEECH_RESULT session=$myGen text='${text.take(80)}'")
-                retryCount = 0
-                resetInactivityTimer(myGen, "result-received")
+                // Speech was recognised — infrastructure is working.
+                if (infraRetryCount > 0) {
+                    Log.i(TAG, "INFRA_RETRY_RESET reason=onResults session=$myGen prevCount=$infraRetryCount")
+                    infraRetryCount = 0
+                }
+                // Pause timer: AI generation time must not count as user inactivity.
+                pauseInactivityTimer("result-received")
                 handleResult(text, myGen)
             }
         }
 
         speechManager.onRecoverableError = { code ->
             if (isCurrentGen(myGen, "onRecoverableError code=$code")) {
-                retryCount++
-                Log.d(TAG, "recoverable error session=$myGen code=$code retry=$retryCount")
-                if (retryCount <= MAX_RETRIES) {
-                    scope.launch {
-                        delay(400)
-                        if (isCurrentGenValue(myGen)) requestRelisten(myGen, "error-retry")
+                when {
+                    RecoveryPolicy.isSilentRecovery(code) -> {
+                        // ── Normal speech event — NEVER increments infraRetryCount ────────
+                        // ERROR_NO_MATCH: recognizer heard audio but found no matching words.
+                        //   Happens after every breath, cough, or sentence fragment.
+                        // ERROR_SPEECH_TIMEOUT: no speech detected in the silence window.
+                        //   Happens when the user is momentarily quiet.
+                        // Neither of these is a platform failure; both are expected events
+                        // that must simply restart listening and keep the session alive.
+                        val logTag = if (code == RecoveryPolicy.E_NO_MATCH)
+                            "NO_MATCH_RELISTEN" else "SPEECH_TIMEOUT_RELISTEN"
+                        Log.i(TAG, "$logTag session=$myGen code=$code")
+                        // Pause timer: recognizer is restarting; time must not count.
+                        pauseInactivityTimer(logTag.lowercase())
+                        val delayMs = RecoveryPolicy.delayMs(code)
+                        scope.launch {
+                            delay(delayMs)
+                            if (isCurrentGenValue(myGen)) requestRelisten(myGen, logTag.lowercase())
+                        }
                     }
-                } else {
-                    Log.w(TAG, "MAX_RETRIES reached — stopping conversation session=$myGen")
-                    stopConversation(reason = "max-retries")
+                    else -> {
+                        // ── Infrastructure failure — counts toward MAX_INFRA_RETRIES ──────
+                        infraRetryCount++
+                        Log.w(TAG,
+                            "INFRA_RETRY increment=$infraRetryCount session=$myGen " +
+                            "code=$code (${RecoveryPolicy.errorName(code)})")
+                        // Pause timer: recognizer is restarting; time must not count.
+                        pauseInactivityTimer("infra-retry")
+                        if (infraRetryCount <= MAX_INFRA_RETRIES) {
+                            val delayMs = RecoveryPolicy.delayMs(code)
+                            scope.launch {
+                                delay(delayMs)
+                                if (isCurrentGenValue(myGen)) {
+                                    requestRelisten(myGen, "infra-retry-$code")
+                                }
+                            }
+                        } else {
+                            Log.e(TAG,
+                                "MAX_INFRA_RETRIES=$MAX_INFRA_RETRIES reached session=$myGen — stopping")
+                            stopConversation(reason = "max-infra-retries")
+                        }
+                    }
                 }
             }
         }
@@ -280,40 +357,34 @@ class KentasConversationController(
     /**
      * Schedules exactly one listening session on the Main thread.
      *
-     * This is the ONLY entry point for starting [SpeechRecognitionManager.startListening].
+     * This is the ONLY entry point for [SpeechRecognitionManager.startListening].
      *
      * ## Why scope.launch is required
      *
      * [TtsManager.UtteranceProgressListener.onDone] fires on Android's TTS internal
      * background thread.  [SpeechRecognizer] requires the Main thread for [startListening].
-     * Calling [SpeechRecognitionManager.startListening] directly from the TTS callback
-     * thread causes the recogniser to fail silently — this is the root cause of the
-     * one-turn-then-stop bug.
      *
-     * [scope] is [MainViewModel.viewModelScope] which uses [Dispatchers.Main.immediate]:
-     * - If already on Main: executes immediately (no coroutine overhead).
-     * - If on background thread (TTS callback): queued on Main Looper.
+     * [scope] (viewModelScope) uses [Dispatchers.Main.immediate]:
+     * - On Main thread: executes immediately.
+     * - On background thread (TTS callback, error callback): queued on Main Looper.
      *
      * ## Duplicate prevention
      *
-     * Any [pendingRelistenJob] still queued (from a concurrent callback) is cancelled
-     * before scheduling the new one.  Four gates inside the launched block prevent
-     * redundant or stale starts:
-     *  1. [isCurrentGenValue] — conversation must still be active with the same generation.
-     *  2. [speechManager.isSessionActive] — recogniser must not already be listening.
-     *  3. The generation check implicitly covers manual-close (generation advances in stopConversation).
+     * Any [pendingRelistenJob] still queued is cancelled before scheduling a new one.
+     * Inside the launched block, [isCurrentGenValue] and [speechManager.isSessionActive]
+     * prevent stale or overlapping starts.
      */
     private fun requestRelisten(myGen: Long, reason: String) {
-        // Cancel any existing pending relisten so we never queue two back-to-back starts.
         pendingRelistenJob?.cancel()
         pendingRelistenJob = scope.launch {
-            // viewModelScope dispatches on Dispatchers.Main.immediate
             if (!isCurrentGenValue(myGen)) {
-                Log.d(TAG, "RELISTEN_SKIPPED reason=stale session=$myGen currentGen=$generation from=$reason")
+                Log.d(TAG,
+                    "RELISTEN_SKIPPED reason=stale session=$myGen currentGen=$generation from=$reason")
                 return@launch
             }
             if (speechManager.isSessionActive) {
-                Log.d(TAG, "RELISTEN_SKIPPED reason=already-listening session=$myGen from=$reason")
+                Log.d(TAG,
+                    "RELISTEN_SKIPPED reason=already-listening session=$myGen from=$reason")
                 return@launch
             }
             Log.i(TAG, "CONVERSATION_RELISTEN_REQUESTED session=$myGen from=$reason")
@@ -322,17 +393,20 @@ class KentasConversationController(
         }
     }
 
-    // ── Private: cycle steps ───────────────────────────────────────────────
+    // ── Private: AI + TTS cycle ───────────────────────────────────────────
 
     private fun handleResult(text: String, myGen: Long) {
         Log.i(TAG, "AI_RESPONSE_STARTED session=$myGen text='${text.take(80)}'")
+        // Pause the inactivity timer — AI generation and TTS are not user silence.
+        // The timer restarts when onReadyForSpeech fires for the next listening session.
+        pauseInactivityTimer("ai-generating")
         _state.value = ConversationState.THINKING
 
         aiJob?.cancel()
         aiJob = scope.launch {
             if (!isCurrentGenValue(myGen)) return@launch
 
-            val navState = latestNavState
+            val navState       = latestNavState
             val historySnapshot = history.toList()
 
             val reply = askKentas(
@@ -353,11 +427,11 @@ class KentasConversationController(
             speechCoordinator.speakConversation(reply) {
                 // ── onDone fires on TTS background thread ────────────────────
                 // Do NOT call speechManager.startListening() here directly.
-                // requestRelisten() dispatches to Main via scope.launch.
+                // requestRelisten dispatches to Main via scope.launch.
                 Log.i(TAG, "AI_RESPONSE_TTS_DONE session=$myGen")
                 if (isCurrentGenValue(myGen)) {
-                    // Reset timer AFTER TTS finishes — user now has a full 30 s window.
-                    resetInactivityTimer(myGen, "ai-response-done")
+                    // Do NOT start the inactivity timer here — recognizer is about to
+                    // restart; the timer resumes when onReadyForSpeech fires.
                     requestRelisten(myGen, "ai-response-done")
                 }
             }
@@ -366,16 +440,43 @@ class KentasConversationController(
 
     // ── Inactivity timer ──────────────────────────────────────────────────
 
-    private fun resetInactivityTimer(myGen: Long, reason: String = "") {
-        Log.d(TAG, "resetInactivityTimer session=$myGen${if (reason.isNotEmpty()) " reason=$reason" else ""}")
+    /**
+     * Start (or resume) the 30-second inactivity countdown.
+     *
+     * Called ONLY from [onReadyForSpeech] — the first moment the user genuinely
+     * has an opportunity to speak.  All other cycle points (AI generation, TTS,
+     * recognizer restarts, nav interrupts) must call [pauseInactivityTimer] instead.
+     *
+     * Logs [INACTIVITY_TIMER_STARTED] on the first call per session;
+     * [INACTIVITY_TIMER_RESUMED] on subsequent calls (after a pause/resume cycle).
+     */
+    private fun startOrResumeInactivityTimer(myGen: Long) {
+        val wasRunning = inactivityJob?.isActive == true
         inactivityJob?.cancel()
+        val logTag = if (wasRunning) "INACTIVITY_TIMER_RESUMED" else "INACTIVITY_TIMER_STARTED"
+        Log.i(TAG, "$logTag session=$myGen timeoutMs=$INACTIVITY_TIMEOUT_MS")
         inactivityJob = scope.launch {
             delay(INACTIVITY_TIMEOUT_MS)
             if (isCurrentGenValue(myGen)) {
-                Log.d(TAG, "inactivity timeout session=$myGen — stopping conversation")
+                Log.i(TAG, "inactivity timeout fired session=$myGen — stopping conversation")
                 stopConversation(reason = "inactivity-timeout")
             }
         }
+    }
+
+    /**
+     * Pause (cancel) the inactivity timer without closing the session.
+     *
+     * Called when entering any phase where the user cannot speak:
+     * AI generation, Kentas TTS, navigation TTS, recognizer restart.
+     * The timer is restarted by the next [onReadyForSpeech].
+     */
+    private fun pauseInactivityTimer(reason: String) {
+        if (inactivityJob?.isActive == true) {
+            Log.i(TAG, "INACTIVITY_TIMER_PAUSED reason=$reason")
+            inactivityJob?.cancel()
+        }
+        inactivityJob = null
     }
 
     // ── Generation helpers ────────────────────────────────────────────────

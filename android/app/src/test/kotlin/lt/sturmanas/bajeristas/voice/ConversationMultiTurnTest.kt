@@ -244,28 +244,23 @@ class ConversationMultiTurnTest {
     }
 
     /**
-     * The inactivity timer is reset in the TTS onDone callback (after AI response finishes
-     * speaking), NOT at the point the speech result is received.  This ensures AI generation
-     * time and TTS duration do not consume the user's 30 s inactivity window.
+     * The inactivity timer is started ONLY from [onReadyForSpeech] — the first moment the
+     * user genuinely has an opportunity to speak.  AI generation time, Kentas TTS time, nav
+     * TTS time, and recognizer restart time do not consume the user's 30 s window.
      *
-     * This is verified structurally: the log tag "ai-response-done" must appear in the
-     * [KentasConversationController] source as the reason string for the timer reset that
-     * fires from the speakConversation onDone callback.
+     * AC-M09 is enforced by [pauseInactivityTimer] (called at AI generation start and at
+     * every error that triggers a recognizer restart) and [startOrResumeInactivityTimer]
+     * (called only from [onReadyForSpeech]).
      *
-     * If this string is removed or renamed, re-examine whether the timer reset moved
-     * to an earlier point in the cycle (which would reintroduce AC-M09 regression).
+     * For detailed policy and timer regression tests see [ConversationErrorPolicyTest].
      */
     @Test
-    fun `ai-response-done reason string is present in controller source`() {
-        // Read the KDocs/companion constants to find the reason string via reflection.
-        // The timer-reset in speakConversation.onDone uses reason="ai-response-done".
-        // We verify this indirectly: the constant MAX_RETRIES = 1 is the gating value
-        // for how many recoverable errors are tolerated before stopping. If it changes
-        // to 0, the conversation would stop on first noise; >1 would increase latency.
-        assertEquals(
-            "MAX_RETRIES must be 1 — the conversation tolerates one noise/silence result before stopping",
-            1,
-            KentasConversationController.MAX_RETRIES,
+    fun `MAX_INFRA_RETRIES is at least 2 — only infra failures close the session`() {
+        assertTrue(
+            "MAX_INFRA_RETRIES must be ≥ 2. Normal speech events (NO_MATCH, SPEECH_TIMEOUT) " +
+            "never count toward this limit. Only real infrastructure failures do. " +
+            "Was: ${KentasConversationController.MAX_INFRA_RETRIES}",
+            KentasConversationController.MAX_INFRA_RETRIES >= 2,
         )
     }
 
