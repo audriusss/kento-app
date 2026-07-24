@@ -1,0 +1,125 @@
+Fix only the Kentas conversation lifecycle.
+
+Do not touch location, GPS, map camera, markers, destination search, route calculation, or navigation engine.
+
+Current bug:
+The user presses the Kentas button, asks one question, Kentas answers, and the conversation UI closes or stops listening after one turn.
+
+Required behavior:
+
+1. One button opens one continuous Kentas conversation session.
+
+2. The session flow must be:
+
+   user presses Kentas
+   → listen
+   → receive valid speech result
+   → send to AI using the same conversation history
+   → speak AI response
+   → when TTS finishes, start exactly one new listening request
+   → keep the same conversation session open
+   → repeat for multiple turns
+
+3. Do not close the conversation after one AI answer.
+
+4. Preserve conversation history and topic across all turns in the same session.
+
+5. Close the session only when:
+   - user manually presses the Kentas button to close
+   - 30 seconds of real user inactivity elapse
+   - repeated fatal SpeechRecognizer failure makes continuation impossible
+
+6. The 30-second inactivity timer must represent actual opportunity for the user to speak.
+
+Reset the timer when:
+   - conversation opens
+   - onBeginningOfSpeech fires
+   - a valid speech result arrives
+   - AI response TTS finishes
+   - listening resumes after a navigation instruction
+   - user manually interacts with the conversation UI
+
+Do not count:
+   - AI response generation time
+   - Kentas TTS speaking time
+   - navigation instruction TTS time
+as user inactivity.
+
+7. Navigation instructions have audio priority but must not end the conversation.
+
+Required interruption flow:
+
+   conversation active
+   → navigation maneuver becomes due
+   → stop or pause conversational TTS if needed
+   → speak one short maneuver instruction
+   → preserve conversation history and active session token
+   → when navigation TTS finishes, resume exactly one listening request
+   → continue the same conversation topic
+
+8. If conversational TTS was interrupted mid-answer by a maneuver:
+   - do not clear the conversation session
+   - do not clear history
+   - after the maneuver, either resume the pending conversational response safely or continue by listening again
+   - prefer the simplest stable implementation
+   - never speak navigation and conversation simultaneously
+
+9. Prevent duplicate listening starts.
+
+Before starting SpeechRecognizer, verify:
+   - conversation is still active
+   - session/generation token is still current
+   - recognizer is not already STARTING, LISTENING, or USER_SPEAKING
+   - no other re-listen callback is already pending
+
+10. Stale callbacks must never reopen a conversation that was manually closed or timed out.
+
+11. Keep the conversation panel/button visually active throughout the full multi-turn session.
+
+12. There is still only one Kentas and one fixed personality.
+
+Inspect these exact areas before changing code:
+- KentasConversationController
+- KentasSpeechCoordinator
+- TTS onDone callbacks
+- SpeechRecognizer onResults/onError callbacks
+- MainViewModel conversation state
+- conversation UI visibility condition
+
+Add focused logs:
+- CONVERSATION_SESSION_OPENED session=...
+- USER_SPEECH_RESULT session=...
+- AI_RESPONSE_STARTED session=...
+- AI_RESPONSE_TTS_DONE session=...
+- CONVERSATION_RELISTEN_REQUESTED session=...
+- NAVIGATION_INTERRUPTED_CONVERSATION session=...
+- CONVERSATION_RESUMED_AFTER_NAV session=...
+- CONVERSATION_SESSION_CLOSED reason=...
+- RELISTEN_SKIPPED reason=inactive/stale/already-listening/pending
+
+Add focused tests:
+1. first AI answer does not close the session
+2. TTS onDone requests listening exactly once
+3. three consecutive user/AI turns remain in one session
+4. conversation history is preserved across turns
+5. navigation TTS does not close or clear the session
+6. navigation TTS resumes listening exactly once
+7. manual close prevents stale TTS callback from reopening
+8. timeout closes the session only after 30 seconds of real user inactivity
+9. AI generation and TTS duration do not consume the inactivity window
+10. duplicate listening requests are blocked
+
+Do not perform another architecture rewrite.
+Make the smallest maintainable changes in the existing simplified architecture.
+
+Commit locally.
+Do not push.
+
+Report:
+- root cause
+- exact files and functions changed
+- old lifecycle
+- new multi-turn lifecycle
+- navigation interruption behavior
+- tests added
+- commit hash
