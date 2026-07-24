@@ -92,7 +92,11 @@ class KentasSpeechCoordinator(
      *               Typically wired to [KentasConversationController.resumeAfterNavInterrupt].
      */
     fun speakNavigation(text: String, onDone: (() -> Unit)? = null) {
-        Log.d(TAG, "speakNavigation (interrupting conv): '${text.take(60)}'")
+        val wasConversationActive = onConversationDone != null
+        if (wasConversationActive) {
+            Log.i(TAG, "NAVIGATION_INTERRUPTED_CONVERSATION — pre-empting conversational TTS")
+        }
+        Log.d(TAG, "speakNavigation (interrupting conv wasActive=$wasConversationActive): '${text.take(60)}'")
         onConversationDone = null   // pre-empt any pending conversation callback
         onNavigationDone   = onDone
         ttsManager.speak(text)
