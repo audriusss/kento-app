@@ -109,12 +109,10 @@ class KentasNavigationPhraseFormatter {
             "Po {dist} sudėtinga sankryža{road.}",
         )
 
-        ManeuverType.ARRIVE -> listOf(
-            "Atvykote į tikslą!",
-            "Esate vietoje!",
-            "Tikslas pasiektas.",
-        )
-
+        // ARRIVE is handled exclusively by MainViewModel.speakArrival() —
+        // speakNavInstruction() returns early for this maneuver type.
+        // No phrase is generated here; returning emptyList() keeps it silent.
+        ManeuverType.ARRIVE,
         ManeuverType.NONE,
         ManeuverType.STRAIGHT,
         ManeuverType.UNKNOWN -> emptyList()

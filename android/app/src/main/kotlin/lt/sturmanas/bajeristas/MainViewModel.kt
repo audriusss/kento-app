@@ -268,7 +268,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun speakRouteReady(destinationName: String) {
         if (isSpeechBlocked) return
         val dest = destinationName.ifBlank { "tikslą" }
-        speechCoordinator.speakNavigation("Maršrutas į $dest paruoštas. Pradedame kelionę.") {
+        speechCoordinator.speakNavigation("Radau maršrutą. Važiuojam į $dest.") {
             conversationController.resumeAfterNavInterrupt()
         }
     }
