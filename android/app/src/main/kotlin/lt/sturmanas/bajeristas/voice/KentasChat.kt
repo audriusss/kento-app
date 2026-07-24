@@ -3,8 +3,7 @@ package lt.sturmanas.bajeristas.voice
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import lt.sturmanas.bajeristas.navigation.NavigationState
-import lt.sturmanas.bajeristas.personality.PersonaPrompts
-import lt.sturmanas.bajeristas.personality.SessionConfig
+import lt.sturmanas.bajeristas.personality.KentasPersona
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -13,32 +12,29 @@ import java.net.URL
 private const val CHAT_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 private const val MODEL = "gpt-4o-mini"
 
-// Kentas's responses are ≤ 12 words by persona rule; 80 tokens is a generous cap.
+// Kentas's responses are ≤ 10 words by persona rule; 80 tokens is a generous cap.
 private const val MAX_TOKENS = 80
 
 /**
  * Sends [userText] to OpenAI Chat Completions and returns Kentas's reply.
  *
- * [history] — recent (role, content) pairs from [ConversationBuffer] — is spliced
- * between the system prompt and the current user turn so the model maintains
+ * [history] — recent (role, content) pairs maintained by [KentasConversationController] —
+ * is spliced between the system prompt and the current user turn so the model maintains
  * conversational context across push-to-talk presses within one drive.
- * Pass [emptyList] (the default) for the very first turn of a drive.
+ * Pass [emptyList] for the very first turn.
  *
- * Never throws — all failures are returned as a Lithuanian error string that is safe
- * to display directly in [aiStatusMessage] without crashing.
+ * Uses [KentasPersona.systemPrompt] (single fixed prompt — no SessionConfig).
  *
- * Uses [HttpURLConnection] from the Android SDK — no additional Gradle dependency.
+ * Never throws — all failures are returned as a Lithuanian error string that the
+ * conversation controller will speak via TTS.
  *
- * @param userText  The Lithuanian phrase recognised by SpeechRecognizer.
- * @param config    Session personality config (ConversationMode, TripMode, HumorIntensity…).
- * @param navState  Current navigation state prepended as a context block to each user turn.
- * @param apiKey    OpenAI API key from [BuildConfig.OPENAI_API_KEY]. Never hardcode.
- * @param history   Snapshot of [ConversationBuffer.messages], captured on the main thread
- *                  before this coroutine was launched. Empty list for the first turn.
+ * @param userText  Lithuanian phrase recognised by SpeechRecognizer.
+ * @param navState  Current navigation state prepended to the user turn as context.
+ * @param apiKey    OpenAI API key from BuildConfig. Never hardcode.
+ * @param history   Recent (role, content) pairs from KentasConversationController.
  */
 suspend fun askKentas(
     userText: String,
-    config: SessionConfig,
     navState: NavigationState,
     apiKey: String,
     history: List<Pair<String, String>> = emptyList(),
@@ -49,40 +45,31 @@ suspend fun askKentas(
     }
 
     try {
-        // ── Build prompt ──────────────────────────────────────────────────
-        val systemPrompt = PersonaPrompts.systemPrompt(config)
-
-        val distanceMeters = navState.distanceToNextManeuverMeters
+        // ── Navigation context ────────────────────────────────────────────
+        val distMeters = navState.distanceToNextManeuverMeters
             .let { if (it == Int.MAX_VALUE) 0 else it }
         val street = navState.nextRoadName.ifBlank { navState.currentRoadName }.ifBlank { "nežinoma" }
 
-        val navContext = PersonaPrompts.navigationContext(
+        val navContext = KentasPersona.navigationContext(
             nextManeuver = navState.maneuverType.name,
             street = street,
-            distanceToManeuverMeters = distanceMeters,
-            // Fall back to the maneuver distance when the SDK has not yet reported
-            // total remaining route distance (MockNavigationEngine always returns 0).
+            distanceToManeuverMeters = distMeters,
             remainingDistanceMeters = if (navState.remainingDistanceMeters > 0)
-                navState.remainingDistanceMeters else distanceMeters,
+                navState.remainingDistanceMeters else distMeters,
             remainingSeconds = navState.remainingDurationSeconds,
         )
 
-        // Navigation context is prepended so Kentas knows what is on the road ahead,
-        // even if the driver's message contains no navigation reference.
         val userMessage = "$navContext\n\nVairuotojas: $userText"
 
-        // ── Build JSON body ───────────────────────────────────────────────
+        // ── Request body ──────────────────────────────────────────────────
         val requestBody = JSONObject().apply {
             put("model", MODEL)
             put("max_tokens", MAX_TOKENS)
             put("messages", JSONArray().apply {
                 put(JSONObject().apply {
                     put("role", "system")
-                    put("content", systemPrompt)
+                    put("content", KentasPersona.systemPrompt)
                 })
-                // Splice recent history between system prompt and current user turn.
-                // Gives the model conversational context so it can understand follow-up
-                // questions and avoid repeating itself within a single drive.
                 for ((role, content) in history) {
                     put(JSONObject().apply {
                         put("role", role)
@@ -113,8 +100,6 @@ suspend fun askKentas(
             val responseText = if (responseCode == HttpURLConnection.HTTP_OK) {
                 conn.inputStream.bufferedReader(Charsets.UTF_8).readText()
             } else {
-                // Drain and discard the error body so the connection can be reused;
-                // the status code alone is enough to produce the right Lithuanian message.
                 conn.errorStream?.use { it.readBytes() }
                 return@withContext when (responseCode) {
                     401 -> "OpenAI: neteisingas API raktas"
@@ -124,7 +109,6 @@ suspend fun askKentas(
                 }
             }
 
-            // ── Parse reply ───────────────────────────────────────────────
             val reply = JSONObject(responseText)
                 .getJSONArray("choices")
                 .getJSONObject(0)
@@ -139,7 +123,6 @@ suspend fun askKentas(
         }
 
     } catch (e: Exception) {
-        // Surface enough info to diagnose without exposing internals.
         "Tinklo klaida: ${e.message?.take(50) ?: e.javaClass.simpleName}"
     }
 }

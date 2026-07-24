@@ -1,10 +1,10 @@
 import { Router, type IRouter } from "express";
 import healthRouter from "./health";
-import realtimeSessionRouter from "./realtimeSession";
+import markersRouter from "./markers";
 
 const router: IRouter = Router();
 
 router.use(healthRouter);
-router.use(realtimeSessionRouter);
+router.use(markersRouter);
 
 export default router;

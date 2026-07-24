@@ -7,10 +7,8 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -36,39 +34,29 @@ import androidx.compose.ui.unit.dp
 import lt.sturmanas.bajeristas.voice.VoiceListeningState
 
 /**
- * Reusable microphone button used on both [StartScreen] and [NavigationScreen].
+ * Reusable microphone button used on [NavigationScreen].
  *
  * ## Visual states
  *
- * | State           | Colour  | Animation | Inner widget   |
- * |-----------------|---------|-----------|----------------|
- * | IDLE            | primary | none      | mic icon       |
- * | STARTING        | primary | none      | mic icon       |
- * | LISTENING       | red     | pulsing   | mic icon       |
- * | USER_SPEAKING   | red     | pulsing   | mic icon       |
- * | FINALIZING      | red     | pulsing   | mic icon       |
- * | PROCESSING      | primary | none      | spinner        |
- * | THINKING        | primary | none      | spinner        |
- * | SPEAKING        | primary | none      | mic icon       |
- * | RESTART_WAIT    | primary | none      | mic icon       |
- * | ERROR           | error   | none      | mic icon       |
+ * | State          | Colour  | Animation | Inner widget |
+ * |----------------|---------|-----------|--------------|
+ * | IDLE           | primary | none      | mic icon     |
+ * | LISTENING      | red     | pulsing   | mic icon     |
+ * | USER_SPEAKING  | red     | pulsing   | mic icon     |
+ * | THINKING       | primary | none      | spinner      |
+ * | SPEAKING       | primary | none      | mic icon     |
  *
- * LISTENING / USER_SPEAKING / FINALIZING are the only states where the mic is
- * genuinely hot — only they show red + pulsing.
+ * LISTENING and USER_SPEAKING are the only states where the mic is genuinely hot.
  *
- * STARTING / RESTART_WAIT show a neutral primary colour so the user is never
- * told "Kentas klauso" when the recognizer is not yet ready.
+ * When [isConversationActive] is true and the mic is not hot, a green ring is
+ * shown to indicate the conversation session is running (even while Kentas speaks).
  *
- * The green session ring is shown when [sessionActive] is true and the state is
- * one of IDLE, STARTING, RESTART_WAIT, SPEAKING — i.e. the hands-free loop is
- * running but the mic is not currently active.
- *
- * @param state         Current recognition state, drives visuals.
- * @param statusText    Text shown below the button.
- * @param enabled       False when permission is missing or engine not ready.
- * @param sessionActive True when the continuous hands-free session loop is running.
- * @param size          Diameter of the circular button. Defaults to 64.dp.
- * @param onClick       Called when the button is tapped.
+ * @param state                Current voice state, drives visuals.
+ * @param statusText           Text shown below the button.
+ * @param enabled              False when permission missing or safety blocked.
+ * @param isConversationActive True when the conversation loop is running.
+ * @param size                 Diameter of the circular button.
+ * @param onClick              Called when the button is tapped.
  */
 @Composable
 fun MicButton(
@@ -78,36 +66,32 @@ fun MicButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     size: Dp = 64.dp,
-    sessionActive: Boolean = false,
+    isConversationActive: Boolean = false,
 ) {
-    // Red + pulsing only while the microphone is genuinely hot.
     val isListening = state == VoiceListeningState.LISTENING ||
-                      state == VoiceListeningState.USER_SPEAKING ||
-                      state == VoiceListeningState.FINALIZING
+                      state == VoiceListeningState.USER_SPEAKING
 
-    // Pulse animation — runs while mic is active.
+    // Pulse animation — only while mic is genuinely hot.
     val infiniteTransition = rememberInfiniteTransition(label = "mic_pulse")
     val pulseScale by infiniteTransition.animateFloat(
         initialValue = 1f,
-        targetValue = if (isListening) 1.15f else 1f,
+        targetValue  = if (isListening) 1.15f else 1f,
         animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 600),
+            animation  = tween(durationMillis = 600),
             repeatMode = RepeatMode.Reverse,
         ),
         label = "mic_pulse_scale",
     )
 
     val bgColor = when {
-        !enabled -> Color.Gray
-        isListening -> Color(0xFFD32F2F)                      // red while mic is hot
-        state == VoiceListeningState.ERROR -> MaterialTheme.colorScheme.error
-        else -> MaterialTheme.colorScheme.primary             // neutral for all other states
+        !enabled   -> Color.Gray
+        isListening -> Color(0xFFD32F2F)          // red while mic is hot
+        else        -> MaterialTheme.colorScheme.primary
     }
 
-    // Session-active ring: shown when hands-free is on but the mic is not currently hot.
-    // Covers IDLE (stopped between sessions), STARTING, RESTART_WAIT, SPEAKING.
-    val showSessionRing = sessionActive && !isListening && state != VoiceListeningState.ERROR
-    val sessionRingColor = Color(0xFF43A047) // green
+    // Green session ring: conversation is active but mic is not currently hot.
+    val showSessionRing = isConversationActive && !isListening
+    val sessionRingColor = Color(0xFF43A047)
 
     Column(
         modifier = modifier,
@@ -131,96 +115,46 @@ fun MicButton(
                 contentAlignment = Alignment.Center,
             ) {
                 when (state) {
-                    VoiceListeningState.PROCESSING,
                     VoiceListeningState.THINKING -> {
                         CircularProgressIndicator(
-                            modifier = Modifier.size(size * 0.55f),
-                            color = Color.White,
+                            modifier   = Modifier.size(size * 0.55f),
+                            color      = Color.White,
                             strokeWidth = 3.dp,
                         )
                     }
                     else -> {
                         IconButton(
-                            onClick = { if (enabled) onClick() },
-                            modifier = Modifier.size(size),
+                            onClick   = { if (enabled) onClick() },
+                            modifier  = Modifier.size(size),
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Mic,
+                                imageVector  = Icons.Default.Mic,
                                 contentDescription = when (state) {
                                     VoiceListeningState.LISTENING     -> "Kentas klauso"
                                     VoiceListeningState.USER_SPEAKING -> "Kentas klauso"
-                                    VoiceListeningState.FINALIZING    -> "Kentas klauso"
-                                    VoiceListeningState.STARTING      -> "Kentas ruošiasi"
-                                    VoiceListeningState.RESTART_WAIT  -> "Kentas ruošiasi"
                                     VoiceListeningState.SPEAKING      -> "Kentas kalba"
-                                    VoiceListeningState.PROCESSING    -> "Apdorojama"
                                     VoiceListeningState.THINKING      -> "Kentas galvoja"
-                                    VoiceListeningState.ERROR         -> "Klaida"
                                     VoiceListeningState.IDLE          -> "Kalbėti"
                                 },
-                                tint = Color.White,
+                                tint     = Color.White,
                                 modifier = Modifier.size(size * 0.5f),
                             )
                         }
                     }
                 }
             }
-        } // end outer session-ring Box
+        }
 
         if (statusText.isNotBlank()) {
             Spacer(Modifier.height(6.dp))
             Text(
-                text = statusText,
+                text  = statusText,
                 style = MaterialTheme.typography.bodySmall,
-                color = when (state) {
-                    VoiceListeningState.ERROR -> MaterialTheme.colorScheme.error
-                    else -> MaterialTheme.colorScheme.onSurfaceVariant
-                },
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
-                modifier = Modifier
+                modifier  = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 8.dp),
-            )
-        }
-    }
-}
-
-/**
- * Compact mic button row used on [StartScreen].
- * Shows the button centred with status text below.
- */
-@Composable
-fun StartScreenMicRow(
-    state: VoiceListeningState,
-    statusText: String,
-    enabled: Boolean,
-    onClick: () -> Unit,
-) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.Center,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            MicButton(
-                state = state,
-                statusText = "",      // status shown separately below
-                enabled = enabled,
-                onClick = onClick,
-                size = 56.dp,
-            )
-        }
-        if (statusText.isNotBlank()) {
-            Spacer(Modifier.height(6.dp))
-            Text(
-                text = statusText,
-                style = MaterialTheme.typography.bodySmall,
-                color = when (state) {
-                    VoiceListeningState.ERROR -> MaterialTheme.colorScheme.error
-                    else -> MaterialTheme.colorScheme.onSurfaceVariant
-                },
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth(),
             )
         }
     }

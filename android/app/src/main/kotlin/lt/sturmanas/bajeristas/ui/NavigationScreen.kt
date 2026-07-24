@@ -11,15 +11,11 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.VolumeOff
-import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -34,41 +30,31 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import lt.sturmanas.bajeristas.community.CommunityMarkerRepository
 import lt.sturmanas.bajeristas.navigation.ManeuverType
 import lt.sturmanas.bajeristas.navigation.NavigationController
 import lt.sturmanas.bajeristas.navigation.NavigationPhase
 import lt.sturmanas.bajeristas.navigation.NavigationState
-import lt.sturmanas.bajeristas.navigation.StopoverEntry
 import lt.sturmanas.bajeristas.safety.ConversationPermission
 import lt.sturmanas.bajeristas.voice.VoiceListeningState
-import lt.sturmanas.bajeristas.ui.MicButton
 
 @Composable
 fun NavigationScreen(
     navigationState: NavigationState,
     navigationController: NavigationController,
     conversationPermission: ConversationPermission,
-    aiStatusMessage: String,
-    isMuted: Boolean,
-    /** Current speech-recognition state; drives the mic button appearance. */
+    /** Current conversation state — drives MicButton visual. */
     voiceListeningState: VoiceListeningState = VoiceListeningState.IDLE,
-    /** True when the continuous hands-free session loop is active; shows the ring indicator. */
-    sessionActive: Boolean = false,
-    /** Intermediate stops to show in the route card. Empty = no card rendered. */
-    stopovers: List<StopoverEntry> = emptyList(),
-    /** Final destination display name. Used in the route card header. */
-    finalDestinationName: String = "",
-    /** Called with the 0-based stopover index when the user taps its × button. */
-    onRemoveStopover: (Int) -> Unit = {},
+    /** True while a conversation session is active — shows the green ring. */
+    isConversationActive: Boolean = false,
     onMicPress: () -> Unit,
-    onMuteToggle: () -> Unit,
-    onEnableStandardVoice: () -> Unit,
     onStopNavigation: () -> Unit,
+    /** Called when the user taps the speed-camera report button. */
+    onReportMarker: (type: CommunityMarkerRepository.MarkerType, lat: Double, lng: Double) -> Unit,
 ) {
     val ctx = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -76,26 +62,11 @@ fun NavigationScreen(
 
     // Create the NavigationView during composition (inside remember), NOT inside
     // the AndroidView factory. The factory runs at layout time — after side-effects.
-    // If the view were created in the factory, navigationView would still be null
-    // when DisposableEffect adds the LifecycleObserver and the observer immediately
-    // replays ON_START / ON_RESUME (LifecycleRegistry.addObserver() is synchronous).
     // Creating it here guarantees the view (and its onCreate call) completes before
     // any side-effects fire.
     val navView = remember(engine) { engine.createNavigationView(ctx) }
 
     // ── NavigationView lifecycle management ───────────────────────────────
-    // NavigationView requires the full Android lifecycle sequence:
-    //   onCreate → onStart → onResume → onPause → onStop → onDestroy
-    //
-    // onCreate is called inside createNavigationView() (above, during composition).
-    // onStart / onResume / onPause / onStop are forwarded by the observer below.
-    // When adding the observer to a RESUMED lifecycle, LifecycleRegistry.sync()
-    // replays ON_START and ON_RESUME synchronously — so the NavView progresses
-    // onCreate → onStart → onResume in the correct order on first composition.
-    //
-    // onDestroy is called from onDispose rather than from the observer so that it
-    // fires both when the composable leaves composition (user stops navigation,
-    // Activity still alive) and when the Activity is destroyed.
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
@@ -109,40 +80,30 @@ fun NavigationScreen(
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
-            // Gracefully wind down the NavigationView. The observer has already
-            // called onPause/onStop if the lifecycle progressed through those
-            // states; only call them here if the Activity is still alive.
             val state = lifecycleOwner.lifecycle.currentState
             if (state.isAtLeast(Lifecycle.State.RESUMED)) engine.onPause()
             if (state.isAtLeast(Lifecycle.State.STARTED)) engine.onStop()
             // IMPORTANT: call onViewDestroy(), NOT onDestroy().
-            //
-            // onViewDestroy() tears down the NavigationView only and leaves the
-            // Navigator alive. This allows startNavigation() to work again immediately
-            // after the user returns to StartScreen (e.g. after a failed address search).
-            //
-            // onDestroy() (full teardown including Navigator) must only be called from
-            // MainActivity.onDestroy via NavigationController.onDestroy.
+            // onViewDestroy() tears down NavigationView only; Navigator stays alive
+            // so startNavigation() works again without re-initialising the SDK.
             engine.onViewDestroy()
         }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
 
-        // ── Navigation map — Google Navigation SDK view ────────────────────
+        // ── Navigation map ─────────────────────────────────────────────────
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f),
         ) {
-            // factory receives the already-created view; it does not create a new one.
             AndroidView(
-                factory = { navView },
+                factory  = { navView },
                 modifier = Modifier.fillMaxSize(),
             )
 
-            // Phase-based loading overlays — shown while address is resolving or route is calculating.
-            // The map is already visible behind them so when the route appears it feels instant.
+            // Phase-based loading overlays
             val phaseLabel = when (navigationState.phase) {
                 NavigationPhase.RESOLVING_ADDRESS -> "Ieškomas adresas…"
                 NavigationPhase.CALCULATING_ROUTE -> "Skaičiuojamas maršrutas…"
@@ -187,11 +148,8 @@ fun NavigationScreen(
                 }
             }
 
-            // Arrival overlay — shown for final destination only.
-            // When arriving at an intermediate stop, onWaypointArrived() handles the
-            // transition before hasArrived can linger, so this overlay is suppressed
-            // while stopovers remain.
-            if (navigationState.hasArrived && stopovers.isEmpty()) {
+            // Arrival overlay
+            if (navigationState.hasArrived) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = Color(0xCC1B6CA8),
@@ -220,7 +178,7 @@ fun NavigationScreen(
         // ── Bottom panel ──────────────────────────────────────────────────
         Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
 
-            // Error message banner
+            // Error banner
             navigationState.errorMessage?.let { error ->
                 Surface(
                     modifier = Modifier
@@ -238,23 +196,9 @@ fun NavigationScreen(
                 }
             }
 
-            // Route card — only shown when there are intermediate stopovers
-            if (stopovers.isNotEmpty()) {
-                WaypointRouteCard(
-                    stopovers = stopovers,
-                    finalDestinationName = finalDestinationName
-                        .ifBlank { navigationState.resolvedAddress }
-                        .ifBlank { navigationState.destinationName },
-                    remainingDistanceMeters = navigationState.remainingDistanceMeters,
-                    remainingDurationSeconds = navigationState.remainingDurationSeconds,
-                    onRemoveStopover = onRemoveStopover,
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-            }
-
             // Maneuver info card
             Card(
-                modifier = Modifier.fillMaxWidth(),
+                modifier  = Modifier.fillMaxWidth(),
                 elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
             ) {
                 Row(
@@ -266,12 +210,12 @@ fun NavigationScreen(
                 ) {
                     Column {
                         Text(
-                            text = maneuverLabel(navigationState.maneuverType),
-                            style = MaterialTheme.typography.titleMedium,
+                            text       = maneuverLabel(navigationState.maneuverType),
+                            style      = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                         )
                         val roadInfo = when {
-                            navigationState.nextRoadName.isNotBlank() -> navigationState.nextRoadName
+                            navigationState.nextRoadName.isNotBlank()    -> navigationState.nextRoadName
                             navigationState.currentRoadName.isNotBlank() -> navigationState.currentRoadName
                             else -> "—"
                         }
@@ -280,8 +224,8 @@ fun NavigationScreen(
                     Column(horizontalAlignment = Alignment.End) {
                         val dist = navigationState.distanceToNextManeuverMeters
                         Text(
-                            text = if (dist == Int.MAX_VALUE) "—" else "$dist m",
-                            style = MaterialTheme.typography.titleSmall,
+                            text       = if (dist == Int.MAX_VALUE) "—" else "$dist m",
+                            style      = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.SemiBold,
                         )
                         val mins = navigationState.remainingDurationSeconds / 60
@@ -294,174 +238,61 @@ fun NavigationScreen(
 
             // Safety / conversation status
             val (permColor, permText) = when (conversationPermission) {
-                ConversationPermission.ALLOWED -> Color(0xFF2E7D32) to "Pokalbis leidžiamas"
+                ConversationPermission.ALLOWED    -> Color(0xFF2E7D32) to "Pokalbis leidžiamas"
                 ConversationPermission.SHORT_ONLY -> Color(0xFFF57F17) to "Tik trumpai — artėja manevras"
-                ConversationPermission.BLOCKED -> Color(0xFFC62828) to "Navigacija turi prioritetą"
+                ConversationPermission.BLOCKED    -> Color(0xFFC62828) to "Navigacija turi prioritetą"
             }
             Text(text = permText, style = MaterialTheme.typography.labelMedium, color = permColor)
 
-            if (aiStatusMessage.isNotBlank()) {
-                Text(
-                    text = aiStatusMessage,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Controls row
+            // Controls row: mic | stop | marker report
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(onClick = onMuteToggle) {
-                    Icon(
-                        imageVector = if (isMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
-                        contentDescription = if (isMuted) "AI nutildytas" else "AI įjungtas",
-                        tint = if (isMuted) MaterialTheme.colorScheme.error
-                        else MaterialTheme.colorScheme.onSurface,
-                    )
-                }
-
-                val micEnabled = conversationPermission != ConversationPermission.BLOCKED && !isMuted
+                val micEnabled = conversationPermission != ConversationPermission.BLOCKED
                 MicButton(
-                    state = if (micEnabled) voiceListeningState else VoiceListeningState.IDLE,
-                    statusText = "",   // status shown separately in the aiStatusMessage row above
-                    enabled = micEnabled,
-                    sessionActive = sessionActive,
-                    onClick = onMicPress,
-                    size = 80.dp,
+                    state                = if (micEnabled) voiceListeningState else VoiceListeningState.IDLE,
+                    statusText           = "",
+                    enabled              = micEnabled,
+                    isConversationActive = isConversationActive,
+                    onClick              = onMicPress,
+                    size                 = 80.dp,
                 )
 
                 TextButton(onClick = onStopNavigation) {
                     Text("Baigti", color = MaterialTheme.colorScheme.error)
                 }
+
+                // Speed-camera / police report button
+                OutlinedButton(
+                    onClick = {
+                        // TODO: get current location from LocationProvider.cachedLocation
+                        val loc = lt.sturmanas.bajeristas.navigation.LocationProvider.cachedLocation
+                        if (loc != null) {
+                            onReportMarker(
+                                CommunityMarkerRepository.MarkerType.SPEED_CAMERA,
+                                loc.latitude,
+                                loc.longitude,
+                            )
+                        }
+                    },
+                ) {
+                    androidx.compose.material3.Icon(
+                        imageVector        = Icons.Default.CameraAlt,
+                        contentDescription = "Pranešti apie radaro/policijos postą",
+                        modifier           = Modifier.size(16.dp),
+                    )
+                    Spacer(modifier = Modifier.size(4.dp))
+                    Text("Radaras", style = MaterialTheme.typography.labelMedium)
+                }
             }
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Emergency fallback — always visible, always functional
-            OutlinedButton(
-                onClick = onEnableStandardVoice,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Įjungti įprastą navigacijos balsą")
-            }
-        }
-    }
-}
-
-// ── Route card ────────────────────────────────────────────────────────────────
-
-/**
- * Displays the full multi-stop route: ordered stopovers with × buttons and the
- * final destination, plus the current ETA and remaining distance.
- *
- * Only rendered when [stopovers] is non-empty.
- */
-@Composable
-private fun WaypointRouteCard(
-    stopovers: List<StopoverEntry>,
-    finalDestinationName: String,
-    remainingDistanceMeters: Int,
-    remainingDurationSeconds: Int,
-    onRemoveStopover: (Int) -> Unit,
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.secondaryContainer,
-        ),
-    ) {
-        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
-
-            // Header row: label + ETA/distance summary
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = "Maršrutas",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSecondaryContainer,
-                )
-                val mins = remainingDurationSeconds / 60
-                val distKm = if (remainingDistanceMeters == Int.MAX_VALUE || remainingDistanceMeters <= 0) ""
-                             else if (remainingDistanceMeters < 1000) " · ${remainingDistanceMeters} m"
-                             else " · ${remainingDistanceMeters / 1000} km"
-                Text(
-                    text = "~$mins min$distKm",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSecondaryContainer,
-                )
-            }
-
-            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-
-            // Intermediate stops (each removable)
-            stopovers.forEachIndexed { index, stop ->
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text(
-                            text = "${index + 1}. ",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer,
-                        )
-                        Text(
-                            text = stop.displayName,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    IconButton(
-                        onClick = { onRemoveStopover(index) },
-                        modifier = Modifier.size(28.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "Pašalinti ${stop.displayName}",
-                            modifier = Modifier.size(14.dp),
-                            tint = MaterialTheme.colorScheme.onSecondaryContainer,
-                        )
-                    }
-                }
-            }
-
-            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-
-            // Final destination row (non-removable)
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(
-                    text = "⚑ ",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-                Text(
-                    text = finalDestinationName.ifBlank { "Tikslas" },
-                    style = MaterialTheme.typography.bodySmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSecondaryContainer,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
+            // Divider before ETA bar (removed in simplification — kept for spacing)
         }
     }
 }
@@ -470,19 +301,19 @@ private fun WaypointRouteCard(
 
 private fun maneuverLabel(type: ManeuverType): String = when (type) {
     ManeuverType.NONE, ManeuverType.STRAIGHT -> "Tiesiai"
-    ManeuverType.TURN_LEFT -> "← Kairėn"
-    ManeuverType.TURN_RIGHT -> "→ Dešinėn"
-    ManeuverType.SLIGHT_LEFT -> "↖ Šiek tiek kairėn"
-    ManeuverType.SLIGHT_RIGHT -> "↗ Šiek tiek dešinėn"
-    ManeuverType.SHARP_LEFT -> "↰ Staigiai kairėn"
-    ManeuverType.SHARP_RIGHT -> "↱ Staigiai dešinėn"
-    ManeuverType.UTURN -> "↩ Apsisukimas"
-    ManeuverType.ROUNDABOUT -> "↻ Žiedas"
-    ManeuverType.MOTORWAY_EXIT -> "↘ Išvažiavimas"
-    ManeuverType.LANE_CHANGE -> "⇒ Juostos keitimas"
-    ManeuverType.COMPLEX_JUNCTION -> "✦ Sudėtinga sankryža"
-    ManeuverType.MERGE -> "⇒ Įsijungimas į srautą"
-    ManeuverType.FORK -> "⑂ Kelio šakojimasis"
-    ManeuverType.ARRIVE -> "✓ Atvykote"
-    ManeuverType.UNKNOWN -> "Tiesiai"
+    ManeuverType.TURN_LEFT          -> "← Kairėn"
+    ManeuverType.TURN_RIGHT         -> "→ Dešinėn"
+    ManeuverType.SLIGHT_LEFT        -> "↖ Šiek tiek kairėn"
+    ManeuverType.SLIGHT_RIGHT       -> "↗ Šiek tiek dešinėn"
+    ManeuverType.SHARP_LEFT         -> "↰ Staigiai kairėn"
+    ManeuverType.SHARP_RIGHT        -> "↱ Staigiai dešinėn"
+    ManeuverType.UTURN              -> "↩ Apsisukimas"
+    ManeuverType.ROUNDABOUT         -> "↻ Žiedas"
+    ManeuverType.MOTORWAY_EXIT      -> "↘ Išvažiavimas"
+    ManeuverType.LANE_CHANGE        -> "⇒ Juostos keitimas"
+    ManeuverType.COMPLEX_JUNCTION   -> "✦ Sudėtinga sankryža"
+    ManeuverType.MERGE              -> "⇒ Įsijungimas į srautą"
+    ManeuverType.FORK               -> "⑂ Kelio šakojimasis"
+    ManeuverType.ARRIVE             -> "✓ Atvykote"
+    ManeuverType.UNKNOWN            -> "Tiesiai"
 }

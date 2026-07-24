@@ -2,14 +2,17 @@ openapi: 3.1.0
 info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
-  version: 0.1.0
-  description: API specification
+  version: 0.2.0
+  description: Kentas community markers API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: markers
+    description: Community speed-camera and hazard markers
+
 paths:
   /healthz:
     get:
@@ -24,13 +27,201 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /markers:
+    post:
+      operationId: createMarker
+      tags: [markers]
+      summary: Report a new community marker
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateMarkerRequest"
+      responses:
+        "201":
+          description: Marker created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MarkerCreatedResponse"
+        "400":
+          description: Invalid request body
+        "429":
+          description: Rate limited — too many reports from this device
+    get:
+      operationId: listNearbyMarkers
+      tags: [markers]
+      summary: Fetch active markers near a location
+      parameters:
+        - name: lat
+          in: query
+          required: true
+          schema:
+            type: number
+            minimum: -90
+            maximum: 90
+          description: Centre latitude (WGS-84)
+        - name: lng
+          in: query
+          required: true
+          schema:
+            type: number
+            minimum: -180
+            maximum: 180
+          description: Centre longitude (WGS-84)
+        - name: radius
+          in: query
+          required: false
+          schema:
+            type: number
+            default: 5000
+          description: Search radius in metres (default 5000)
+      responses:
+        "200":
+          description: List of active, non-expired markers within the radius
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Marker"
+        "400":
+          description: Missing or invalid lat/lng
+
+  /markers/{id}/confirm:
+    post:
+      operationId: confirmMarker
+      tags: [markers]
+      summary: Confirm a marker sighting (increases confirm count)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deviceId]
+              properties:
+                deviceId:
+                  type: string
+      responses:
+        "200":
+          description: Confirm count updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MarkerConfirmResponse"
+        "404":
+          description: Marker not found or not active
+
+  /markers/{id}:
+    delete:
+      operationId: removeMarker
+      tags: [markers]
+      summary: Remove (soft-delete) a marker reported by this device
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deviceId]
+              properties:
+                deviceId:
+                  type: string
+      responses:
+        "200":
+          description: Marker removed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MarkerRemovedResponse"
+        "404":
+          description: Marker not found or not owned by this device
+
 components:
   schemas:
     HealthStatus:
       type: object
+      required: [status]
       properties:
         status:
           type: string
-      required:
-        - status
+          enum: [ok]
 
+    CreateMarkerRequest:
+      type: object
+      required: [type, lat, lng, deviceId]
+      properties:
+        type:
+          type: string
+          enum: [speed_camera, police, accident, hazard]
+        lat:
+          type: number
+          minimum: -90
+          maximum: 90
+        lng:
+          type: number
+          minimum: -180
+          maximum: 180
+        deviceId:
+          type: string
+          description: Anonymous device UUID (hashed before storage)
+
+    MarkerCreatedResponse:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+
+    Marker:
+      type: object
+      required: [id, type, lat, lng, confirmCount, createdAt]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [speed_camera, police, accident, hazard]
+        lat:
+          type: number
+        lng:
+          type: number
+        confirmCount:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+
+    MarkerConfirmResponse:
+      type: object
+      required: [id, confirmCount]
+      properties:
+        id:
+          type: string
+        confirmCount:
+          type: integer
+
+    MarkerRemovedResponse:
+      type: object
+      required: [id, status]
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          enum: [removed]
