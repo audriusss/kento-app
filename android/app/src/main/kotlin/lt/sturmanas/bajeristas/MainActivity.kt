@@ -64,10 +64,12 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
         if (granted) {
+            Log.i(FLOW_TAG, "LOCATION_PERMISSION_GRANTED")
             permissionState.value = PermissionState.Granted
             viewModel.retryLocationUpdates()
             initializeNavigation()
         } else {
+            Log.w(FLOW_TAG, "location permission denied by user")
             permissionState.value = PermissionState.Denied
             engineError.value =
                 "Vietos leidimas atmestas. Atidarykite nustatymus ir suteikite programai Šturmanas Bajeristas prieigą prie vietos."
@@ -80,6 +82,7 @@ class MainActivity : ComponentActivity() {
         Log.d(FLOW_TAG, "onCreate")
 
         if (LocationPermissionHelper.hasLocationPermission(this)) {
+            Log.i(FLOW_TAG, "LOCATION_PERMISSION_GRANTED (already held on launch)")
             permissionState.value = PermissionState.Granted
             initializeNavigation()
         } else {
@@ -106,7 +109,7 @@ class MainActivity : ComponentActivity() {
         if (permissionState.value == PermissionState.Denied &&
             LocationPermissionHelper.hasLocationPermission(this)
         ) {
-            Log.d(FLOW_TAG, "onResume: permission now granted — re-subscribing")
+            Log.i(FLOW_TAG, "onResume: LOCATION_PERMISSION_GRANTED (user enabled in settings)")
             permissionState.value = PermissionState.Granted
             viewModel.retryLocationUpdates()
             initializeNavigation()
@@ -162,11 +165,12 @@ private fun SturmanasApp(
     var startScreenError by remember { mutableStateOf<String?>(null) }
     var showSettings     by remember { mutableStateOf(false) }
 
-    val voiceListeningState   by viewModel.voiceListeningState.collectAsStateWithLifecycle()
-    val isConversationActive  by viewModel.isConversationActive.collectAsStateWithLifecycle()
-    val locationReady         by viewModel.locationReady.collectAsStateWithLifecycle()
-    val homeAddress           by viewModel.homeAddress.collectAsStateWithLifecycle()
-    val workAddress           by viewModel.workAddress.collectAsStateWithLifecycle()
+    val voiceListeningState       by viewModel.voiceListeningState.collectAsStateWithLifecycle()
+    val isConversationActive      by viewModel.isConversationActive.collectAsStateWithLifecycle()
+    val locationLoading           by viewModel.locationLoading.collectAsStateWithLifecycle()
+    val locationServicesDisabled  by viewModel.locationServicesDisabled.collectAsStateWithLifecycle()
+    val homeAddress               by viewModel.homeAddress.collectAsStateWithLifecycle()
+    val workAddress               by viewModel.workAddress.collectAsStateWithLifecycle()
 
     val conversationPermission = safetyController.getPermission(navState)
 
@@ -274,11 +278,13 @@ private fun SturmanasApp(
         !isNavigating -> {
             val displayError = startScreenError ?: if (permissionDenied) engineError else null
             StartScreen(
-                errorMessage      = displayError,
-                engineReady       = engineReady,
-                locationReady     = locationReady,
-                onOpenSettings    = { showSettings = true },
-                onStartNavigation = { destination ->
+                errorMessage             = displayError,
+                engineReady              = engineReady,
+                locationLoading          = locationLoading,
+                locationServicesDisabled = locationServicesDisabled,
+                permissionDenied         = permissionDenied,
+                onOpenSettings           = { showSettings = true },
+                onStartNavigation        = { destination ->
                     Log.d(MainActivity.FLOW_TAG, "start: destination='$destination'")
                     startScreenError = null
                     if (!engineReady) {

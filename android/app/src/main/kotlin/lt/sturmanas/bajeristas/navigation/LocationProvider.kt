@@ -4,11 +4,16 @@ import android.content.Context
 import android.location.Address
 import android.location.Geocoder
 import android.location.Location
-import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Build
 import android.os.Looper
 import android.util.Log
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationCallback
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationResult
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -24,40 +29,41 @@ import kotlin.math.sqrt
 /**
  * Provides the device's current location and reverse-geocoded locality name.
  *
- * Uses Android's [LocationManager] — no extra dependencies beyond the Android framework.
- * Tries GPS first (best accuracy), then NETWORK (faster cold-start fix).
+ * Uses Google Play Services [FusedLocationProviderClient] for the best available fix
+ * that blends GPS, Wi-Fi, and cell-tower data.  Unlike the raw [LocationManager] GPS
+ * provider, fused location delivers an initial fix within seconds using network/Wi-Fi
+ * triangulation without waiting for a cold GPS satellite lock.
  *
  * ## Continuous updates
  *
- * Call [startUpdates] from the ViewModel's [init] block to begin receiving location fixes
- * as soon as the app launches. This populates [cachedLocation] so that the first voice
- * command benefits from a real position rather than a stale last-known fix or null.
- * Call [stopUpdates] from [ViewModel.onCleared] to unsubscribe.
+ * Call [startUpdates] from the ViewModel's `init` block.  This seeds [cachedLocation]
+ * from the last-known fused fix immediately, then begins receiving fresh callbacks.
+ * Call [stopUpdates] from `ViewModel.onCleared`.
+ *
+ * ## Location services check
+ *
+ * [locationServicesEnabled] reflects whether the device's location switch is on.
+ * When false, [startUpdates] logs a warning and does NOT register callbacks (there is
+ * nothing to receive). The UI should prompt the user to enable Location Services.
  *
  * ## One-shot lookup
  *
- * [getCurrentLocation] still works as a standalone fallback but is now secondary —
- * callers should prefer reading [cachedLocation] directly when updates are running.
+ * [getCurrentLocation] works as a standalone fallback but callers should prefer
+ * reading [cachedLocation] directly when [startUpdates] is running.
  *
- * Locality is reverse-geocoded via [Geocoder] and used by [DestinationResolver]
- * to bias place searches (e.g. "artimiausia degalinė" → "degalinė, Klaipėda").
- *
- * All blocking work runs on [Dispatchers.IO]; the public functions are safe to call
- * from any coroutine context.
+ * All blocking work runs on [Dispatchers.IO].
  *
  * **Requires [android.Manifest.permission.ACCESS_FINE_LOCATION] or
- * [android.Manifest.permission.ACCESS_COARSE_LOCATION] to be granted.**
- * Returns null components gracefully if the permission is absent or no fix is
- * available yet (e.g. the device just booted and GPS hasn't acquired a lock).
+ * [android.Manifest.permission.ACCESS_COARSE_LOCATION].**
  */
 object LocationProvider {
 
     private const val TAG = "KentasLocation"
 
-    /** Minimum time between location update callbacks (30 seconds). */
+    /** Interval between fused location callbacks (30 s). */
     private const val UPDATE_INTERVAL_MS = 30_000L
 
-    /** Minimum distance before a location update callback is triggered (100 m). */
+    /** Minimum distance before a new callback is delivered (100 m). */
     private const val UPDATE_MIN_DISTANCE_M = 100f
 
     /**
@@ -78,6 +84,8 @@ object LocationProvider {
     /** Distance threshold beyond which the locality cache is invalidated (~500 m). */
     private const val LOCALITY_CACHE_MAX_DISTANCE_M = 500.0
 
+    // ── Public state ───────────────────────────────────────────────────────
+
     /**
      * The most recent location fix delivered by [startUpdates].
      * Null until the first update arrives or when [stopUpdates] clears it.
@@ -88,25 +96,32 @@ object LocationProvider {
 
     /**
      * StateFlow of the most recent known location.
-     * Emits the last-known seed immediately on [startUpdates] (if one exists),
-     * then emits each new fix from the OS listener.
-     * Emits null when [stopUpdates] is called.
+     * Emits the last-known fused seed immediately on [startUpdates] (if one exists),
+     * then emits each fresh callback. Emits null when [stopUpdates] is called.
+     *
+     * This value is NEVER set to non-null by a timeout — a non-null value always
+     * means a real location fix is available.
      */
     private val _locationFlow = MutableStateFlow<Location?>(null)
     val locationFlow: StateFlow<Location?> = _locationFlow.asStateFlow()
 
-    /** True after the first fix delivered by the OS listener (not the last-known seed). */
+    /**
+     * True when the device's location switch is on and at least one provider is enabled.
+     * Updated each time [startUpdates] is called.
+     */
+    private val _locationServicesEnabled = MutableStateFlow(true)
+    val locationServicesEnabled: StateFlow<Boolean> = _locationServicesEnabled.asStateFlow()
+
+    // ── Private state ──────────────────────────────────────────────────────
+
+    /** True after the first fresh callback (not the last-known seed). */
     @Volatile private var freshFixLogged = false
 
-    private var locationListener: LocationListener? = null
+    private var fusedClient: FusedLocationProviderClient? = null
+    private var locationCallback: LocationCallback? = null
 
     // ── Locality cache ─────────────────────────────────────────────────────
 
-    /**
-     * Cached result of the last successful reverse-geocode call.
-     * Invalidated when the device moves > [LOCALITY_CACHE_MAX_DISTANCE_M] or
-     * when the entry is older than [LOCALITY_CACHE_TTL_MS].
-     */
     private data class LocalityCache(
         val lat: Double,
         val lng: Double,
@@ -120,102 +135,113 @@ object LocationProvider {
     // ── Continuous-update API ──────────────────────────────────────────────
 
     /**
-     * Starts requesting periodic location updates from the best available provider.
+     * Start (or re-start) fused location updates.
      *
-     * Updates arrive at most every [UPDATE_INTERVAL_MS] ms and/or [UPDATE_MIN_DISTANCE_M] m.
-     * Each fix is stored in [cachedLocation] so [resolveAndNavigate] can read it without
-     * an additional blocking call.
+     * Uses [Priority.PRIORITY_BALANCED_POWER_ACCURACY] so the OS can return a fast
+     * Wi-Fi / cell fix without waiting for a cold GPS satellite lock.
+     * [setWaitForAccurateLocation] is false so the first available fix is delivered
+     * immediately even if accuracy is coarse.
      *
-     * Safe to call multiple times — existing listener is removed before registering a new one.
-     * Must be called on the Main thread (LocationManager requirement on some API levels).
+     * Safe to call multiple times — the previous callback is removed before registering
+     * a new one.  Must be called on the Main thread (FusedLocationProviderClient
+     * requires a [Looper]).
      *
-     * @param context Application context.
-     * @param onUpdate Optional callback invoked on every new fix (on the calling thread/looper).
+     * @param context    Application context.
+     * @param onUpdate   Optional callback invoked on every new fix (on the Main looper).
      */
     fun startUpdates(context: Context, onUpdate: ((Location) -> Unit)? = null) {
-        val lm = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        val appCtx = context.applicationContext
 
-        // Remove any previous listener first.
-        locationListener?.let { lm.removeUpdates(it) }
+        // ── Location services check ────────────────────────────────────────
+        val lm = appCtx.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        val servicesEnabled = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            lm.isLocationEnabled
+        } else {
+            lm.isProviderEnabled(LocationManager.GPS_PROVIDER) ||
+                lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
+        }
+        _locationServicesEnabled.value = servicesEnabled
+        Log.i(TAG, "LOCATION_SERVICES_ENABLED=$servicesEnabled")
 
-        val listener = object : LocationListener {
-            override fun onLocationChanged(location: Location) {
-                cachedLocation = location
-                _locationFlow.value = location
-                onUpdate?.invoke(location)
+        if (!servicesEnabled) {
+            Log.w(TAG, "startUpdates: location services disabled — skipping callback registration")
+            return
+        }
+
+        val fused = fusedClient
+            ?: LocationServices.getFusedLocationProviderClient(appCtx).also { fusedClient = it }
+
+        // Remove any previous callback before registering a new one.
+        locationCallback?.let {
+            fused.removeLocationUpdates(it)
+            Log.d(TAG, "startUpdates: removed previous location callback")
+        }
+
+        val request = LocationRequest.Builder(
+            Priority.PRIORITY_BALANCED_POWER_ACCURACY,
+            UPDATE_INTERVAL_MS,
+        )
+            .setMinUpdateDistanceMeters(UPDATE_MIN_DISTANCE_M)
+            // Deliver the first available fix immediately even if accuracy is coarse.
+            // This gives a fast Wi-Fi/cell fix before GPS locks.
+            .setWaitForAccurateLocation(false)
+            .build()
+
+        val callback = object : LocationCallback() {
+            override fun onLocationResult(result: LocationResult) {
+                val loc = result.lastLocation ?: return
+                cachedLocation = loc
+                _locationFlow.value = loc
+                onUpdate?.invoke(loc)
+                val ageMs = System.currentTimeMillis() - loc.time
+                Log.i(TAG,
+                    "FUSED_LOCATION_RECEIVED" +
+                    " lat=${loc.latitude} lng=${loc.longitude}" +
+                    " ageMs=$ageMs accuracy=${loc.accuracy}m provider=${loc.provider}")
                 if (!freshFixLogged) {
                     freshFixLogged = true
-                    Log.i(TAG, "FIRST FRESH LOCATION FIX:" +
-                        " lat=${location.latitude} lng=${location.longitude}" +
-                        " provider=${location.provider} accuracy=${location.accuracy}m")
-                } else {
-                    Log.d(TAG, "Location update:" +
-                        " lat=${location.latitude} lng=${location.longitude}" +
-                        " provider=${location.provider}")
+                    Log.i(TAG,
+                        "FIRST FRESH LOCATION FIX:" +
+                        " lat=${loc.latitude} lng=${loc.longitude}" +
+                        " provider=${loc.provider} accuracy=${loc.accuracy}m")
                 }
             }
-
-            // Deprecated in API 29 but required for compatibility with older devices.
-            @Deprecated("Deprecated in Java")
-            override fun onStatusChanged(provider: String?, status: Int, extras: android.os.Bundle?) = Unit
-            override fun onProviderEnabled(provider: String) = Unit
-            override fun onProviderDisabled(provider: String) = Unit
         }
-        locationListener = listener
+        locationCallback = callback
 
-        val providers = buildList {
-            // Prefer FUSED on API 31+ for best accuracy with battery efficiency.
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) add(LocationManager.FUSED_PROVIDER)
-            add(LocationManager.GPS_PROVIDER)
-            add(LocationManager.NETWORK_PROVIDER)
-        }
+        @Suppress("MissingPermission")
+        fused.requestLocationUpdates(request, callback, Looper.getMainLooper())
+        Log.d(TAG, "startUpdates: fused location updates registered")
 
-        var registered = false
-        for (provider in providers) {
-            try {
-                if (lm.isProviderEnabled(provider)) {
-                    @Suppress("MissingPermission")
-                    lm.requestLocationUpdates(
-                        provider,
-                        UPDATE_INTERVAL_MS,
-                        UPDATE_MIN_DISTANCE_M,
-                        listener,
-                        Looper.getMainLooper(),
-                    )
-                    Log.d(TAG, "Registered location updates on provider '$provider'")
-                    registered = true
-                    break
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "requestLocationUpdates($provider) failed: ${e.message}")
-            }
-        }
-
-        if (!registered) {
-            Log.w(TAG, "No location provider available for continuous updates")
-        }
-
-        // Seed cachedLocation immediately from last-known so the ViewModel has
+        // Seed cachedLocation immediately from last-known fused fix so the ViewModel has
         // something useful before the first update callback fires.
         if (cachedLocation == null) {
-            cachedLocation = getBestLastKnownLocation(lm)?.also {
-                Log.d(TAG, "Seeded cachedLocation from last-known: lat=${it.latitude} lng=${it.longitude}")
-                _locationFlow.value = it   // emit seed so locationReady becomes true immediately
+            @Suppress("MissingPermission")
+            fused.lastLocation.addOnSuccessListener { loc ->
+                if (loc != null && cachedLocation == null) {
+                    cachedLocation = loc
+                    _locationFlow.value = loc
+                    val ageMs = System.currentTimeMillis() - loc.time
+                    Log.i(TAG,
+                        "FUSED_LOCATION_RECEIVED (last-known seed)" +
+                        " lat=${loc.latitude} lng=${loc.longitude}" +
+                        " ageMs=$ageMs accuracy=${loc.accuracy}m")
+                }
             }
         }
     }
 
     /**
-     * Stops location updates and clears [cachedLocation] and the locality cache.
-     * Call from [ViewModel.onCleared] to release the system resource.
+     * Stops fused location updates and clears [cachedLocation] and the locality cache.
+     * Call from `ViewModel.onCleared`.
      */
     fun stopUpdates(context: Context) {
-        val lm = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
-        locationListener?.let {
-            lm.removeUpdates(it)
-            Log.d(TAG, "Location updates stopped")
+        val fused = fusedClient
+        locationCallback?.let { cb ->
+            fused?.removeLocationUpdates(cb)
+            Log.d(TAG, "stopUpdates: fused location updates removed")
         }
-        locationListener = null
+        locationCallback = null
         cachedLocation = null
         localityCache = null
         _locationFlow.value = null
@@ -231,9 +257,6 @@ object LocationProvider {
      *  - [Triple.first]  = latitude, null if no location fix is available
      *  - [Triple.second] = longitude, null if no location fix is available
      *  - [Triple.third]  = locality name (e.g. "Klaipėda"), null if geocoding fails
-     *
-     * Failure is always silent — a null result means [DestinationResolver] falls
-     * back to unbiased searches rather than throwing or blocking the user.
      *
      * Prefer reading [cachedLocation] directly when [startUpdates] is running.
      */
@@ -256,10 +279,6 @@ object LocationProvider {
                 "location lat=$lat lng=$lng provider=${location.provider} " +
                 "ageMs=$ageMs cachedLocationPresent=${cachedLocation != null}")
 
-            // A location fix older than LOCATION_MAX_AGE_MS must not supply a city name —
-            // it may come from a previous session in a different city and would silently
-            // route the user to the wrong place.  Coordinates are still returned so
-            // proximity bias (e.g. nearby POI searches) continues to work.
             val locality: String?
             if (ageMs > LOCATION_MAX_AGE_MS) {
                 Log.w("KentasLocationContext",
@@ -278,21 +297,18 @@ object LocationProvider {
     // ── Private helpers ────────────────────────────────────────────────────
 
     /**
-     * Tries GPS, then NETWORK provider in order and returns the first non-null
-     * last-known location. Returns null if neither provider has a cached fix.
-     * All SecurityException / IllegalArgumentException errors are swallowed so
-     * a missing permission does not crash — the caller receives null instead.
+     * Fallback for [getCurrentLocation]: tries GPS, NETWORK, then FUSED provider
+     * via raw [LocationManager.getLastKnownLocation]. Used when [cachedLocation] is null
+     * (i.e. [startUpdates] hasn't received a callback yet).
      */
-    private fun getBestLastKnownLocation(lm: LocationManager): android.location.Location? {
+    private fun getBestLastKnownLocation(lm: LocationManager): Location? {
         val providers = buildList {
             add(LocationManager.GPS_PROVIDER)
             add(LocationManager.NETWORK_PROVIDER)
-            // FUSED_PROVIDER is available on API 31+; include it as an additional candidate.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 add(LocationManager.FUSED_PROVIDER)
             }
         }
-
         return providers.firstNotNullOfOrNull { provider ->
             try {
                 @Suppress("MissingPermission")
@@ -305,13 +321,8 @@ object LocationProvider {
     }
 
     /**
-     * Returns a cached locality if the cache is still fresh and the device hasn't
-     * moved significantly; otherwise fetches a fresh value via [reverseGeocodeLocality]
-     * and stores it in [localityCache].
-     *
-     * Cache is valid when:
-     *  - age < [LOCALITY_CACHE_TTL_MS] (5 minutes), AND
-     *  - Haversine distance from cached position < [LOCALITY_CACHE_MAX_DISTANCE_M] (500 m).
+     * Returns a cached locality if still fresh and device hasn't moved significantly;
+     * otherwise fetches a fresh value via [reverseGeocodeLocality] and caches it.
      */
     private suspend fun getCachedOrFetchLocality(
         context: Context,
@@ -338,7 +349,7 @@ object LocationProvider {
 
     /**
      * Approximate straight-line distance in metres between two WGS-84 coordinates
-     * using the Haversine formula. Accurate enough for the 500 m invalidation threshold.
+     * using the Haversine formula.
      */
     private fun haversineDistanceM(lat1: Double, lng1: Double, lat2: Double, lng2: Double): Double {
         val earthRadiusM = 6_371_000.0
@@ -352,8 +363,7 @@ object LocationProvider {
 
     /**
      * Reverse-geocodes [lat]/[lng] to the most specific available locality name.
-     *
-     * Priority: locality → subAdminArea → adminArea (broadest fallback).
+     * Priority: locality → subAdminArea → adminArea.
      * Returns null if [Geocoder] returns no results or throws.
      */
     private suspend fun reverseGeocodeLocality(

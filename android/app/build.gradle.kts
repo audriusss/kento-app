@@ -86,6 +86,7 @@ dependencies {
     // Requires: Navigation SDK enabled in Google Cloud Console + valid API key in local.properties
     // If local.properties has no key, app falls back to MockNavigationEngine automatically.
     implementation("com.google.android.libraries.navigation:navigation:7.8.0")
+    implementation("com.google.android.gms:play-services-location:21.3.0")
 
     // Coroutines (for MockNavigationEngine simulation and suspend functions)
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")

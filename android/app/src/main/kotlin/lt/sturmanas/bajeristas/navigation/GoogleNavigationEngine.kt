@@ -7,6 +7,9 @@ import android.location.Geocoder
 import android.os.Build
 import android.util.Log
 import android.view.View
+import com.google.android.gms.maps.CameraUpdateFactory
+import com.google.android.gms.maps.GoogleMap
+import com.google.android.gms.maps.model.LatLng
 import com.google.android.libraries.navigation.ArrivalEvent
 import com.google.android.libraries.navigation.NavigationApi
 import com.google.android.libraries.navigation.NavigationView
@@ -18,9 +21,13 @@ import com.google.android.libraries.navigation.Waypoint
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import lt.sturmanas.bajeristas.BuildConfig
@@ -76,6 +83,25 @@ class GoogleNavigationEngine : NavigationEngine {
     private val ioScope = CoroutineScope(Dispatchers.IO)
 
     /**
+     * Scope used for Main-thread map operations (enabling blue dot, camera move).
+     * Cancelled in [onDestroy] to prevent leaks if the engine outlives the view.
+     */
+    private val mainScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+
+    /**
+     * Reference to the underlying [GoogleMap] obtained via [NavigationView.getMapAsync].
+     * Null until the map is ready and cleared on [onViewDestroy].
+     */
+    private var googleMap: GoogleMap? = null
+
+    /**
+     * One-shot job that waits for the first location fix and animates the camera.
+     * Cancelled on [onViewDestroy] so a pending camera move from a previous navigation
+     * session does not fire on a freshly-created view.
+     */
+    private var mapCameraJob: Job? = null
+
+    /**
      * Guards NavigationView re-creation.
      * Reset in [createNavigationView]; set in [onViewDestroy] and [onDestroy].
      * Only blocks NavigationView teardown, not Navigator access.
@@ -119,6 +145,13 @@ class GoogleNavigationEngine : NavigationEngine {
         const val TAG     = "GoogleNavEngine"
         const val NAV_TAG = "KentasNavigation"
         const val MAP_TAG = "KentasMap"
+
+        /**
+         * Initial map zoom level used when the camera is centered on the user's
+         * current position.  16.0f gives a roughly 200 m field of view — practical
+         * for urban driving without being too close to see the next junction.
+         */
+        const val DRIVING_ZOOM_LEVEL = 16.0f
 
         /** Minimum confidence score for a geocoder result to be accepted. */
         const val SCORE_THRESHOLD = 3
@@ -422,13 +455,70 @@ class GoogleNavigationEngine : NavigationEngine {
     override fun createNavigationView(context: Context): View {
         Log.d(TAG, "createNavigationView: resetting isViewDestroyed flag")
         isViewDestroyed = false
-        return NavigationView(context).also { view ->
-            navigationView = view
-            // onCreate must be called here, during composition (inside remember {} in
-            // NavigationScreen), so that the view is non-null when DisposableEffect
-            // side-effects run and the lifecycle observer replays ON_START / ON_RESUME.
-            view.onCreate(null)
+        val view = NavigationView(context)
+        navigationView = view
+        // onCreate must be called here, during composition (inside remember {} in
+        // NavigationScreen), so that the view is non-null when DisposableEffect
+        // side-effects run and the lifecycle observer replays ON_START / ON_RESUME.
+        view.onCreate(null)
+
+        // ── Map readiness: blue dot + initial camera ───────────────────
+        //
+        // getMapAsync delivers the underlying GoogleMap on the Main thread once it is
+        // ready.  We do two things here:
+        //
+        //  1. Enable isMyLocationEnabled — shows the blue dot and the "my location" button.
+        //     Permission is guaranteed at this point: NavigationScreen is only shown after
+        //     navigation starts, which requires the engine to have initialised, which
+        //     requires ACCESS_FINE_LOCATION to be granted.
+        //
+        //  2. Animate the camera to the user's current position exactly ONCE.  If a fix
+        //     is already cached we move immediately; otherwise we wait for the first fix
+        //     from locationFlow (which is a StateFlow — it replays the latest value).
+        //     The job is stored in mapCameraJob so onViewDestroy can cancel it if the
+        //     NavigationScreen unmounts before a fix arrives.
+        //
+        //  The Navigation SDK takes over camera control once guidance starts, so this
+        //  initial move only matters for the brief "Calculating route…" window.
+        view.getMapAsync { map ->
+            googleMap = map
+
+            try {
+                @Suppress("MissingPermission")
+                map.isMyLocationEnabled = true
+                Log.i(MAP_TAG, "USER_LOCATION_LAYER_ENABLED")
+            } catch (e: SecurityException) {
+                Log.w(MAP_TAG, "isMyLocationEnabled: permission not granted — ${e.message}")
+            }
+
+            // Cancel any stale camera job from a previous navigation attempt.
+            mapCameraJob?.cancel()
+
+            val cachedFix = LocationProvider.cachedLocation
+            if (cachedFix != null) {
+                // Fix already available — move camera synchronously (we're on Main).
+                val latLng = LatLng(cachedFix.latitude, cachedFix.longitude)
+                map.moveCamera(CameraUpdateFactory.newLatLngZoom(latLng, DRIVING_ZOOM_LEVEL))
+                Log.i(MAP_TAG,
+                    "MAP_CAMERA_MOVED_TO_CURRENT_LOCATION" +
+                    " lat=${cachedFix.latitude} lng=${cachedFix.longitude} (immediate)")
+            } else {
+                // No fix yet — wait for the first non-null emission from locationFlow.
+                // filterNotNull().first() collects exactly one value then completes.
+                mapCameraJob = mainScope.launch {
+                    val loc = LocationProvider.locationFlow
+                        .filterNotNull()
+                        .first()
+                    val latLng = LatLng(loc.latitude, loc.longitude)
+                    map.animateCamera(CameraUpdateFactory.newLatLngZoom(latLng, DRIVING_ZOOM_LEVEL))
+                    Log.i(MAP_TAG,
+                        "MAP_CAMERA_MOVED_TO_CURRENT_LOCATION" +
+                        " lat=${loc.latitude} lng=${loc.longitude} (after fix)")
+                }
+            }
         }
+
+        return view
     }
 
     override fun enableStandardVoice() {
@@ -469,6 +559,10 @@ class GoogleNavigationEngine : NavigationEngine {
         isViewDestroyed = true
         Log.d(TAG,     "onViewDestroy: tearing down NavigationView only (Navigator stays alive) attemptId=$navAttemptId")
         Log.d(MAP_TAG, "NavigationView onDestroy (view-only teardown, navigator alive)")
+        // Cancel the pending camera-move job so it doesn't fire on a new view.
+        mapCameraJob?.cancel()
+        mapCameraJob = null
+        googleMap = null
         navigationView?.onDestroy()
         navigationView = null
     }
@@ -484,6 +578,7 @@ class GoogleNavigationEngine : NavigationEngine {
         Log.d(MAP_TAG, "NavigationView onDestroy (full teardown path)")
         sessionActive  = false
         guidanceStarted = false
+        mainScope.coroutineContext[Job]?.cancel()  // cancel all mainScope children
         onViewDestroy()                // tears down NavigationView (idempotent)
         navigator?.cleanup()
         navigator = null

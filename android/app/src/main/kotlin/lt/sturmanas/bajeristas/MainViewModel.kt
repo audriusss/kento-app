@@ -1,6 +1,7 @@
 package lt.sturmanas.bajeristas
 
 import android.app.Application
+import android.location.Location
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -34,7 +35,7 @@ import lt.sturmanas.bajeristas.voice.VoiceListeningState
  * [KentasNavigationPhraseFormatter] (deterministic nav phrases), and
  * [SavedPlacesRepository] (home/work addresses).
  *
- * ## Conversation flow (new simplified architecture)
+ * ## Conversation flow
  *
  * 1. User taps mic button → [toggleConversation] → [KentasConversationController].
  * 2. SR fires → AI call via [askKentas] → TTS via [KentasSpeechCoordinator].
@@ -46,15 +47,32 @@ import lt.sturmanas.bajeristas.voice.VoiceListeningState
  * when distance crosses an announcement threshold.  [KentasSpeechCoordinator]
  * guarantees navigation audio always interrupts conversation audio.
  *
- * ## Voice destination entry
+ * ## Location state — two separate signals
  *
- * Removed. Destination is typed only; [navigationController.startNavigation] is
- * called directly from the UI layer with the text-field contents.
+ * [currentLocation] — the actual fused location fix. NEVER set to non-null by a timeout.
+ * A non-null value always means a real GPS/network/Wi-Fi fix is available. Use this
+ * for route calculation validation.
+ *
+ * [locationLoading] — spinner controller. True while no fix has arrived AND the 10 s
+ * graceful timeout has not yet fired. Goes false when either condition is met so the
+ * loading badge disappears. Does NOT imply a real fix exists.
+ *
+ * [locationServicesDisabled] — true when the device Location switch is off. Shown as
+ * an action banner prompting the user to enable Location Services.
  */
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
         private const val TAG = "KentasVM"
+
+        /**
+         * How long we show the "Gaunama GPS vieta…" loading badge while waiting for
+         * the first fused fix. After this delay [locationLoading] goes false regardless
+         * of whether a fix arrived, so the spinner doesn't block the user forever.
+         * A missing fix is expressed by [currentLocation] remaining null — not by a fake
+         * non-null value.
+         */
+        internal const val LOCATION_READY_TIMEOUT_MS = 10_000L
     }
 
     // ── Audio output ──────────────────────────────────────────────────────
@@ -118,38 +136,68 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val markerRepository = CommunityMarkerRepository(application)
 
-    // ── Location readiness ────────────────────────────────────────────────
+    // ── Location state ────────────────────────────────────────────────────
 
     /**
-     * Becomes true after 10 s so the loading badge disappears even if GPS never
-     * delivers a fix (tunnel, denied permission, hardware issue).
+     * The actual fused location fix. Directly mirrors [LocationProvider.locationFlow].
+     *
+     * NEVER non-null due to a timeout. A non-null value always represents a real
+     * GPS / Wi-Fi / cell fix received from the fused provider.
+     *
+     * Use this when you need to validate that a real location is available before
+     * routing (e.g. a null check guards against routing from coordinates (0, 0)).
      */
-    private val _locationReadyTimeout = MutableStateFlow(false)
+    val currentLocation: StateFlow<Location?> = LocationProvider.locationFlow
 
     /**
-     * True when a usable location (fresh or last-known seed) is available, OR
-     * after a 10-second fallback timeout so the UI is never permanently blocked.
+     * True while location is still loading (no fix yet AND timeout not yet fired).
+     *
+     * When true, the "Gaunama GPS vieta…" spinner badge is shown on StartScreen.
+     * Goes false when either:
+     *  - the first fused fix arrives ([currentLocation] becomes non-null), OR
+     *  - [LOCATION_READY_TIMEOUT_MS] (10 s) elapses (no fix, but we stop blocking the UI).
+     *
+     * A false value here does NOT mean a fix is available — check [currentLocation].
      */
-    val locationReady: StateFlow<Boolean> =
-        combine(LocationProvider.locationFlow, _locationReadyTimeout) { loc, timeout ->
-            loc != null || timeout
+    private val _locationLoadingTimeout = MutableStateFlow(false)
+
+    val locationLoading: StateFlow<Boolean> =
+        combine(LocationProvider.locationFlow, _locationLoadingTimeout) { loc, timedOut ->
+            // Still loading if: no fix AND timeout has not yet fired.
+            loc == null && !timedOut
         }.stateIn(
             viewModelScope,
             SharingStarted.Eagerly,
-            initialValue = LocationProvider.locationFlow.value != null,
+            // Initial value: loading if there is no fix right now.
+            initialValue = LocationProvider.locationFlow.value == null,
         )
+
+    /**
+     * True when the device's Location Services switch is disabled.
+     * Shown as a banner on StartScreen prompting the user to enable Location.
+     * Accurate only after [startLocationUpdates] (or [retryLocationUpdates]) has been called.
+     */
+    val locationServicesDisabled: StateFlow<Boolean> =
+        LocationProvider.locationServicesEnabled
+            .map { enabled -> !enabled }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, initialValue = false)
 
     // ── Init ──────────────────────────────────────────────────────────────
 
     init {
         speechRecognitionManager.initialize()
         startLocationUpdates()
-        // Arm a 10-second fallback so the GPS loading badge never blocks the user.
+
+        // Arm the graceful 10 s fallback so the spinner never blocks the user permanently.
+        // This timeout only hides the spinner — it does NOT set currentLocation to non-null.
         viewModelScope.launch {
-            delay(10_000L)
-            if (!_locationReadyTimeout.value) {
-                _locationReadyTimeout.value = true
-                Log.d(TAG, "locationReady: 10 s timeout — proceeding without fresh GPS fix")
+            delay(LOCATION_READY_TIMEOUT_MS)
+            if (!_locationLoadingTimeout.value) {
+                _locationLoadingTimeout.value = true
+                val hasRealFix = LocationProvider.locationFlow.value != null
+                Log.d(TAG,
+                    "locationLoading: ${LOCATION_READY_TIMEOUT_MS}ms timeout fired" +
+                    " hasRealFix=$hasRealFix — hiding spinner regardless")
             }
         }
         Log.d(TAG, "MainViewModel initialised")
@@ -158,8 +206,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ── Location updates ──────────────────────────────────────────────────
 
     /**
-     * Start (or re-start) continuous location updates.
-     * Called from init and from MainActivity when location permission transitions
+     * Start (or re-start) fused location updates.
+     * Called from [init] and from MainActivity when location permission transitions
      * from denied → granted.
      */
     fun retryLocationUpdates() {
@@ -208,7 +256,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (phrase.isNotBlank()) {
             Log.d(TAG, "speakNavInstruction: interrupting conv for maneuver TTS")
             speechCoordinator.speakNavigation(phrase) {
-                // Resume conversation listening after the maneuver instruction finishes.
                 conversationController.resumeAfterNavInterrupt()
             }
         }
