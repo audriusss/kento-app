@@ -164,6 +164,7 @@ private fun SturmanasApp(
 
     val voiceListeningState   by viewModel.voiceListeningState.collectAsStateWithLifecycle()
     val isConversationActive  by viewModel.isConversationActive.collectAsStateWithLifecycle()
+    val locationReady         by viewModel.locationReady.collectAsStateWithLifecycle()
     val homeAddress           by viewModel.homeAddress.collectAsStateWithLifecycle()
     val workAddress           by viewModel.workAddress.collectAsStateWithLifecycle()
 
@@ -275,6 +276,7 @@ private fun SturmanasApp(
             StartScreen(
                 errorMessage      = displayError,
                 engineReady       = engineReady,
+                locationReady     = locationReady,
                 onOpenSettings    = { showSettings = true },
                 onStartNavigation = { destination ->
                     Log.d(MainActivity.FLOW_TAG, "start: destination='$destination'")

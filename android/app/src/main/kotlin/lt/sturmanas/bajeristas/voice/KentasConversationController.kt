@@ -143,8 +143,33 @@ class KentasConversationController(
         history.clear()
         val myGen = generation
         Log.d(TAG, "startConversation gen=$myGen")
-        resetInactivityTimer(myGen)
+        resetInactivityTimer(myGen, "session-start")
         installCallbacks(myGen)
+        startListening(myGen)
+    }
+
+    // ── Public: post-navigation recovery ──────────────────────────────────
+
+    /**
+     * Called by [MainViewModel] when a navigation TTS utterance has finished.
+     *
+     * Resumes exactly one listening session if the conversation is still active.
+     * Restarts the 30-second inactivity timer so the nav-TTS duration does not
+     * count against the user's silence budget.
+     *
+     * No-op if:
+     *  - the conversation was stopped by the user before the nav utterance finished
+     *  - the inactivity timer already expired during the nav utterance
+     *  - the generation has advanced (session restarted)
+     */
+    fun resumeAfterNavInterrupt() {
+        if (!_isActive.value) {
+            Log.d(TAG, "resumeAfterNavInterrupt: conversation not active — skipped")
+            return
+        }
+        val myGen = generation
+        Log.d(TAG, "resumeAfterNavInterrupt gen=$myGen — nav TTS done, resuming listening")
+        resetInactivityTimer(myGen, "nav-interrupt-resume")
         startListening(myGen)
     }
 
@@ -166,7 +191,7 @@ class KentasConversationController(
         speechManager.onBeginningOfSpeech = {
             if (isCurrentGen(myGen, "onBeginningOfSpeech")) {
                 _state.value = ConversationState.USER_SPEAKING
-                resetInactivityTimer(myGen)   // user is actively speaking — reset timer
+                resetInactivityTimer(myGen, "beginning-of-speech")
             }
         }
 
@@ -175,7 +200,7 @@ class KentasConversationController(
         speechManager.onResult = { text ->
             if (isCurrentGen(myGen, "onResult")) {
                 retryCount = 0
-                resetInactivityTimer(myGen)
+                resetInactivityTimer(myGen, "result-received")
                 handleResult(text, myGen)
             }
         }
@@ -247,8 +272,10 @@ class KentasConversationController(
 
             _state.value = ConversationState.SPEAKING
             speechCoordinator.speakConversation(reply) {
-                // onDone: re-enter listening cycle.
+                // onDone: AI response finished speaking.
+                // Reset timer so the full 30 s belongs to the user, not to AI+TTS time.
                 if (isCurrentGenValue(myGen)) {
+                    resetInactivityTimer(myGen, "ai-response-done")
                     _state.value = ConversationState.LISTENING
                     startListening(myGen)
                 }
@@ -258,7 +285,8 @@ class KentasConversationController(
 
     // ── Inactivity timer ──────────────────────────────────────────────────
 
-    private fun resetInactivityTimer(myGen: Long) {
+    private fun resetInactivityTimer(myGen: Long, reason: String = "") {
+        Log.d(TAG, "resetInactivityTimer gen=$myGen${if (reason.isNotEmpty()) " reason=$reason" else ""}")
         inactivityJob?.cancel()
         inactivityJob = scope.launch {
             delay(INACTIVITY_TIMEOUT_MS)

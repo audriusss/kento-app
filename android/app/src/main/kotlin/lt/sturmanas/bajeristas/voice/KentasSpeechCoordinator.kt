@@ -42,6 +42,14 @@ class KentasSpeechCoordinator(
     /** Callback invoked after a conversation utterance finishes. Cleared by [speakNavigation]. */
     private var onConversationDone: (() -> Unit)? = null
 
+    /**
+     * Callback invoked after a navigation utterance finishes.
+     * Set by [speakNavigation]; takes priority over [onConversationDone].
+     * Cleared to null before invoking, so a second nav utterance does not
+     * re-trigger the previous callback.
+     */
+    private var onNavigationDone: (() -> Unit)? = null
+
     private var watchdogJob: Job? = null
 
     init {
@@ -58,12 +66,15 @@ class KentasSpeechCoordinator(
         }
 
         ttsManager.onDone = {
-            Log.d(TAG, "TTS onDone — cancelling watchdog, invoking conversation callback")
+            Log.d(TAG, "TTS onDone — cancelling watchdog")
             watchdogJob?.cancel()
             watchdogJob = null
-            val cb = onConversationDone
+            // Navigation callback takes priority. Exactly one callback fires per utterance.
+            val navCb  = onNavigationDone
+            val convCb = onConversationDone
+            onNavigationDone  = null
             onConversationDone = null
-            cb?.invoke()
+            navCb?.invoke() ?: convCb?.invoke()
         }
     }
 
@@ -74,11 +85,16 @@ class KentasSpeechCoordinator(
      *
      * Interrupts any in-progress conversation TTS immediately (QUEUE_FLUSH).
      * Clears [onConversationDone] so the conversation controller does NOT re-listen
-     * after the nav instruction; the controller's inactivity timer handles that.
+     * from the conversation path; [onDone] is invoked instead so the controller
+     * can resume one listening session after the nav utterance finishes.
+     *
+     * @param onDone Optional callback invoked when this utterance finishes.
+     *               Typically wired to [KentasConversationController.resumeAfterNavInterrupt].
      */
-    fun speakNavigation(text: String) {
-        Log.d(TAG, "speakNavigation: '${text.take(60)}'")
+    fun speakNavigation(text: String, onDone: (() -> Unit)? = null) {
+        Log.d(TAG, "speakNavigation (interrupting conv): '${text.take(60)}'")
         onConversationDone = null   // pre-empt any pending conversation callback
+        onNavigationDone   = onDone
         ttsManager.speak(text)
     }
 
@@ -97,9 +113,10 @@ class KentasSpeechCoordinator(
         ttsManager.speak(text)
     }
 
-    /** Stop any playing speech immediately. Does NOT invoke [onConversationDone]. */
+    /** Stop any playing speech immediately. Does NOT invoke any pending callbacks. */
     fun stop() {
         onConversationDone = null
+        onNavigationDone   = null
         watchdogJob?.cancel()
         watchdogJob = null
         ttsManager.stop()

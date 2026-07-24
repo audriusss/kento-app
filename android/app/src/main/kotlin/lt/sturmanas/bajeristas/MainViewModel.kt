@@ -4,12 +4,15 @@ import android.app.Application
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 import lt.sturmanas.bajeristas.community.CommunityMarkerRepository
 import lt.sturmanas.bajeristas.navigation.LocationProvider
 import lt.sturmanas.bajeristas.navigation.ManeuverType
@@ -115,11 +118,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val markerRepository = CommunityMarkerRepository(application)
 
+    // ── Location readiness ────────────────────────────────────────────────
+
+    /**
+     * Becomes true after 10 s so the loading badge disappears even if GPS never
+     * delivers a fix (tunnel, denied permission, hardware issue).
+     */
+    private val _locationReadyTimeout = MutableStateFlow(false)
+
+    /**
+     * True when a usable location (fresh or last-known seed) is available, OR
+     * after a 10-second fallback timeout so the UI is never permanently blocked.
+     */
+    val locationReady: StateFlow<Boolean> =
+        combine(LocationProvider.locationFlow, _locationReadyTimeout) { loc, timeout ->
+            loc != null || timeout
+        }.stateIn(
+            viewModelScope,
+            SharingStarted.Eagerly,
+            initialValue = LocationProvider.locationFlow.value != null,
+        )
+
     // ── Init ──────────────────────────────────────────────────────────────
 
     init {
         speechRecognitionManager.initialize()
         startLocationUpdates()
+        // Arm a 10-second fallback so the GPS loading badge never blocks the user.
+        viewModelScope.launch {
+            delay(10_000L)
+            if (!_locationReadyTimeout.value) {
+                _locationReadyTimeout.value = true
+                Log.d(TAG, "locationReady: 10 s timeout — proceeding without fresh GPS fix")
+            }
+        }
         Log.d(TAG, "MainViewModel initialised")
     }
 
@@ -174,7 +206,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             nextRoadName  = navState.nextRoadName,
         )
         if (phrase.isNotBlank()) {
-            speechCoordinator.speakNavigation(phrase)
+            Log.d(TAG, "speakNavInstruction: interrupting conv for maneuver TTS")
+            speechCoordinator.speakNavigation(phrase) {
+                // Resume conversation listening after the maneuver instruction finishes.
+                conversationController.resumeAfterNavInterrupt()
+            }
         }
     }
 
@@ -185,7 +221,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun speakRouteReady(destinationName: String) {
         if (isSpeechBlocked) return
         val dest = destinationName.ifBlank { "tikslą" }
-        speechCoordinator.speakNavigation("Maršrutas į $dest paruoštas. Pradedame kelionę.")
+        speechCoordinator.speakNavigation("Maršrutas į $dest paruoštas. Pradedame kelionę.") {
+            conversationController.resumeAfterNavInterrupt()
+        }
     }
 
     /**

@@ -11,6 +11,9 @@ import android.os.Looper
 import android.util.Log
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import java.util.Locale
 import kotlin.math.atan2
@@ -83,6 +86,18 @@ object LocationProvider {
     var cachedLocation: Location? = null
         private set
 
+    /**
+     * StateFlow of the most recent known location.
+     * Emits the last-known seed immediately on [startUpdates] (if one exists),
+     * then emits each new fix from the OS listener.
+     * Emits null when [stopUpdates] is called.
+     */
+    private val _locationFlow = MutableStateFlow<Location?>(null)
+    val locationFlow: StateFlow<Location?> = _locationFlow.asStateFlow()
+
+    /** True after the first fix delivered by the OS listener (not the last-known seed). */
+    @Volatile private var freshFixLogged = false
+
     private var locationListener: LocationListener? = null
 
     // ── Locality cache ─────────────────────────────────────────────────────
@@ -125,9 +140,19 @@ object LocationProvider {
 
         val listener = object : LocationListener {
             override fun onLocationChanged(location: Location) {
-                Log.d(TAG, "Location update: lat=${location.latitude} lng=${location.longitude} provider=${location.provider}")
                 cachedLocation = location
+                _locationFlow.value = location
                 onUpdate?.invoke(location)
+                if (!freshFixLogged) {
+                    freshFixLogged = true
+                    Log.i(TAG, "FIRST FRESH LOCATION FIX:" +
+                        " lat=${location.latitude} lng=${location.longitude}" +
+                        " provider=${location.provider} accuracy=${location.accuracy}m")
+                } else {
+                    Log.d(TAG, "Location update:" +
+                        " lat=${location.latitude} lng=${location.longitude}" +
+                        " provider=${location.provider}")
+                }
             }
 
             // Deprecated in API 29 but required for compatibility with older devices.
@@ -175,6 +200,7 @@ object LocationProvider {
         if (cachedLocation == null) {
             cachedLocation = getBestLastKnownLocation(lm)?.also {
                 Log.d(TAG, "Seeded cachedLocation from last-known: lat=${it.latitude} lng=${it.longitude}")
+                _locationFlow.value = it   // emit seed so locationReady becomes true immediately
             }
         }
     }
@@ -192,6 +218,8 @@ object LocationProvider {
         locationListener = null
         cachedLocation = null
         localityCache = null
+        _locationFlow.value = null
+        freshFixLogged = false
     }
 
     // ── One-shot API ───────────────────────────────────────────────────────

@@ -1,0 +1,70 @@
+The simplified Kentas build now launches, finds manual addresses, and navigation starts.
+
+Do not refactor architecture again.
+Fix only these three runtime behavior issues.
+
+1. Automatic current location
+
+On app launch, obtain the user's current GPS location automatically.
+
+Requirements:
+- request location permission if needed
+- use a fresh location, not only a stale last-known value
+- show a loading/current-location state until a usable location is available
+- update the map camera/current-location UI when the first valid location arrives
+- route start must use the latest available current location
+- do not block the whole app forever if GPS is unavailable
+- preserve manual destination entry
+
+2. Conversation inactivity timeout is currently too short in practice
+
+The configured timeout may remain 30 seconds, but it must mean 30 seconds of actual user inactivity.
+
+Reset/restart the inactivity timer when:
+- conversation opens
+- onBeginningOfSpeech fires
+- a valid speech result arrives
+- the AI response finishes speaking
+- listening resumes after a navigation interruption
+- the user manually interacts with the conversation
+
+Do not let AI response time or navigation TTS consume most of the 30-second inactivity window.
+
+3. Navigation instruction interrupts conversation but conversation does not recover naturally
+
+Navigation audio must still have priority.
+
+Required flow:
+- pause or stop conversational TTS
+- speak the maneuver instruction
+- when navigation TTS finishes, check whether Kentas conversation is still active
+- if active, resume one SpeechRecognizer listening session
+- restart the 30-second inactivity timer
+- do not create duplicate listening sessions
+- do not reopen conversation if the user manually closed it or the timeout already expired
+- do not stop or restart navigation
+
+Add focused logs for:
+- first valid current location
+- inactivity timer reset reason
+- navigation TTS interruption
+- conversation listening resumed after maneuver
+
+Add focused tests for:
+- fresh location is preferred over stale last-known location
+- AI response duration does not expire conversation
+- maneuver TTS resumes listening exactly once
+- closed conversation is not reopened after maneuver
+
+Do not touch community markers, destination resolution, navigation engine, personality, or UI structure beyond what is necessary.
+
+Run all available tests.
+Commit locally.
+Do not push.
+
+Report:
+- exact files changed
+- root cause of each issue
+- exact behavior after fix
+- tests added
+- commit hash
