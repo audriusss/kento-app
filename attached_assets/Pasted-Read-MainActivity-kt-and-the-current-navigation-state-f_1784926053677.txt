@@ -1,0 +1,90 @@
+Read MainActivity.kt and the current navigation state flow before changing anything.
+
+Current bug:
+
+While active navigation is running, the phone screen dims and eventually locks.
+
+Required behaviour:
+
+1. Keep the screen awake only while navigation is actively running.
+
+Use:
+
+WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+
+2. Enable the flag when the real navigation state becomes active, for example:
+
+isNavigating == true
+
+Do not enable it merely because the app or map screen is open.
+
+3. Disable the flag when:
+
+- navigation is stopped manually
+- arrival is confirmed
+- the route is cancelled
+- navigation state becomes inactive
+- the Activity is destroyed
+
+4. Do not force screen brightness.
+5. Do not change the user's system screen timeout.
+6. Do not use WakeLock unless FLAG_KEEP_SCREEN_ON is genuinely insufficient.
+7. Do not touch:
+   - conversation logic
+   - speech recognition
+   - TTS
+   - rerouting
+   - arrival dialog
+   - radar or warning controls
+   - GPS/location logic
+
+Preferred implementation:
+
+In MainActivity or the top-level Compose screen, observe the existing isNavigating state and use DisposableEffect or SideEffect.
+
+Example lifecycle:
+
+DisposableEffect(isNavigating) {
+    if (isNavigating) {
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        Log.i("KentasNavigation", "KEEP_SCREEN_ON_ENABLED")
+    } else {
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        Log.i("KentasNavigation", "KEEP_SCREEN_ON_DISABLED reason=navigation-inactive")
+    }
+
+    onDispose {
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
+}
+
+Avoid repeatedly adding and clearing the flag during recomposition if the state has not changed.
+
+Add logs:
+
+KEEP_SCREEN_ON_ENABLED
+KEEP_SCREEN_ON_DISABLED reason=navigation-stopped
+KEEP_SCREEN_ON_DISABLED reason=activity-disposed
+
+Add focused tests or source-structure tests proving:
+
+- starting navigation enables keep-screen-on
+- normal map screen does not enable it
+- stopping navigation disables it
+- confirming arrival disables it because navigation stops
+- Activity disposal clears the flag
+- recreation does not leave stale state
+
+Run the available compile/test checks.
+
+Make the smallest maintainable change.
+
+Commit locally.
+Do not push.
+
+Report:
+- root cause
+- exact file/function changed
+- enable/disable lifecycle
+- tests added
+- commit hash
