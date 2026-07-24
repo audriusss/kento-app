@@ -1,0 +1,204 @@
+Read the current implementation before changing anything.
+
+Current state:
+
+The multi-turn conversation now works correctly.
+The threading issue has been fixed.
+
+However, the conversation still ends much too early.
+
+Log evidence:
+
+AI_RESPONSE_TTS_DONE
+CONVERSATION_RELISTEN_REQUESTED
+onReadyForSpeech
+onBeginningOfSpeech
+
+then:
+
+ERROR_SERVER_DISCONNECTED
+retry=1
+
+Recognizer restarts successfully.
+
+Then:
+
+ERROR_NO_MATCH
+retry=2
+
+Immediately afterwards:
+
+MAX_RETRIES reached
+CONVERSATION_SESSION_CLOSED reason=max-retries
+
+This happens only a few seconds after Kentas finishes speaking.
+
+The 30-second inactivity timeout never gets a chance to work.
+
+------------------------------------------------
+
+Required behaviour
+
+A Kentas conversation should stay alive until:
+
+• user manually closes it
+• 30 seconds of REAL inactivity while listening
+• several consecutive infrastructure failures make recovery impossible
+
+Normal speech recognition misses must NOT end the conversation.
+
+------------------------------------------------
+
+Implement the following.
+
+1.
+
+Separate infrastructure failures from normal speech recognition outcomes.
+
+Treat these as NORMAL conversation events:
+
+ERROR_NO_MATCH
+ERROR_SPEECH_TIMEOUT
+
+These should:
+
+- never increment fatal retry counters
+- never close the conversation
+- simply restart listening after a short delay
+- keep the same conversation session
+- preserve conversation history
+
+2.
+
+Only infrastructure failures should count toward fatal retries.
+
+Examples:
+
+ERROR_SERVER
+ERROR_SERVER_DISCONNECTED
+SpeechRecognizer creation failure
+recognizer unavailable
+other real platform failures
+
+3.
+
+Reset the infrastructure retry counter whenever the recognizer successfully recovers.
+
+Reset after:
+
+onReadyForSpeech
+onResults
+onBeginningOfSpeech
+
+A successful recovery means previous infrastructure errors no longer matter.
+
+4.
+
+The inactivity timer must represent actual user opportunity to speak.
+
+Start or restart the 30-second timer only after:
+
+onReadyForSpeech
+
+Pause or ignore the timer while:
+
+AI is generating
+Kentas is speaking
+Navigation TTS is speaking
+Recognizer is restarting
+
+5.
+
+ERROR_NO_MATCH behaviour
+
+Current:
+
+ERROR_NO_MATCH
+→ retry++
+→ session eventually closes
+
+Required:
+
+ERROR_NO_MATCH
+→ log NO_MATCH_RELISTEN
+→ wait a short delay
+→ restart listening
+→ keep the conversation alive
+
+6.
+
+ERROR_SPEECH_TIMEOUT
+
+Same behaviour as NO_MATCH.
+
+Never close the conversation.
+
+7.
+
+Only close the conversation if there are multiple consecutive infrastructure failures WITHOUT a successful recovery between them.
+
+8.
+
+Add logs.
+
+NO_MATCH_RELISTEN session=...
+SPEECH_TIMEOUT_RELISTEN session=...
+INFRA_RETRY increment=...
+INFRA_RETRY_RESET reason=onReady/onResults/onBeginning
+INACTIVITY_TIMER_STARTED
+INACTIVITY_TIMER_PAUSED
+INACTIVITY_TIMER_RESUMED
+
+9.
+
+Add regression tests.
+
+Conversation survives:
+
+ERROR_NO_MATCH
+
+Conversation survives:
+
+ERROR_SPEECH_TIMEOUT
+
+Infrastructure retry counter resets after:
+
+onReadyForSpeech
+
+Infrastructure retry counter resets after:
+
+onResults
+
+Infrastructure retry counter resets after:
+
+onBeginningOfSpeech
+
+30-second timeout only counts real listening time.
+
+Conversation closes only after repeated infrastructure failures.
+
+Do not rewrite architecture.
+
+Do not change navigation.
+
+Do not change GPS.
+
+Do not change AI prompts.
+
+Do not change TTS.
+
+Modify only the conversation error policy and inactivity timer behaviour.
+
+Commit locally.
+
+Do not push.
+
+Report:
+
+- root cause
+- files changed
+- old retry policy
+- new retry policy
+- inactivity timer behaviour
+- tests added
+- commit hash
