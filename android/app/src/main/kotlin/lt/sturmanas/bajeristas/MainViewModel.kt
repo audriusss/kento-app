@@ -624,7 +624,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             // ── Continuous mode ────────────────────────────────────────────────────
             // requestListeningRestart transitions to RESTART_WAIT and schedules the
-            // next start. Do NOT write IDLE here — the loop must not stop.
+            // next start.
+            //
+            // FINALIZING pre-clear: onEndOfSpeech sets FINALIZING to signal that speech
+            // has ended but onResults has not yet arrived. When ERROR_NO_MATCH arrives
+            // instead of onResults (the recognizer found no speech), onResults will never
+            // come — FINALIZING must be cleared before calling requestListeningRestart,
+            // because the unconditional FINALIZING guard in that function blocks ALL
+            // restart reasons regardless of the error path.
+            if (_voiceListeningState.value == VoiceListeningState.FINALIZING) {
+                Log.d(LIFECYCLE_TAG, "SR: FINALIZING → IDLE (error arrived instead of onResults)")
+                _voiceListeningState.value = VoiceListeningState.IDLE
+            }
 
             if (sessionRetryCount < MAX_SESSION_RETRIES) {
                 sessionRetryCount++

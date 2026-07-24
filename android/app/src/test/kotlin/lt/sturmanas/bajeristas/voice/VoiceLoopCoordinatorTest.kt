@@ -513,4 +513,60 @@ class VoiceLoopCoordinatorTest {
             )
         }
     }
+
+    // ── Regression: FINALIZING + ERROR_NO_MATCH ────────────────────────────
+
+    @Test
+    fun `FINALIZING plus ERROR_NO_MATCH clears to IDLE allowing restart exactly once`() {
+        // Precondition: onEndOfSpeech set state to FINALIZING; then ERROR_NO_MATCH
+        // arrived (onResults will never come for this utterance).
+        var state = VoiceListeningState.FINALIZING
+
+        // Before the fix: requestListeningRestart would be blocked.
+        val blockedBefore = blockReason(
+            continuousModeEnabled = true,
+            ttsIsSpeaking         = false,
+            state                 = state,
+            graceJobActive        = false,
+            srSessionActive       = false,
+        )
+        assertEquals(
+            "FINALIZING must block restart before state is cleared",
+            "FINALIZING",
+            blockedBefore,
+        )
+
+        // The fix: clear FINALIZING → IDLE before calling requestListeningRestart.
+        if (state == VoiceListeningState.FINALIZING) {
+            state = VoiceListeningState.IDLE
+        }
+
+        // After the fix: restart is allowed.
+        val blockedAfter = blockReason(
+            continuousModeEnabled = true,
+            ttsIsSpeaking         = false,
+            state                 = state,
+            graceJobActive        = false,
+            srSessionActive       = false,
+        )
+        assertNull(
+            "Restart must be allowed after FINALIZING is cleared to IDLE",
+            blockedAfter,
+        )
+
+        // requestListeningRestart sets RESTART_WAIT; the token advances.
+        // A concurrent stale callback arriving now must be blocked by SESSION_ACTIVE.
+        state = VoiceListeningState.RESTART_WAIT
+        val blockedSecond = blockReason(
+            continuousModeEnabled = true,
+            ttsIsSpeaking         = false,
+            state                 = state,
+            graceJobActive        = false,
+            srSessionActive       = true,   // restart job in flight → SR session active
+        )
+        assertNotNull(
+            "Duplicate restart attempt must be blocked once restart is in flight",
+            blockedSecond,
+        )
+    }
 }
