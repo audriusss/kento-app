@@ -1,0 +1,80 @@
+Read the current navigation state and UI implementation before changing code.
+
+Current bug:
+
+During active navigation, the top status area always shows a spinning progress indicator with the text:
+
+"Perskaičiuojamas maršrutas…"
+
+It remains visible continuously even when the user is following the route normally and no reroute is happening.
+
+Do not touch conversation logic, speech recognition, TTS, GPS provider, map camera, or AI behaviour.
+
+Find the exact state that controls this banner/spinner, likely named something similar to:
+
+- isRerouting
+- routeRecalculationInProgress
+- recalculatingRoute
+- navigationLoading
+- routeLoading
+
+Required behaviour:
+
+1. Show "Perskaičiuojamas maršrutas…" only while a real route recalculation is actively in progress.
+
+2. Set rerouting state to true only when:
+   - the navigation SDK reports an actual off-route/reroute event, or
+   - an explicit route recalculation request begins.
+
+3. Set rerouting state back to false when any of these occurs:
+   - a new route is successfully received
+   - route recalculation completes
+   - route recalculation fails
+   - route request is cancelled
+   - navigation stops
+   - destination is cleared
+   - navigation view/controller is destroyed
+
+4. Use try/finally around explicit route recalculation requests so the state cannot remain true after an exception.
+
+5. Do not use general navigation activity, location updates, route progress updates, or active guidance state as the condition for showing the rerouting banner.
+
+6. If the SDK does not provide a reliable "reroute finished" callback:
+   - set true when reroute starts
+   - set false when the route object/path changes or a route-calculated callback arrives
+   - add a safety timeout, for example 10 seconds, that clears only the visual rerouting state
+   - the timeout must not cancel navigation
+
+7. Prevent duplicate reroute starts from continually extending or restarting the spinner unless a new real recalculation request begins.
+
+8. Add logs:
+
+REROUTE_STARTED reason=...
+REROUTE_COMPLETED
+REROUTE_FAILED error=...
+REROUTE_STATE_CLEARED reason=route-received/navigation-stopped/error/timeout
+REROUTE_UI_VISIBLE=true/false
+
+9. Add focused tests:
+
+- normal active navigation does not show rerouting UI
+- reroute start shows the banner
+- successful new route hides the banner
+- reroute failure hides the banner
+- navigation stop hides the banner
+- stale callback from an older reroute cannot re-enable the banner
+- safety timeout clears a stuck visual state
+
+Make the smallest maintainable change.
+
+Commit locally.
+Do not push.
+
+Report:
+- root cause
+- exact state and UI condition that were wrong
+- files/functions changed
+- old lifecycle
+- new lifecycle
+- tests added
+- commit hash
