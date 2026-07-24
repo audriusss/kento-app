@@ -13,6 +13,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -278,13 +279,21 @@ private fun SturmanasApp(
     }
 
     // ── Screen-on management ──────────────────────────────────────────────
-
-    LaunchedEffect(navState.phase) {
-        val shouldKeepOn = navState.phase == NavigationPhase.NAVIGATING
-        if (shouldKeepOn) {
+    // Keep the screen awake exactly while navigation is running.
+    // DisposableEffect (not LaunchedEffect) ensures the flag is cleared in
+    // onDispose, which fires when the composable leaves the composition —
+    // covering Activity destruction while navigation is active.
+    DisposableEffect(navState.isNavigating) {
+        if (navState.isNavigating) {
             activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            Log.i(MainActivity.FLOW_TAG, "KEEP_SCREEN_ON_ENABLED")
         } else {
             activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            Log.i(MainActivity.FLOW_TAG, "KEEP_SCREEN_ON_DISABLED reason=navigation-stopped")
+        }
+        onDispose {
+            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            Log.i(MainActivity.FLOW_TAG, "KEEP_SCREEN_ON_DISABLED reason=activity-disposed")
         }
     }
 
