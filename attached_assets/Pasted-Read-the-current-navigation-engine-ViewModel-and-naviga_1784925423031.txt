@@ -1,0 +1,121 @@
+Read the current navigation engine, ViewModel and navigation UI before changing code.
+
+The rerouting spinner bug is already fixed.
+Do not modify that logic.
+
+Current bug:
+
+When the user reaches the destination, navigation continues forever.
+
+Example:
+- I navigate to my own home.
+- I am already standing at the destination.
+- Guidance never finishes.
+
+Required behaviour:
+
+1. Use the Google Navigation SDK arrival callback if it already exists.
+
+Only if there is no reliable SDK arrival callback, implement a conservative fallback using:
+- remaining distance
+- current speed
+- stable arrival for a few seconds
+
+Do not trigger arrival from a single noisy GPS update.
+
+2. When arrival is detected:
+
+Do NOT immediately stop navigation.
+
+Show one confirmation dialog.
+
+Title:
+"Atrodo, jau atvykome"
+
+Message:
+"Baigti maršrutą?"
+
+Buttons:
+
+Primary:
+"Taip, atvykau"
+
+Secondary:
+"Dar ne"
+
+3. Kentas may optionally say one short sentence:
+
+"Atrodo, jau atvykome. Baigti maršrutą?"
+
+Only once.
+
+4. If the user presses:
+
+"Taip, atvykau"
+
+then:
+
+- stopNavigation()
+- stop guidance
+- clear destination
+- clear active route
+- stop navigation TTS
+- close dialog
+- return to normal map mode
+
+5. If the user presses:
+
+"Dar ne"
+
+continue the same navigation session.
+
+Do not ask again immediately.
+
+Introduce a cooldown or require the user to move away before another arrival prompt may appear.
+
+6. Prevent duplicates.
+
+Only one arrival dialog may exist.
+
+Old callbacks from previous navigation sessions must be ignored.
+
+Stopping navigation must always clear arrival-dialog state.
+
+7. Add logs:
+
+ARRIVAL_DETECTED
+ARRIVAL_DIALOG_SHOWN
+ARRIVAL_CONFIRMED
+ARRIVAL_DECLINED
+ARRIVAL_DIALOG_SKIPPED reason=...
+NAVIGATION_FINISHED reason=arrival
+
+8. Add focused tests for:
+
+- arrival callback shows dialog
+- confirm finishes navigation
+- decline keeps navigation running
+- dialog cannot stack
+- stale callback ignored
+- stopNavigation clears dialog state
+
+Make the smallest maintainable change.
+
+Do not modify:
+
+- conversation lifecycle
+- rerouting logic
+- GPS provider
+- radar controls
+- warning controls
+- keep-screen-on
+
+Commit locally.
+Do not push.
+
+Report:
+- root cause
+- files/functions changed
+- arrival lifecycle
+- tests added
+- commit hash
