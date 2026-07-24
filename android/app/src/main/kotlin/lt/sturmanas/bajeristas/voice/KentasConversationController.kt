@@ -54,6 +54,9 @@ class KentasConversationController(
 
         /** Maximum consecutive recoverable SR errors before the conversation stops. */
         const val MAX_RETRIES = 1
+
+        /** Max conversation history entries kept (10 = 5 exchanges). */
+        const val MAX_HISTORY = 10
     }
 
     // ── State ─────────────────────────────────────────────────────────────
@@ -87,10 +90,6 @@ class KentasConversationController(
 
     /** Recent conversation turns — (role, content) pairs. Cleared on stop. */
     private val history = mutableListOf<Pair<String, String>>()
-
-    private companion object {
-        const val MAX_HISTORY = 10  // 5 exchanges
-    }
 
     // ── Public API ────────────────────────────────────────────────────────
 
