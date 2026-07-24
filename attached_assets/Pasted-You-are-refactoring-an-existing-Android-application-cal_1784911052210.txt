@@ -1,0 +1,475 @@
+You are refactoring an existing Android application called “Šturmanas Bajeristas / Kentas”.
+
+This is a deliberate product simplification, not another patch on top of the existing voice state machine.
+
+FIRST inspect the entire current project, understand the existing navigation implementation, and identify which parts already work. Preserve the working Google Navigation SDK route/navigation integration. Then refactor the application to the architecture and behavior described below.
+
+Do not blindly delete working navigation code.
+Do not add multiple modes, personalities, humor levels, or voice profiles.
+There is exactly ONE Kentas.
+
+==================================================
+PRODUCT GOAL
+==================================================
+
+The application must be a simple navigation app with one AI companion named Kentas.
+
+Kentas is always the same character:
+
+- Lithuanian-speaking
+- natural, informal, friendly
+- talks like a normal guy sitting in the passenger seat
+- knows general information
+- can hold a conversation
+- jokes and may use tasteful dark humor
+- does not sound like a formal robot
+- does not have selectable personalities or humor levels
+- does not have separate “navigation Kentas” and “AI Kentas”
+
+The application has one stable navigation flow and one optional conversation interaction.
+
+==================================================
+CORE USER FLOW
+==================================================
+
+1. User opens the application.
+2. The app immediately requests/reads the current GPS location.
+3. The current location is displayed on the map.
+4. The user enters the destination manually using the text/address field.
+5. No voice destination input exists.
+6. The user selects a valid destination and starts the route.
+7. Google Navigation SDK starts guidance from the latest current location.
+8. The screen remains awake while navigation is active.
+9. Kentas provides navigation instructions in his own natural Lithuanian style.
+10. The user can press one Kentas/microphone button to start a conversation.
+11. After 30 seconds without user speech, the conversation listening session ends.
+12. The app returns to normal navigation-only behavior.
+13. Navigation must continue uninterrupted during conversation.
+
+==================================================
+ONLY TWO FUNCTIONAL STATES
+==================================================
+
+The UI and architecture may internally use simple state, but the user must only experience:
+
+A. NAVIGATION
+
+- route remains active
+- map remains visible
+- Kentas speaks navigation instructions when required
+- microphone is not constantly listening
+- no automatic SpeechRecognizer restart loops
+
+B. KENTAS CONVERSATION
+
+- entered only when the user presses the Kentas/microphone button
+- microphone listens for the user
+- recognized text is sent to the existing AI/OpenAI integration
+- Kentas answers through TTS
+- conversation can continue naturally
+- each user interaction resets the inactivity timer
+- after 30 seconds with no detected user speech, stop listening and return to navigation behavior
+- conversation may also be manually closed by pressing the same button
+
+Do not create additional visible modes.
+
+==================================================
+REMOVE THE OLD VOICE COMPLEXITY
+==================================================
+
+Completely remove or retire the old logic that causes voice instability, including where applicable:
+
+- voice destination/address collection
+- automatic voice activation when navigation starts
+- application-wide continuous listening
+- automatic endless SpeechRecognizer restart loops
+- complicated retry state machines
+- FINALIZING / RESTART_WAIT-style orchestration where no longer required
+- multiple voice modes
+- multiple Kentas personalities
+- duplicated session booleans controlling the same feature
+- old toggles that independently enable/disable voice behavior
+- stale callbacks that start a new recognizer session after conversation has ended
+
+Do not preserve obsolete logic merely because tests currently depend on it.
+Update or remove obsolete tests.
+
+Use one clear source of truth for whether a Kentas conversation is currently active.
+
+SpeechRecognizer must only be active while the user explicitly has the Kentas conversation open.
+
+Do not use SpeechRecognizer for entering a destination.
+
+==================================================
+NAVIGATION
+==================================================
+
+Use the existing working Google Navigation SDK integration.
+
+Do not introduce a second navigation engine.
+
+Requirements:
+
+- automatically obtain the latest available current location before route calculation
+- if location is not yet available, show a clear loading/current-location state
+- do not calculate the route using an obviously stale or null location
+- manually entered destination only
+- destination suggestions/resolution may remain if already working
+- start route guidance reliably
+- rerouting must continue to work
+- route must survive opening and closing the Kentas conversation
+- stop-navigation control must remain available
+- route completion must be handled cleanly
+- keep the screen awake while guidance is active
+- release KEEP_SCREEN_ON when navigation ends or the activity is destroyed
+
+The map/navigation UI must clearly show maneuvers such as:
+
+- straight
+- turn left
+- turn right
+- U-turn
+- roundabout exit
+- destination reached
+
+Preserve the visual maneuver information supplied by Google Navigation SDK.
+
+==================================================
+KENTAS NAVIGATION SPEECH
+==================================================
+
+Kentas must not sound like default formal navigation.
+
+Navigation instructions must remain short, accurate, and safe, but phrased naturally in Lithuanian.
+
+Examples of tone:
+
+- “Nu davai, po šimto metrų sukam į dešinę.”
+- “Tuoj kairė, nepražiopsok.”
+- “Varom tiesiai.”
+- “Žiede imam antrą išvažiavimą.”
+- “Biški prašovėm, apsisukam, kai bus galima.”
+- “Nu va, beveik atvarėm.”
+
+Important rules:
+
+- the actual maneuver, direction, distance, and exit number must never be changed
+- humor must not hide or delay the instruction
+- instructions must not become long monologues
+- do not call OpenAI for every navigation instruction
+- create a deterministic/local phrase formatter using the maneuver data from the navigation SDK
+- support phrase variation so the exact same sentence is not repeated every time
+- avoid offensive slurs or instructions that encourage unsafe driving
+- Kentas may be funny, but navigation clarity always has priority
+
+==================================================
+NAVIGATION AUDIO PRIORITY
+==================================================
+
+Navigation instructions always have priority over casual conversation.
+
+If a maneuver instruction becomes urgent while Kentas is speaking conversationally:
+
+1. safely stop or pause the conversational TTS
+2. speak the navigation instruction
+3. do not lose or stop the active route
+4. conversation may continue afterward only if the conversation session is still active
+
+Prevent overlapping TTS voices.
+
+Use one centralized speech/audio coordinator rather than unrelated TTS calls from multiple classes.
+
+==================================================
+KENTAS CONVERSATION
+==================================================
+
+There must be one clearly visible Kentas/microphone button.
+
+On press:
+
+- open the Kentas conversation interaction
+- begin a single SpeechRecognizer listening request
+- show a simple visible state such as listening / thinking / speaking
+- send valid recognized speech to the existing AI service
+- speak the AI response through TTS
+- listen again only while the conversation remains active
+- reset the 30-second inactivity timer whenever:
+  - user speech begins
+  - a valid speech result arrives
+  - the user manually interacts with the conversation
+
+If no user speech occurs for 30 seconds:
+
+- stop SpeechRecognizer
+- cancel pending recognizer restarts/callbacks
+- close the conversation state
+- return to navigation-only behavior
+- do not stop navigation
+- do not announce a verbose “mode changed” message
+
+Recoverable recognizer errors must not create an infinite restart loop.
+
+Recommended simple behavior:
+
+- one controlled retry for a temporary recognizer failure while the conversation is still active
+- if it fails again, close listening cleanly and keep navigation running
+- the user can press the Kentas button again to retry
+
+Do not automatically reopen conversation after it has timed out or been closed.
+
+==================================================
+KENTAS AI PERSONALITY
+==================================================
+
+Use one system prompt/personality definition for all normal conversation.
+
+Kentas:
+
+- speaks Lithuanian unless the user clearly asks for another language
+- talks naturally, not like customer support
+- is witty and informal
+- can joke and use tasteful dark humor
+- answers useful questions normally
+- keeps replies reasonably short while the user is driving
+- does not pretend to know live navigation data unless that data is explicitly supplied by the app
+- does not invent road events, speeds, distances, or route instructions
+- does not produce long distracting answers during active navigation
+
+Do not create selectable personalities or humor settings.
+
+==================================================
+COMMUNITY MOBILE SPEED-METER MARKERS
+==================================================
+
+Add a simple community reporting feature for portable/mobile speed-measurement devices.
+
+This is not a general incident-reporting system yet.
+Implement only one marker type:
+
+MOBILE_SPEED_METER
+
+Navigation UI must include a clear report button.
+
+When the user presses it:
+
+1. obtain the latest current GPS coordinates
+2. ask for one simple confirmation to avoid accidental reports
+3. submit the marker to the shared backend
+4. show the marker to nearby users on the navigation map
+
+All users must be able to see currently active nearby markers.
+
+Marker behavior:
+
+- latitude
+- longitude
+- createdAt
+- expiresAt
+- createdBy anonymous installation/user identifier
+- confirmation count
+- removal/not-there count
+- active status
+
+Use a reasonable default lifetime such as 2 hours.
+
+Users near an existing marker should be able to select:
+
+- “Dar yra”
+- “Nebėra”
+
+Rules:
+
+- “Dar yra” extends or refreshes the marker lifetime within a sensible maximum
+- multiple “Nebėra” reports deactivate the marker
+- do not allow one device to repeatedly vote on the same marker
+- rate-limit marker creation per device
+- merge or reject duplicate markers within a small radius
+- fetch only nearby active markers, not the entire database
+- markers must automatically expire
+- never block navigation if the backend is unavailable
+- queue or gracefully reject failed submissions
+- do not crash when offline
+
+When approaching an active marker, Kentas may say one short warning, for example:
+
+“Priekyje pažymėtas mobilus greičio matuoklis. Važiuojam pagal ženklus.”
+
+Do not repeatedly warn about the same marker during one approach.
+The warning is informational and must encourage compliance with posted speed limits.
+
+If the current repository has no backend for this feature:
+
+- inspect the existing project/server structure
+- implement the smallest maintainable backend/API compatible with the current stack
+- do not hardcode markers locally as the final solution
+- document required environment variables and database migration
+- keep the Android app usable even when the marker backend is not configured
+
+==================================================
+UI SIMPLIFICATION
+==================================================
+
+The main navigation screen should contain only the controls needed for:
+
+- current location
+- manual destination field
+- start route
+- stop route
+- Kentas conversation button
+- mobile speed-meter report button
+- map and navigation maneuver information
+
+Remove obsolete controls for:
+
+- voice destination
+- multiple voice modes
+- personality selection
+- humor levels
+- separate AI/navigation Kentas modes
+- manual recognizer restart
+- debug controls visible to normal users
+
+The interface must remain practical while driving:
+
+- large tap targets
+- clear state
+- minimal text
+- no modal spam
+- no unnecessary screens
+
+==================================================
+ARCHITECTURE REQUIREMENTS
+==================================================
+
+Before changing code:
+
+1. map the current relevant files and responsibilities
+2. identify working navigation components that must be preserved
+3. identify obsolete voice components that will be removed
+4. identify current TTS/OpenAI integration
+5. identify whether a backend already exists for shared markers
+
+Then implement a simple separation of responsibilities, for example:
+
+- NavigationController / existing navigation integration
+- CurrentLocationProvider
+- KentasConversationController
+- KentasSpeechCoordinator
+- KentasNavigationPhraseFormatter
+- CommunityMarkerRepository
+- MainViewModel as the UI state coordinator
+
+Names may follow the existing project conventions.
+
+Avoid one giant MainViewModel if logic can be safely extracted.
+However, do not introduce unnecessary frameworks or a complete rewrite.
+
+Use Kotlin coroutines and lifecycle-aware scopes.
+Cancel jobs, timers, recognizer callbacks, and TTS safely.
+Avoid callbacks mutating state after activity/view-model destruction.
+
+==================================================
+MIGRATION AND SAFETY
+==================================================
+
+Before editing:
+
+- create a local backup branch or tag from the current commit
+- report its name
+- do not push anything remotely
+
+Perform the refactor in logical local commits.
+
+Do not remove working route functionality without replacing and testing it.
+
+Do not expose API keys in source control.
+
+Do not claim device verification if only JVM tests were run.
+
+The Replit environment may not have the Android SDK, Java, or Gradle wrapper available.
+If compilation cannot run, state that clearly.
+Still perform static inspection, write tests, and report the exact commands the user must run in Android Studio/Linux.
+
+==================================================
+TESTS
+==================================================
+
+Add or update focused tests for at least:
+
+1. app uses manual destination input only
+2. current location is requested before route start
+3. navigation starts with a valid destination and location
+4. KEEP_SCREEN_ON is enabled only during navigation
+5. pressing Kentas opens one conversation session
+6. conversation does not start automatically with navigation
+7. 30 seconds of inactivity closes conversation
+8. closing conversation does not stop navigation
+9. stale recognizer callbacks cannot reopen conversation
+10. recognizer failure cannot create an infinite retry loop
+11. navigation TTS interrupts conversational TTS
+12. maneuver formatter preserves direction/distance/exit data
+13. speed-meter marker creation uses current coordinates
+14. duplicate nearby marker creation is prevented or merged
+15. expired markers are not shown
+16. the same device cannot repeatedly confirm/remove one marker
+17. backend failure does not stop navigation
+18. only one Kentas personality configuration exists
+19. no voice destination flow remains accessible
+20. second route in the same application session still works
+
+Remove tests that only validate obsolete voice modes.
+
+==================================================
+ACCEPTANCE CRITERIA
+==================================================
+
+The refactor is complete only when all of the following are true:
+
+- there is one Kentas
+- no personality or humor-level selector exists
+- destination is entered manually
+- current GPS location is obtained automatically before routing
+- Google Navigation SDK remains the only navigation engine
+- navigation survives opening and closing conversation
+- screen stays awake during active guidance
+- Kentas navigation instructions are accurate and naturally phrased
+- Kentas conversation starts only from the user pressing one button
+- conversation listening ends after 30 seconds of inactivity
+- no endless SpeechRecognizer restart loop exists
+- navigation audio has priority
+- users can report and see shared mobile speed-meter markers
+- markers expire and can be confirmed or marked absent
+- the app remains usable when the marker backend is unavailable
+- obsolete voice-mode code and UI are removed
+- tests reflect the new product behavior
+
+==================================================
+DELIVERABLES
+==================================================
+
+At the end, provide a structured report containing:
+
+1. architecture found before refactor
+2. backup branch/tag name
+3. files removed
+4. files created
+5. files substantially changed
+6. old voice logic removed
+7. final navigation flow
+8. final Kentas conversation flow
+9. 30-second timeout implementation
+10. navigation/TTS priority implementation
+11. current-location-before-route implementation
+12. community marker backend/API implementation
+13. database migration or schema changes
+14. tests added, updated, and removed
+15. commands successfully run
+16. commands that could not run and why
+17. manual Android real-device test checklist
+18. known limitations
+19. local commit hashes
+
+Do not push.
+Do not deploy.
+Do not add unrelated features.
+Do not stop after analysis: implement the refactor.
