@@ -209,51 +209,51 @@ class ConversationErrorPolicyTest {
         )
     }
 
-    // ── AC-E06 — inactivity timer structure ───────────────────────────────
+    // ── AC-E06 — absolute deadline structure ─────────────────────────────
 
     /**
-     * The inactivity timer must be started/resumed via [startOrResumeInactivityTimer],
-     * which is a private method and must exist.
+     * The inactivity window must be managed via [openInactivityWindow].
      *
-     * Its presence verifies AC-E06: it is the ONLY entry point for starting the
-     * 30-second countdown, and it is called ONLY from [onReadyForSpeech] in
-     * [installCallbacks].  Every other lifecycle transition uses [pauseInactivityTimer].
+     * This method replaced [startOrResumeInactivityTimer].  The critical difference:
+     * [openInactivityWindow] preserves an existing deadline across relisten cycles
+     * instead of restarting a full 30 seconds — fixing the never-expiring timer bug.
+     *
+     * AC-E06: it is called ONLY from [onReadyForSpeech].
+     * See [ConversationInactivityDeadlineTest] for full deadline regression tests.
      */
     @Test
-    fun `startOrResumeInactivityTimer private method exists`() {
+    fun `openInactivityWindow private method exists — replaces startOrResumeInactivityTimer`() {
         val method = getDeclaredMethodOrNull(
             KentasConversationController::class.java,
-            "startOrResumeInactivityTimer",
+            "openInactivityWindow",
             Long::class.javaPrimitiveType!!,
         )
         assertNotNull(
-            "KentasConversationController must have a private 'startOrResumeInactivityTimer(Long)' " +
-            "method. This is the ONLY entry point for the 30-second inactivity countdown. " +
-            "It must be called ONLY from onReadyForSpeech so AI generation, TTS, and " +
-            "recognizer restarts do not consume the user's inactivity window.",
+            "KentasConversationController must have a private 'openInactivityWindow(Long)' method. " +
+            "This replaced startOrResumeInactivityTimer. It preserves an existing inactivityDeadlineMs " +
+            "across NO_MATCH/infra relisten cycles instead of restarting a full 30-second timer.",
             method,
         )
     }
 
     /**
-     * The pause entry point must exist.
+     * The window-clear entry point must exist.
      *
-     * AC-E06: [pauseInactivityTimer] is called from every lifecycle point where
-     * the user cannot speak — AI generation starts, TTS starts, error triggers a
-     * restart, nav interrupts.  Without this method, the timer would fire during
-     * AI processing and close the conversation prematurely.
+     * [clearInactivityWindow] replaced [pauseInactivityTimer].  The critical difference:
+     * clearing also nulls [inactivityDeadlineMs] so the NEXT [onReadyForSpeech] (after
+     * AI TTS, nav TTS, or a new session) creates a fresh window — not preserves a stale one.
      */
     @Test
-    fun `pauseInactivityTimer private method exists`() {
+    fun `clearInactivityWindow private method exists — replaces pauseInactivityTimer`() {
         val method = getDeclaredMethodOrNull(
             KentasConversationController::class.java,
-            "pauseInactivityTimer",
+            "clearInactivityWindow",
             String::class.java,
         )
         assertNotNull(
-            "KentasConversationController must have a private 'pauseInactivityTimer(String)' " +
-            "method. It is called when entering AI generation, TTS, and recognizer restarts " +
-            "so those durations do not count as user inactivity.",
+            "KentasConversationController must have a private 'clearInactivityWindow(String)' method. " +
+            "This replaced pauseInactivityTimer. It cancels the job AND nulls inactivityDeadlineMs " +
+            "so the next turn gets a fresh 30-second window, not a preserved stale deadline.",
             method,
         )
     }
