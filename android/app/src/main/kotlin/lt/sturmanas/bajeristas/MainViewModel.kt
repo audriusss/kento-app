@@ -274,17 +274,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Speak the arrival announcement.
-     * Called from MainActivity when [NavigationState.hasArrived] becomes true.
+     * Speak the arrival prompt.
+     * Called once per session from MainActivity when [NavigationState.hasArrived] becomes true.
+     *
+     * The phrase is hardcoded to match the on-screen dialog text so the user hears exactly
+     * what they see.  The [KentasNavigationPhraseFormatter] ARRIVE phrase is a simple
+     * "Atvykote!" — it does not invite the confirmation the dialog requires.
      */
     fun speakArrival() {
         if (isSpeechBlocked) return
-        val phrase = phraseFormatter.format(
-            maneuver       = ManeuverType.ARRIVE,
-            distanceMeters = 0,
-            nextRoadName   = "",
-        )
-        speechCoordinator.speakNavigation(phrase.ifBlank { "Atvykote į tikslą!" })
+        speechCoordinator.speakNavigation("Atrodo, jau atvykome. Baigti maršrutą?")
     }
 
     /**

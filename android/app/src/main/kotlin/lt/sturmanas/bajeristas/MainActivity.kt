@@ -165,6 +165,14 @@ private fun SturmanasApp(
     var startScreenError by remember { mutableStateOf<String?>(null) }
     var showSettings     by remember { mutableStateOf(false) }
 
+    // ── Arrival dialog state ───────────────────────────────────────────────
+    // showArrivalDialog: true while the "Baigti maršrutą?" dialog is on screen.
+    // arrivalDeclined:   set when the user presses "Dar ne"; prevents the dialog
+    //                    from reappearing for the remainder of this navigation session.
+    //                    Both flags are reset to false by stopNavigation and by a new trip.
+    var showArrivalDialog by remember { mutableStateOf(false) }
+    var arrivalDeclined   by remember { mutableStateOf(false) }
+
     val voiceListeningState       by viewModel.voiceListeningState.collectAsStateWithLifecycle()
     val isConversationActive      by viewModel.isConversationActive.collectAsStateWithLifecycle()
     val locationLoading           by viewModel.locationLoading.collectAsStateWithLifecycle()
@@ -237,11 +245,35 @@ private fun SturmanasApp(
     }
 
     // ── Arrival ───────────────────────────────────────────────────────────
+    //
+    // LaunchedEffect re-runs on every hasArrived change.
+    //
+    // hasArrived = false: triggered by stopNavigation() resetting NavigationState()
+    //   → clears dialog + session flags so a new trip starts clean.
+    //
+    // hasArrived = true: triggered once per session by the SDK ArrivalListener
+    //   → speak the arrival phrase, show the dialog (unless already shown or declined).
+    //
+    // "Dar ne" sets arrivalDeclined=true, preventing re-show within the same session
+    // (hasArrived stays true for the rest of the session, so the LaunchedEffect won't
+    // re-fire — but the flag is an explicit contract for clarity and stale-guard safety).
 
     LaunchedEffect(navState.hasArrived) {
-        if (navState.hasArrived) {
-            Log.d(MainActivity.FLOW_TAG, "hasArrived=true")
-            viewModel.speakArrival()
+        if (!navState.hasArrived) {
+            // Session reset — clear arrival dialog state so the next trip starts clean.
+            showArrivalDialog = false
+            arrivalDeclined   = false
+            return@LaunchedEffect
+        }
+        Log.d(MainActivity.FLOW_TAG, "ARRIVAL_DETECTED")
+        viewModel.speakArrival()
+        when {
+            showArrivalDialog -> Log.d(MainActivity.FLOW_TAG, "ARRIVAL_DIALOG_SKIPPED reason=already-shown")
+            arrivalDeclined   -> Log.d(MainActivity.FLOW_TAG, "ARRIVAL_DIALOG_SKIPPED reason=declined-in-session")
+            else              -> {
+                showArrivalDialog = true
+                Log.d(MainActivity.FLOW_TAG, "ARRIVAL_DIALOG_SHOWN")
+            }
         }
     }
 
@@ -319,6 +351,8 @@ private fun SturmanasApp(
                 onMicPress             = { onMicPress() },
                 onStopNavigation       = {
                     Log.d(MainActivity.FLOW_TAG, "onStopNavigation")
+                    showArrivalDialog = false
+                    arrivalDeclined   = false
                     navigationController.stopNavigation()
                     viewModel.onNavigationStopped()
                     isNavigating = false; startScreenError = null
@@ -327,6 +361,22 @@ private fun SturmanasApp(
                     scope.launch {
                         viewModel.markerRepository.reportMarker(type, lat, lng)
                     }
+                },
+                showArrivalDialog  = showArrivalDialog,
+                onArrivalConfirmed = {
+                    Log.d(MainActivity.FLOW_TAG, "ARRIVAL_CONFIRMED")
+                    Log.d(MainActivity.FLOW_TAG, "NAVIGATION_FINISHED reason=arrival")
+                    showArrivalDialog = false
+                    arrivalDeclined   = false
+                    navigationController.stopNavigation()
+                    viewModel.onNavigationStopped()
+                    isNavigating = false
+                    startScreenError = null
+                },
+                onArrivalDeclined  = {
+                    Log.d(MainActivity.FLOW_TAG, "ARRIVAL_DECLINED")
+                    showArrivalDialog = false
+                    arrivalDeclined   = true
                 },
             )
         }

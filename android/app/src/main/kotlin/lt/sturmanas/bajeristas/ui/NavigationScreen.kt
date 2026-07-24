@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -55,6 +57,12 @@ fun NavigationScreen(
     onStopNavigation: () -> Unit,
     /** Called when the user taps the speed-camera report button. */
     onReportMarker: (type: CommunityMarkerRepository.MarkerType, lat: Double, lng: Double) -> Unit,
+    /** True while the arrival confirmation dialog should be visible. */
+    showArrivalDialog: Boolean = false,
+    /** Called when the user confirms arrival — caller must stop navigation. */
+    onArrivalConfirmed: () -> Unit = {},
+    /** Called when the user declines — navigation continues, dialog closes. */
+    onArrivalDeclined: () -> Unit = {},
 ) {
     val ctx = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -294,6 +302,29 @@ fun NavigationScreen(
 
             // Divider before ETA bar (removed in simplification — kept for spacing)
         }
+    }
+
+    // ── Arrival confirmation dialog ────────────────────────────────────────
+    //
+    // Shown when the SDK fires ArrivalListener and the caller sets showArrivalDialog=true.
+    // onDismissRequest is a no-op: the user MUST make an explicit choice.  Dismissing by
+    // tapping outside or pressing Back would leave the dialog state inconsistent.
+    if (showArrivalDialog) {
+        AlertDialog(
+            onDismissRequest = { /* require explicit button press */ },
+            title            = { Text("Atrodo, jau atvykome") },
+            text             = { Text("Baigti maršrutą?") },
+            confirmButton    = {
+                Button(onClick = onArrivalConfirmed) {
+                    Text("Taip, atvykau")
+                }
+            },
+            dismissButton    = {
+                TextButton(onClick = onArrivalDeclined) {
+                    Text("Dar ne")
+                }
+            },
+        )
     }
 }
 
