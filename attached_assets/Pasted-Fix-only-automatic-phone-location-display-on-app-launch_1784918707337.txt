@@ -1,0 +1,54 @@
+Fix only automatic phone location display on app launch.
+
+The app already receives a location, but nothing visible happens on the map.
+
+Required behavior:
+
+1. On app launch, request Android location permission if missing.
+2. Use the phone fused location provider / Google location services, not GPS-only logic.
+3. Request a current balanced-accuracy location first:
+   - Wi-Fi / mobile network / fused location is acceptable
+   - do not wait only for a raw GPS satellite fix
+4. Once the first usable location arrives:
+   - enable the map's user-location indicator / blue dot
+   - move or animate the map camera to the current location
+   - use a practical driving zoom level
+   - hide the “Gaunama vieta…” indicator
+5. Keep updating the current location during navigation.
+6. Before route calculation, use the latest fused phone location.
+7. Do not mark locationReady=true merely because a timeout elapsed.
+   Separate:
+   - locationLoading
+   - actual currentLocation availability
+8. If location services are disabled on the phone:
+   - show a clear action/message asking the user to enable Location
+   - do not pretend that location is ready
+9. If permission is denied:
+   - show a clear permission message
+   - keep manual destination entry usable
+10. Do not refactor navigation, conversation, TTS, markers, or destination search.
+
+Inspect why locationFlow currently updates but the map camera/user marker does not.
+
+Add focused logs:
+- LOCATION_PERMISSION_GRANTED
+- LOCATION_SERVICES_ENABLED
+- FUSED_LOCATION_RECEIVED lat/lng age/accuracy
+- MAP_CAMERA_MOVED_TO_CURRENT_LOCATION
+- USER_LOCATION_LAYER_ENABLED
+
+Add tests or static regression checks for:
+- timeout does not fake a valid location
+- first fused location moves the camera once
+- later updates do not constantly recenter the map while the user is browsing
+- route start requires an actual location value
+
+Commit locally.
+Do not push.
+
+Report:
+- root cause
+- exact files changed
+- how fused phone location is requested
+- how map camera and user-location marker are updated
+- commit hash
