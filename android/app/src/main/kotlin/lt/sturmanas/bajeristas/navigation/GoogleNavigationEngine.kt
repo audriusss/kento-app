@@ -90,6 +90,25 @@ class GoogleNavigationEngine : NavigationEngine {
     private var guidanceStarted = false
 
     /**
+     * True while a navigation session is active (between [startNavigation] and
+     * [stopNavigation] / [onDestroy]).
+     *
+     * Guards [RouteChangedListener] and [ArrivalListener] against stale SDK callbacks
+     * that fire after [stopNavigation] — e.g. the SDK delivers one final route event
+     * after [stopGuidance] on some devices. Without this flag the listener would see
+     * [guidanceStarted]==false, call [startGuidance] again on a dead session, and
+     * corrupt the second-trip flow.
+     */
+    private var sessionActive = false
+
+    /**
+     * Monotonically-increasing attempt counter. Incremented on every [startNavigation]
+     * call. Included in all [NAV_TAG] log lines so individual trips are
+     * distinguishable in logcat when multiple trips occur in the same session.
+     */
+    private var navAttemptId = 0
+
+    /**
      * Request ID incremented on every [startNavigation] call.
      * Compared inside the geocoder callback to discard stale results when the user
      * submits a new destination before the previous geocoder call completes.
@@ -97,7 +116,9 @@ class GoogleNavigationEngine : NavigationEngine {
     private var currentRequestId = 0
 
     companion object {
-        const val TAG = "GoogleNavEngine"
+        const val TAG     = "GoogleNavEngine"
+        const val NAV_TAG = "KentasNavigation"
+        const val MAP_TAG = "KentasMap"
 
         /** Minimum confidence score for a geocoder result to be accepted. */
         const val SCORE_THRESHOLD = 3
@@ -307,12 +328,14 @@ class GoogleNavigationEngine : NavigationEngine {
         }
 
         val requestId    = ++currentRequestId
+        val attemptId    = ++navAttemptId
         // Detect street+number queries produced by DestinationResolver step C so we
         // can give a more actionable error message when all candidates fail.
         val streetWithCityDetected = STREET_QUERY_WITH_CITY.containsMatchIn(destination)
         val isStreetQuery          = streetWithCityDetected || STREET_QUERY_NO_CITY.containsMatchIn(destination)
         val isStreetWithKnownCity  = streetWithCityDetected
-        Log.d(TAG, "startNavigation: requestId=$requestId isStreetQuery=$isStreetQuery isStreetWithKnownCity=$isStreetWithKnownCity")
+        Log.d(TAG,     "startNavigation: requestId=$requestId attemptId=$attemptId isStreetQuery=$isStreetQuery isStreetWithKnownCity=$isStreetWithKnownCity")
+        Log.d(NAV_TAG, "startNavigation attemptId=$attemptId destination='$destination'")
 
         _state.value = _state.value.copy(
             destinationName = destination,
@@ -365,6 +388,7 @@ class GoogleNavigationEngine : NavigationEngine {
                     return@withContext
                 }
 
+                sessionActive  = true
                 guidanceStarted = false
                 _state.value = _state.value.copy(
                     destinationName = resolvedName.ifBlank { destination },
@@ -372,7 +396,8 @@ class GoogleNavigationEngine : NavigationEngine {
                     phase = NavigationPhase.CALCULATING_ROUTE,
                 )
 
-                Log.d(TAG, "setDestination: lat=$lat lng=$lng")
+                Log.d(TAG,     "setDestination: lat=$lat lng=$lng requestId=$requestId attemptId=$attemptId")
+                Log.d(NAV_TAG, "setDestination attemptId=$attemptId lat=$lat lng=$lng name='$resolvedName'")
                 // setDestination returns ListenableResultFuture<RouteStatus>.
                 // addOnSuccessListener / addOnFailureListener do NOT exist on this type.
                 // Route readiness is signalled via RouteChangedListener (see setupListeners).
@@ -382,8 +407,14 @@ class GoogleNavigationEngine : NavigationEngine {
     }
 
     override fun stopNavigation() {
-        Log.d(TAG, "stopNavigation")
+        Log.d(TAG,     "stopNavigation: attemptId=$navAttemptId sessionActive=$sessionActive")
+        Log.d(NAV_TAG, "stopNavigation attemptId=$navAttemptId")
+        sessionActive  = false
         navigator?.stopGuidance()
+        // Clear the active destination so the SDK does not hold onto stale route
+        // state between trips. The next startNavigation call will set a new one.
+        @Suppress("TryCatchInsteadOfSafe")
+        try { navigator?.clearDestinations() } catch (_: Exception) { /* SDK may not expose this on all versions */ }
         guidanceStarted = false
         _state.value = NavigationState()
     }
@@ -436,7 +467,8 @@ class GoogleNavigationEngine : NavigationEngine {
     override fun onViewDestroy() {
         if (isViewDestroyed) return
         isViewDestroyed = true
-        Log.d(TAG, "onViewDestroy: tearing down NavigationView only (Navigator stays alive)")
+        Log.d(TAG,     "onViewDestroy: tearing down NavigationView only (Navigator stays alive) attemptId=$navAttemptId")
+        Log.d(MAP_TAG, "NavigationView onDestroy (view-only teardown, navigator alive)")
         navigationView?.onDestroy()
         navigationView = null
     }
@@ -447,17 +479,27 @@ class GoogleNavigationEngine : NavigationEngine {
      * Never call this from a composable or DisposableEffect.
      */
     override fun onDestroy() {
-        Log.d(TAG, "onDestroy: full teardown (Activity destroyed)")
+        Log.d(TAG,     "onDestroy: full teardown (Activity destroyed) attemptId=$navAttemptId")
+        Log.d(NAV_TAG, "onDestroy attemptId=$navAttemptId")
+        Log.d(MAP_TAG, "NavigationView onDestroy (full teardown path)")
+        sessionActive  = false
+        guidanceStarted = false
         onViewDestroy()                // tears down NavigationView (idempotent)
         navigator?.cleanup()
         navigator = null
-        guidanceStarted = false
     }
 
     // ── Private: listeners ────────────────────────────────────────────────
 
     private fun setupListeners(nav: Navigator) {
         nav.addRemainingTimeOrDistanceChangedListener(5, 10) {
+            // After a re-route the first distance callback signals the new route is
+            // settled. Clearing isRerouting here (rather than inside syncState) ensures
+            // the rerouting overlay stays visible until real distance data arrives.
+            if (_state.value.isRerouting) {
+                Log.d(NAV_TAG, "distance callback: route settled — clearing isRerouting")
+                _state.value = _state.value.copy(isRerouting = false)
+            }
             syncStateFromNavigator(nav)
         }
 
@@ -467,26 +509,48 @@ class GoogleNavigationEngine : NavigationEngine {
         // only requests a route; startGuidance() begins turn-by-turn guidance and
         // activates maneuver / distance callbacks. The guidanceStarted flag ensures it
         // is called exactly once per navigation session, not on every re-route.
+        //
+        // sessionActive guard: the SDK may fire one final RouteChangedListener callback
+        // after stopGuidance() on some devices. Without the guard the listener would see
+        // guidanceStarted==false (already reset by stopNavigation) and call startGuidance
+        // on a dead session, corrupting second-trip state.
         nav.addRouteChangedListener(RouteChangedListener {
-            Log.d(TAG, "routeChangedListener: guidanceStarted=$guidanceStarted")
+            val attempt = navAttemptId
+            Log.d(TAG, "routeChangedListener: attemptId=$attempt sessionActive=$sessionActive guidanceStarted=$guidanceStarted")
+            if (!sessionActive) {
+                Log.w(NAV_TAG, "routeChangedListener: sessionActive=false (attemptId=$attempt) — stale callback, ignoring")
+                return@RouteChangedListener
+            }
             if (!guidanceStarted) {
                 guidanceStarted = true
-                Log.d(TAG, "first route ready — calling startGuidance()")
+                Log.d(TAG,     "first route ready — calling startGuidance() attemptId=$attempt")
+                Log.d(NAV_TAG, "startGuidance attemptId=$attempt")
                 nav.startGuidance()
                 _state.value = _state.value.copy(
                     isNavigating = true,
-                    isRerouting = false,
-                    phase = NavigationPhase.NAVIGATING,
+                    isRerouting  = false,
+                    phase        = NavigationPhase.NAVIGATING,
                 )
             } else {
-                Log.d(TAG, "re-route — route updated")
+                Log.d(TAG,     "re-route — route updated attemptId=$attempt")
+                Log.d(NAV_TAG, "reroute attemptId=$attempt")
                 _state.value = _state.value.copy(isRerouting = true)
+                // isRerouting is cleared by the next RemainingTimeOrDistanceChangedListener
+                // callback once the new route data arrives — NOT here.
+                return@RouteChangedListener
             }
             syncStateFromNavigator(nav)
         })
 
         nav.addArrivalListener(ArrivalListener { _ ->
-            Log.d(TAG, "arrivalListener: arrived at destination")
+            val attempt = navAttemptId
+            Log.d(TAG, "arrivalListener: attemptId=$attempt sessionActive=$sessionActive")
+            if (!sessionActive) {
+                Log.w(NAV_TAG, "arrivalListener: sessionActive=false (attemptId=$attempt) — stale callback, ignoring")
+                return@ArrivalListener
+            }
+            Log.d(NAV_TAG, "arrived attemptId=$attempt")
+            sessionActive = false   // arrival ends the session; no more callbacks expected
             _state.value = _state.value.copy(
                 hasArrived = true,
                 isNavigating = false,
@@ -500,7 +564,12 @@ class GoogleNavigationEngine : NavigationEngine {
     private fun syncStateFromNavigator(nav: Navigator) {
         // currentTimeAndDistance = remaining time/distance to destination (not next maneuver).
         // Both distanceToNextManeuverMeters and remainingDistanceMeters use this until
-        // per-step distance becomes available in the public API.
+        // per-step distance becomes available in the public SDK API.
+        //
+        // isRerouting is intentionally NOT modified here — it is set to true by the
+        // RouteChangedListener re-route branch and cleared by the first subsequent
+        // RemainingTimeOrDistanceChangedListener callback so the overlay stays visible
+        // until real route data arrives.
         val td = nav.currentTimeAndDistance
         val distMeters = td?.meters?.toInt() ?: Int.MAX_VALUE
         val durSeconds = td?.seconds?.toInt() ?: 0
@@ -510,7 +579,6 @@ class GoogleNavigationEngine : NavigationEngine {
             distanceToNextManeuverMeters = distMeters,
             remainingDistanceMeters = distMeters,
             remainingDurationSeconds = durSeconds,
-            isRerouting = false,
         )
     }
 

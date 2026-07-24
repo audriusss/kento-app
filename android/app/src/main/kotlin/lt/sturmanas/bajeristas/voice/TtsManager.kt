@@ -136,11 +136,31 @@ class TtsManager(context: Context) {
     }
 
     /**
+     * Called by the TTS watchdog in [MainViewModel] when [onDone] has not fired
+     * within [MainViewModel.TTS_WATCHDOG_MS] after [onStart].
+     *
+     * Resets [isSpeaking] and invokes the [onDone] callback so the continuous
+     * session loop can restart. This is the only safe recovery path for a
+     * frozen TTS engine — arbitrary delay loops must not be used as the normal
+     * completion path.
+     *
+     * The watchdog only calls this when [isSpeaking] is still true, so this
+     * is a no-op if [onDone] already arrived normally before the timeout.
+     */
+    fun forceComplete() {
+        val ts = System.currentTimeMillis()
+        Log.w(TTS_FLOW_TAG,
+            "forceComplete ts=$ts: watchdog triggered — forcing isSpeaking=false, invoking onDone")
+        isSpeaking = false
+        onDone?.invoke()
+    }
+
+    /**
      * Shut down the engine and release all native resources.
      * Called exactly once from [MainViewModel.onCleared].
      */
     fun release() {
-        isReady = false
+        isReady    = false
         isSpeaking = false
         tts?.stop()
         tts?.shutdown()

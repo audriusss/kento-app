@@ -90,6 +90,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         internal const val MAX_SESSION_RETRIES = 3
 
         /**
+         * Maximum time in milliseconds that the TTS watchdog waits after [onStart]
+         * before declaring the engine frozen and calling [TtsManager.forceComplete].
+         *
+         * Chosen to be long enough for any realistic utterance (longest Lithuanian nav
+         * sentence is ~6 s) but short enough to recover before the user notices the loop
+         * is stuck. The watchdog is armed only after [onStart] fires — if TTS fails
+         * before speaking, [onError] delegates to [onDone] normally.
+         */
+        internal const val TTS_WATCHDOG_MS = 12_000L
+
+        /**
          * Identifies why a restart was requested.
          * Included in every [LOOP_TAG] log line so individual restart sources are
          * distinguishable in logcat without a custom filter.
@@ -257,6 +268,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     private var recoveringTextJob: Job? = null
 
+    /**
+     * Tracks the in-flight [resolveAndNavigate] / [resolveAndAddWaypoint] coroutine.
+     *
+     * Cancelled before launching a new resolution so two concurrent voice commands
+     * (e.g. user says destination twice quickly) never produce two overlapping
+     * geocoder calls or two simultaneous [_pendingNavAction] emissions.
+     *
+     * Also cancelled in [onNavigationStopped] so a resolution that is still running
+     * when the user presses "Baigti" cannot emit a [VoiceNavAction.StartNavigation]
+     * after the navigation session has already been torn down.
+     */
+    private var resolveJob: Job? = null
+
+    /**
+     * Watchdog coroutine armed after [TtsManager.onStart] fires.
+     *
+     * If [TtsManager.onDone] does not arrive within [TTS_WATCHDOG_MS], calls
+     * [TtsManager.forceComplete] so the continuous session loop can restart.
+     * Cancelled immediately when [onDone] fires normally (no-op path).
+     *
+     * Armed in the [ttsManager.onStart] callback; cancelled in the [ttsManager.onDone]
+     * callback and in [onCleared].
+     *
+     * Never armed on the [onError] path — the engine already calls [onDone?.invoke()]
+     * from both error overrides, so the loop restarts without needing the watchdog.
+     */
+    private var ttsWatchdogJob: Job? = null
+
     // ── Pending recognized text ───────────────────────────────────────────
 
     private val _pendingRecognizedText = MutableStateFlow<String?>(null)
@@ -317,6 +356,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         startLocationUpdates()
 
         // TTS start → enter SPEAKING so the loop knows Kentas is talking.
+        // Also arm the watchdog: if onDone never fires within TTS_WATCHDOG_MS,
+        // forceComplete() unblocks the loop so it can restart.
         ttsManager.onStart = {
             val ts = System.currentTimeMillis()
             Log.d(LOOP_TAG, "TTS onStart ts=$ts continuousMode=${_continuousModeEnabled.value}")
@@ -330,12 +371,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } else {
                 Log.d(TTS_FLOW_TAG, "onStart→MainViewModel: continuousMode=off, SPEAKING not set")
             }
+            // Arm the watchdog. Cancel any previous one first (QUEUE_FLUSH means at
+            // most one utterance is ever active at a time).
+            ttsWatchdogJob?.cancel()
+            ttsWatchdogJob = viewModelScope.launch {
+                delay(TTS_WATCHDOG_MS)
+                if (ttsManager.isSpeaking) {
+                    Log.w(TTS_FLOW_TAG,
+                        "watchdog fired ts=${System.currentTimeMillis()}: " +
+                        "onDone never received after ${TTS_WATCHDOG_MS}ms — forcing completion")
+                    ttsManager.forceComplete()
+                } else {
+                    Log.d(TTS_FLOW_TAG, "watchdog: onDone already fired normally — no-op")
+                }
+            }
         }
 
         // TTS completion → the single TTS-done restart entry. 500 ms post-TTS gap
         // prevents the recognizer from picking up speaker reverberation.
+        // Cancel the watchdog immediately so it does not fire after normal completion.
         ttsManager.onDone = {
             val ts = System.currentTimeMillis()
+            ttsWatchdogJob?.cancel()
+            ttsWatchdogJob = null
             Log.d(LOOP_TAG, "TTS onDone ts=$ts continuousMode=${_continuousModeEnabled.value}")
             Log.d(TTS_FLOW_TAG,
                 "onDone→MainViewModel ts=$ts continuousMode=${_continuousModeEnabled.value} " +
@@ -926,7 +984,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _isSolvingDestination.value = true
                 _voiceListeningState.value = VoiceListeningState.PROCESSING
                 _voiceStatusText.value = "Kentas ieško vietos…"
-                viewModelScope.launch {
+                // Cancel any in-flight resolution from a previous command so the two
+                // concurrent coroutines cannot both emit a StartNavigation action or
+                // call speak() for the old destination after the new one wins.
+                resolveJob?.cancel()
+                resolveJob = viewModelScope.launch {
                     resolveAndNavigate(command.destination, isMuted)
                 }
                 return
@@ -957,7 +1019,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _isSolvingDestination.value = true
                 _voiceListeningState.value = VoiceListeningState.PROCESSING
                 _voiceStatusText.value = "Kentas ieško: ${command.place}…"
-                viewModelScope.launch {
+                resolveJob?.cancel()
+                resolveJob = viewModelScope.launch {
                     resolveAndAddWaypoint(command.place, isMuted)
                 }
                 return
@@ -1131,9 +1194,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * Called when navigation stops (user taps "Baigti" or says "Sustabdyk").
      * Resets waypoint state so the next session starts clean.
+     *
+     * Also cancels any in-flight [resolveJob] so a resolution that is still running
+     * cannot emit a [VoiceNavAction.StartNavigation] after the engine has been torn down,
+     * and resets [_isSolvingDestination] so the loading indicator does not stay stuck.
      */
     fun onNavigationStopped() {
-        Log.d(WP_TAG, "onNavigationStopped: clearing waypoints")
+        Log.d(WP_TAG, "onNavigationStopped: clearing waypoints and cancelling in-flight resolution")
+        resolveJob?.cancel()
+        resolveJob = null
+        _isSolvingDestination.value = false
         waypointManager.clear()
         _finalDestinationName.value = ""
     }
@@ -1186,11 +1256,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         super.onCleared()
         recoveringTextJob?.cancel()
-        recoveringTextJob = null
+        recoveringTextJob   = null
         pendingRestartJob?.cancel()
-        pendingRestartJob = null
+        pendingRestartJob   = null
         pendingGraceJob?.cancel()
-        pendingGraceJob = null
+        pendingGraceJob     = null
+        resolveJob?.cancel()
+        resolveJob          = null
+        ttsWatchdogJob?.cancel()
+        ttsWatchdogJob      = null
         LocationProvider.stopUpdates(getApplication())
         speechRecognitionManager.release()
         ttsManager.release()

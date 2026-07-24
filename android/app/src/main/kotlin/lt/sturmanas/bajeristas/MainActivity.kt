@@ -1,9 +1,11 @@
 package lt.sturmanas.bajeristas
 
 import android.Manifest
+import android.app.Activity
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.util.Log
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -188,7 +190,8 @@ private fun SturmanasApp(
     engineError: String?,
     permissionDenied: Boolean,
 ) {
-    val context = LocalContext.current
+    val context  = LocalContext.current
+    val activity = context as? Activity
     val navState by navigationController.state.collectAsStateWithLifecycle()
 
     var isNavigating  by remember { mutableStateOf(false) }
@@ -354,6 +357,28 @@ private fun SturmanasApp(
             }
         }
         previousPhase = navState.phase
+    }
+
+    // ── Screen-on management ──────────────────────────────────────────────
+    // Keep the display awake while guidance is active so the driver never has
+    // to touch the phone mid-route to wake it.
+    //
+    // FLAG_KEEP_SCREEN_ON is preferred over a WakeLock because it does not require
+    // the WAKE_LOCK permission and is automatically released when the Activity is
+    // destroyed. It is safe to call addFlags/clearFlags from a LaunchedEffect on
+    // the main dispatcher.
+    //
+    // Enabled: NAVIGATING phase begins.
+    // Disabled: any other phase (IDLE, RESOLVING, CALCULATING, ARRIVED).
+    // Rerouting stays in NAVIGATING → flag stays set (correct).
+    LaunchedEffect(navState.phase) {
+        val shouldKeepOn = navState.phase == NavigationPhase.NAVIGATING
+        Log.d(FLOW_TAG, "screen-on: phase=${navState.phase} keepOn=$shouldKeepOn")
+        if (shouldKeepOn) {
+            activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
     }
 
     if (!isNavigating && navState.errorMessage != null) {
