@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import android.util.Log
 import android.view.WindowManager
+import kotlinx.coroutines.launch
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -154,6 +155,7 @@ private fun SturmanasApp(
 ) {
     val context  = LocalContext.current
     val activity = context as? Activity
+    val scope    = androidx.compose.runtime.rememberCoroutineScope()
     val navState by navigationController.state.collectAsStateWithLifecycle()
 
     var isNavigating     by remember { mutableStateOf(false) }
@@ -314,7 +316,9 @@ private fun SturmanasApp(
                     isNavigating = false; startScreenError = null
                 },
                 onReportMarker         = { type, lat, lng ->
-                    // Fire-and-forget — marker repository handles retry/logging
+                    scope.launch {
+                        viewModel.markerRepository.reportMarker(type, lat, lng)
+                    }
                 },
             )
         }
