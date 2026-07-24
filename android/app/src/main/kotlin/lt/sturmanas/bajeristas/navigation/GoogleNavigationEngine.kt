@@ -141,6 +141,24 @@ class GoogleNavigationEngine : NavigationEngine {
      */
     private var currentRequestId = 0
 
+    /**
+     * Monotonically-increasing counter incremented every time a new reroute begins OR
+     * rerouting state is cleared.  The timeout coroutine captures its generation at
+     * launch and only acts if the counter has not moved — preventing a stale timeout
+     * from clearing the state of a fresh reroute that began while the old timer was
+     * still running.
+     */
+    private var reroutingGeneration = 0
+
+    /**
+     * Safety-timeout job for [NavigationState.isRerouting].
+     *
+     * Scheduled in [mainScope] when a reroute starts; cancelled by
+     * [clearReroutingState] when the reroute finishes normally.
+     * If it fires, it clears ONLY the visual flag — it does NOT cancel navigation.
+     */
+    private var reroutingTimeoutJob: Job? = null
+
     companion object {
         const val TAG     = "GoogleNavEngine"
         const val NAV_TAG = "KentasNavigation"
@@ -155,6 +173,17 @@ class GoogleNavigationEngine : NavigationEngine {
 
         /** Minimum confidence score for a geocoder result to be accepted. */
         const val SCORE_THRESHOLD = 3
+
+        /**
+         * Maximum time the rerouting spinner may remain visible after a route-changed
+         * event.  Cleared by the next [addRemainingTimeOrDistanceChangedListener] callback
+         * under normal conditions; this timeout is a safety net for devices where that
+         * callback is delayed or never fires.
+         *
+         * The timeout clears ONLY the visual [NavigationState.isRerouting] flag — it does
+         * NOT cancel navigation or modify any other SDK state.
+         */
+        const val REROUTE_TIMEOUT_MS = 10_000L
 
         /**
          * Detects geocoding queries produced by [DestinationResolver] step C
@@ -442,6 +471,7 @@ class GoogleNavigationEngine : NavigationEngine {
     override fun stopNavigation() {
         Log.d(TAG,     "stopNavigation: attemptId=$navAttemptId sessionActive=$sessionActive")
         Log.d(NAV_TAG, "stopNavigation attemptId=$navAttemptId")
+        clearReroutingState("navigation-stopped")
         sessionActive  = false
         navigator?.stopGuidance()
         // Clear the active destination so the SDK does not hold onto stale route
@@ -559,6 +589,9 @@ class GoogleNavigationEngine : NavigationEngine {
         isViewDestroyed = true
         Log.d(TAG,     "onViewDestroy: tearing down NavigationView only (Navigator stays alive) attemptId=$navAttemptId")
         Log.d(MAP_TAG, "NavigationView onDestroy (view-only teardown, navigator alive)")
+        // Cancel the safety-timeout job: the view is gone, showing the banner is meaningless.
+        reroutingTimeoutJob?.cancel()
+        reroutingTimeoutJob = null
         // Cancel the pending camera-move job so it doesn't fire on a new view.
         mapCameraJob?.cancel()
         mapCameraJob = null
@@ -576,24 +609,51 @@ class GoogleNavigationEngine : NavigationEngine {
         Log.d(TAG,     "onDestroy: full teardown (Activity destroyed) attemptId=$navAttemptId")
         Log.d(NAV_TAG, "onDestroy attemptId=$navAttemptId")
         Log.d(MAP_TAG, "NavigationView onDestroy (full teardown path)")
+        reroutingTimeoutJob?.cancel()  // cancel before mainScope dies to avoid log noise
+        reroutingTimeoutJob = null
         sessionActive  = false
         guidanceStarted = false
-        mainScope.coroutineContext[Job]?.cancel()  // cancel all mainScope children
+        mainScope.coroutineContext[Job]?.cancel()  // cancel all mainScope children (incl. any race survivors)
         onViewDestroy()                // tears down NavigationView (idempotent)
         navigator?.cleanup()
         navigator = null
+    }
+
+    // ── Private: rerouting state ──────────────────────────────────────────
+
+    /**
+     * Canonical exit path for rerouting state.
+     *
+     * Cancels any pending safety-timeout job, invalidates its generation so a
+     * late-firing coroutine is a no-op, and clears [NavigationState.isRerouting]
+     * if it was true.  All call sites pass a [reason] tag that appears in
+     * `REROUTE_STATE_CLEARED` log lines.
+     *
+     * Must be called on the Main thread (all Navigator callbacks and coroutines
+     * that write [_state] run on Main).
+     */
+    private fun clearReroutingState(reason: String) {
+        reroutingTimeoutJob?.cancel()
+        reroutingTimeoutJob = null
+        ++reroutingGeneration          // invalidate any in-flight timeout coroutine
+        if (_state.value.isRerouting) {
+            Log.d(NAV_TAG, "REROUTE_STATE_CLEARED reason=$reason")
+            Log.d(NAV_TAG, "REROUTE_UI_VISIBLE=false")
+            _state.value = _state.value.copy(isRerouting = false)
+        }
     }
 
     // ── Private: listeners ────────────────────────────────────────────────
 
     private fun setupListeners(nav: Navigator) {
         nav.addRemainingTimeOrDistanceChangedListener(5, 10) {
-            // After a re-route the first distance callback signals the new route is
-            // settled. Clearing isRerouting here (rather than inside syncState) ensures
-            // the rerouting overlay stays visible until real distance data arrives.
+            // After a re-route the first distance/time-change callback signals the new
+            // route is settled.  clearReroutingState cancels the safety-timeout job and
+            // clears the flag atomically; syncStateFromNavigator then fills in the fresh
+            // distance/duration values.
             if (_state.value.isRerouting) {
-                Log.d(NAV_TAG, "distance callback: route settled — clearing isRerouting")
-                _state.value = _state.value.copy(isRerouting = false)
+                Log.d(NAV_TAG, "REROUTE_COMPLETED")
+                clearReroutingState("route-received")
             }
             syncStateFromNavigator(nav)
         }
@@ -627,11 +687,33 @@ class GoogleNavigationEngine : NavigationEngine {
                     phase        = NavigationPhase.NAVIGATING,
                 )
             } else {
-                Log.d(TAG,     "re-route — route updated attemptId=$attempt")
-                Log.d(NAV_TAG, "reroute attemptId=$attempt")
-                _state.value = _state.value.copy(isRerouting = true)
-                // isRerouting is cleared by the next RemainingTimeOrDistanceChangedListener
-                // callback once the new route data arrives — NOT here.
+                Log.d(TAG, "re-route — route updated attemptId=$attempt")
+                if (_state.value.isRerouting) {
+                    // RouteChangedListener can fire multiple times for the same physical
+                    // reroute event (e.g. two SDK callbacks in quick succession for traffic
+                    // recalculation).  Ignore duplicates: the existing spinner and its
+                    // safety-timeout continue counting down unchanged.
+                    Log.d(NAV_TAG, "routeChangedListener: already rerouting — ignoring duplicate (attemptId=$attempt)")
+                } else {
+                    val gen = ++reroutingGeneration
+                    Log.d(NAV_TAG, "REROUTE_STARTED reason=route-changed-sdk attemptId=$attempt")
+                    _state.value = _state.value.copy(isRerouting = true)
+                    Log.d(NAV_TAG, "REROUTE_UI_VISIBLE=true attemptId=$attempt")
+                    // Schedule a safety timeout.  The distance/time-change listener clears
+                    // the flag normally once the new route settles; this job fires only if
+                    // that callback is unexpectedly delayed (e.g. stationary device, SDK bug).
+                    // It clears ONLY the visual flag — navigation continues unaffected.
+                    reroutingTimeoutJob?.cancel()
+                    reroutingTimeoutJob = mainScope.launch {
+                        delay(REROUTE_TIMEOUT_MS)
+                        if (reroutingGeneration == gen && _state.value.isRerouting) {
+                            Log.w(NAV_TAG, "REROUTE_STATE_CLEARED reason=timeout gen=$gen attemptId=$attempt")
+                            Log.d(NAV_TAG, "REROUTE_UI_VISIBLE=false")
+                            _state.value = _state.value.copy(isRerouting = false)
+                            reroutingTimeoutJob = null
+                        }
+                    }
+                }
                 return@RouteChangedListener
             }
             syncStateFromNavigator(nav)
