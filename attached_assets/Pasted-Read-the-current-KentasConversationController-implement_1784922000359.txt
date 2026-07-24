@@ -1,0 +1,139 @@
+Read the current KentasConversationController implementation before changing code.
+
+Current bug:
+
+The conversation no longer closes too early, but now it never closes after 30 seconds of user silence.
+
+Log evidence:
+
+INACTIVITY_TIMER_STARTED
+→ after about 5 seconds ERROR_NO_MATCH
+→ INACTIVITY_TIMER_PAUSED
+→ recognizer relistens
+→ onReadyForSpeech
+→ INACTIVITY_TIMER_STARTED again from a fresh 30 seconds
+
+This cycle repeats indefinitely.
+
+The SpeechRecognizer naturally returns ERROR_NO_MATCH every few seconds while the user is silent. Because every new onReadyForSpeech restarts a full 30-second timer, the inactivity timeout can never expire.
+
+Required behaviour:
+
+The timeout must represent 30 seconds of TOTAL user silence across multiple SpeechRecognizer listening/relisten cycles.
+
+Do not implement 30 seconds per recognizer cycle.
+
+Correct lifecycle:
+
+Kentas finishes speaking
+→ open one 30-second user-response window
+→ SpeechRecognizer may return NO_MATCH, SPEECH_TIMEOUT, or reconnect several times
+→ automatically relisten
+→ preserve the original response-window deadline
+→ if user does not begin speaking or produce a valid result before the deadline, close the conversation
+→ if user begins speaking or gives a valid result, reset the inactivity deadline for the next conversational turn
+
+Implement the smallest maintainable fix.
+
+1. Replace the restartable 30-second timer model with an absolute inactivity deadline.
+
+Suggested state:
+
+private var inactivityDeadlineMs: Long? = null
+private var inactivityJob: Job? = null
+
+Use SystemClock.elapsedRealtime(), not wall-clock time.
+
+2. Start a new 30-second response window only when the user is genuinely expected to answer:
+
+- when the conversation first becomes ready to listen
+- after Kentas finishes an AI response and the recognizer becomes ready
+- after a navigation interruption finishes and the recognizer becomes ready
+
+Do not create a new deadline on every recognizer reconnect.
+
+3. On onReadyForSpeech:
+
+- if no inactivity deadline exists, create deadline = now + 30_000 ms
+- if a deadline already exists, preserve it
+- schedule the timeout job only for the remaining duration
+- do not reset to another full 30 seconds
+
+4. On ERROR_NO_MATCH and ERROR_SPEECH_TIMEOUT:
+
+- keep the existing inactivity deadline
+- do not clear it
+- do not reset it
+- relisten only if remaining time > 0
+- if deadline has already expired, close with reason=inactivity-timeout instead of relistening
+
+5. On infrastructure errors and recognizer recreation:
+
+- preserve the same inactivity deadline
+- do not grant another full 30 seconds
+- after recovery, schedule only the remaining time
+
+6. Reset or clear the inactivity deadline when:
+
+- onBeginningOfSpeech fires
+- a valid onResults arrives
+- AI generation begins
+- conversation is manually closed
+- session closes for any other reason
+
+When Kentas later finishes speaking and listening becomes ready again, create a new 30-second response window for the next turn.
+
+7. AI generation time, Kentas TTS, and navigation TTS must not consume the user-response window.
+
+This means the previous deadline must be cleared when valid user speech is accepted and a new deadline must not be created until the recognizer is ready after all TTS is finished.
+
+8. Do not pause and then restart a full timer for NO_MATCH.
+
+The important invariant:
+
+Within one user-response turn, all NO_MATCH / SPEECH_TIMEOUT / recognizer reconnect cycles share one absolute deadline.
+
+9. Add logs:
+
+INACTIVITY_WINDOW_CREATED session=... deadlineInMs=30000
+INACTIVITY_WINDOW_PRESERVED session=... remainingMs=...
+INACTIVITY_TIMEOUT_SCHEDULED session=... remainingMs=...
+INACTIVITY_WINDOW_CLEARED session=... reason=beginning-of-speech/results/ai-start/manual-close
+INACTIVITY_DEADLINE_EXPIRED session=...
+RELISTEN_SKIPPED reason=inactivity-deadline-expired
+
+10. Add focused tests:
+
+- repeated ERROR_NO_MATCH does not reset the inactivity deadline
+- repeated ERROR_SPEECH_TIMEOUT does not reset the deadline
+- ERROR_SERVER_DISCONNECTED recovery does not reset the deadline
+- onReadyForSpeech after relisten preserves the original deadline
+- session closes approximately 30 seconds after the first ready-to-listen event despite repeated NO_MATCH cycles
+- onBeginningOfSpeech clears the current deadline
+- valid onResults clears the current deadline
+- after AI TTS completes and recognizer becomes ready, a fresh 30-second window is created for the next turn
+- stale timeout job cannot close a newer session or newer turn
+
+Do not change:
+
+- navigation behaviour
+- GPS/location
+- AI prompts
+- TTS implementation
+- conversation history
+- UI layout
+- SpeechRecognizer recovery classification
+
+Modify only the inactivity deadline handling in the existing conversation controller.
+
+Commit locally.
+Do not push.
+
+Report:
+
+- root cause
+- exact functions changed
+- old timer model
+- new absolute-deadline model
+- tests added
+- commit hash
