@@ -1,0 +1,461 @@
+TASK: Full end-to-end stabilization audit for Kentas navigation.
+
+GOAL
+
+Make the complete navigation flow reliable from destination entry to arrival on a real Xiaomi device.
+
+This is a stabilization and repair task.
+Do not add new product features.
+Do not redesign the UI.
+Do not change the visual settings screen.
+Do not remove Android Geocoder unless an already-configured replacement fully covers the same path.
+Do not push automatically.
+
+REAL-DEVICE FAILURES TO INVESTIGATE
+
+1. Voice listens but sometimes gives no spoken response.
+2. Address can work on the first trip, then later resolve incorrectly or produce nonsense.
+3. Current location marker is visible, but:
+   - route line may be missing;
+   - turn arrows/instructions may be missing;
+   - left/right guidance may not appear;
+   - map may look only partially loaded.
+4. Starting a second trip after completing or cancelling the first is less reliable.
+5. While driving, the phone screen dims or turns off.
+6. Typed destination and spoken destination must behave identically.
+7. Navigation must remain functional from:
+   - app launch
+   - destination entry
+   - destination resolution
+   - route calculation
+   - guidance start
+   - driving
+   - rerouting
+   - arrival
+   - starting another trip
+
+FIRST RULE
+
+Do not patch blindly.
+
+Before changing production code, trace the complete actual code path and write a concise root-cause map.
+
+Inspect all relevant lifecycle and state ownership:
+
+- Compose screens
+- MainViewModel
+- voice coordinator / SpeechRecognizer
+- TTS manager
+- DestinationResolver
+- LocationProvider
+- GoogleNavigationEngine
+- NavigationView lifecycle
+- Navigator lifecycle
+- route/guidance listeners
+- arrival/cancel/restart paths
+- activity/window screen-on behavior
+
+PHASE 1 — END-TO-END TRACE
+
+Trace and document the real call sequence for:
+
+A. Typed address
+B. Spoken address
+C. Casual voice command
+D. First navigation
+E. Stop navigation
+F. Second navigation in same app session
+G. Arrival
+
+Expected trace:
+
+input
+→ command classification
+→ speech finalization if voice
+→ current locality lookup
+→ destination resolution
+→ selected coordinates/place
+→ setDestinations
+→ route status callback
+→ startGuidance
+→ navigation state listener
+→ turn instruction updates
+→ TTS output
+→ arrival
+→ cleanup/reset
+→ next navigation
+
+Do not guess. Reference exact functions and state variables.
+
+PHASE 2 — ADD TEMPORARY STRUCTURED DIAGNOSTICS
+
+Use these tags:
+
+KentasFlow
+KentasSpeechTiming
+KentasTTS
+KentasDestination
+KentasLocationContext
+KentasNavigation
+KentasLifecycle
+KentasMap
+
+Add one session/navigation attempt ID so logs from multiple trips can be separated.
+
+Log:
+
+Input:
+- typed or voice source
+- raw text
+- final selected utterance
+- command classification
+
+Destination:
+- locality used
+- candidate queries
+- geocoder/API result
+- accepted coordinates
+- rejection reason
+
+Navigation:
+- navigator instance identity
+- NavigationView lifecycle callbacks
+- current engine state
+- setDestinations start/result/failure
+- route status
+- startGuidance call
+- guidance active state
+- route changed/rerouted
+- remaining time/distance updates
+- arrival
+- stop/cancel
+- second-trip reset
+
+Map:
+- map/navigation view attached
+- route polyline expected/visible state if exposed
+- camera-follow mode
+- current location available
+- maneuver/instruction listener active
+
+Speech/TTS:
+- recognized command
+- response text
+- speak() called
+- TTS initialized state
+- queue mode
+- utterance ID
+- onStart
+- onDone
+- onError
+- whether listening restart waited for TTS completion
+
+Do not log secrets or API keys.
+Avoid log spam from every GPS frame.
+
+PHASE 3 — FIX VOICE LISTENS BUT DOES NOT SPEAK
+
+Audit the complete TTS state machine.
+
+Verify:
+
+- TTS initialization success/failure is observable.
+- No call to speak occurs before initialization.
+- Every deterministic navigation response reaches ttsManager.speak().
+- AI/casual responses also reach the same TTS path.
+- Empty/null responses are handled explicitly.
+- notifyCommandDone or recognizer restart does not happen before TTS begins.
+- SpeechRecognizer is not listening over TTS and immediately swallowing the response.
+- TTS callbacks always release the voice session.
+- TTS errors recover the continuous-listening loop.
+
+Required behavior:
+
+1. Recognize command.
+2. Stop/pause listening.
+3. Build response.
+4. Call TTS.
+5. Wait for onDone/onError.
+6. Restart listening exactly once.
+
+Never leave UI permanently in:
+- "Kentas klauso"
+- "Kentas galvoja"
+- speaking state
+
+Add a timeout fallback for a missing TTS callback, but do not use arbitrary delays as the normal path.
+
+PHASE 4 — FIX NAVIGATION AND MAP STATE
+
+Audit navigator and NavigationView ownership.
+
+Verify:
+
+- Navigator is not destroyed when a Compose screen temporarily disposes.
+- NavigationView lifecycle callbacks match Activity lifecycle.
+- onViewDestroy and full navigator onDestroy are not confused.
+- The same active Navigator instance is used by:
+  - setDestinations
+  - startGuidance
+  - route listeners
+  - instruction listeners
+  - NavigationView
+- Listeners are registered once and removed correctly.
+- A second trip does not reuse stale destination, route token, listener, or UI state.
+- stop navigation resets only trip state, not the entire engine unless required.
+- startGuidance is called only after route calculation succeeds.
+- route errors are surfaced to TTS/UI.
+- loading state cannot remain stuck.
+
+Create an explicit minimal navigation state machine if one is not already present:
+
+IDLE
+RESOLVING_DESTINATION
+CALCULATING_ROUTE
+ROUTE_READY
+GUIDING
+ARRIVED
+FAILED
+STOPPED
+
+Transitions must be deterministic and logged.
+
+Prevent stale async callbacks from an older route attempt from modifying a newer attempt. Use attempt IDs or generation tokens.
+
+PHASE 5 — TURN ARROWS AND MANEUVER INSTRUCTIONS
+
+Find why current location can be visible while turn guidance is absent.
+
+Verify:
+
+- guidance is actually active;
+- route exists;
+- maneuver/instruction listener is attached;
+- navigation UI is bound to the active Navigator;
+- camera/navigation-follow mode is enabled when guidance begins;
+- UI state receives current maneuver updates;
+- instructions are cleared only on arrival/stop, not during recomposition;
+- rerouting preserves listener bindings.
+
+If Google Navigation UI should render arrows automatically, confirm all required lifecycle and binding calls are executed.
+
+Do not create fake turn arrows manually if the SDK should supply them.
+
+PHASE 6 — SECOND TRIP / SAME SESSION
+
+This must be tested explicitly.
+
+Scenario:
+
+1. Launch app.
+2. Navigate to address A.
+3. Stop or arrive.
+4. Enter address B.
+5. Start navigation again.
+
+Audit and fix:
+
+- stale route
+- stale destination
+- stale attempt ID
+- guidance already started flag
+- listener duplication
+- disposed NavigationView
+- destroyed Navigator
+- old TTS/voice jobs
+- old current-city context
+- loading/error state not reset
+
+The second trip must work without restarting the app.
+
+PHASE 7 — KEEP SCREEN ON WHILE NAVIGATING
+
+While guidance is active, the display must not dim or turn off.
+
+Implement using the correct Android mechanism:
+
+Preferred:
+- Activity window FLAG_KEEP_SCREEN_ON while navigation state == GUIDING
+
+or:
+- Compose Modifier.keepScreenOn equivalent if already used safely
+
+Rules:
+
+- enable when active guidance starts;
+- keep enabled during rerouting and normal driving;
+- disable on arrival;
+- disable on stop/cancel;
+- disable when leaving the navigation flow;
+- avoid permanent wake lock;
+- do not request unnecessary WAKE_LOCK permission if FLAG_KEEP_SCREEN_ON is sufficient.
+
+Log screen-on state transitions under KentasLifecycle.
+
+PHASE 8 — LOCATION AND DESTINATION CONSISTENCY
+
+Preserve the current city-scoped resolver logic.
+
+Verify:
+
+- typed and spoken address share the exact same resolver;
+- fresh location is used;
+- stale location is rejected;
+- city cache is invalidated correctly;
+- another-city result is rejected;
+- no nationwide fallback occurs silently;
+- destination coordinates passed to Navigation SDK are exactly the accepted result.
+
+Add the accepted destination name and coordinates to KentasNavigation logs before setDestinations.
+
+PHASE 9 — ERROR RECOVERY
+
+Every failure must produce a clear UI/TTS result and return to a usable state.
+
+Cover:
+
+- no speech result
+- TTS initialization failure
+- address not found
+- city unknown
+- location permission missing
+- stale/unavailable location
+- route calculation failure
+- network unavailable
+- Navigation SDK error
+- map/navigation view not ready
+- second-trip stale callback
+- user cancels during route calculation
+
+No infinite spinners.
+No silent failures.
+No permanent disabled microphone.
+No need to restart the app after an error.
+
+PHASE 10 — TESTS
+
+Add focused tests, not hundreds of shallow tests.
+
+Target approximately 20–35 meaningful tests.
+
+Must cover:
+
+Voice/TTS:
+- command executes once
+- TTS called with non-empty response
+- listener restarts only after TTS completion
+- TTS error recovers
+- stale TTS callback cannot restart an old session
+- navigation response bypasses AI
+- casual conversation still uses personality path
+
+Navigation state:
+- IDLE → RESOLVING → CALCULATING → GUIDING
+- route failure → FAILED → recoverable IDLE
+- stop during guidance
+- arrival cleanup
+- second trip after stop
+- second trip after arrival
+- stale first-route callback ignored
+- listeners registered once
+
+Screen:
+- keep screen on enabled only during GUIDING
+- stays enabled during reroute
+- disabled after stop
+- disabled after arrival
+
+Destination:
+- typed and voice paths use same resolver
+- current city is applied
+- wrong city rejected
+- accepted coordinates reach setDestinations unchanged
+
+Use fakes/interfaces for pure JVM tests where possible.
+Do not attempt to unit-test Google SDK internals directly.
+
+PHASE 11 — BUILD VERIFICATION
+
+Find the actual directory containing gradlew.
+
+Do not assume it is repository root.
+
+Run:
+
+./gradlew :app:compileDebugKotlin
+./gradlew :app:testDebugUnitTest
+./gradlew :app:assembleDebug
+
+If instrumentation setup exists and is safe:
+
+./gradlew :app:connectedDebugAndroidTest
+
+If gradlew truly does not exist:
+- report the exact searched directories;
+- do not create a fake wrapper;
+- do not claim successful compilation.
+
+Scan all modified Kotlin files for:
+- smart quotes
+- unresolved imports
+- duplicate listeners
+- coroutine jobs not cancelled
+- lifecycle leaks
+
+PHASE 12 — REAL-DEVICE TEST SCRIPT
+
+Provide an exact checklist:
+
+Cold start:
+1. Open app.
+2. Confirm map/current location loads.
+3. Say "Taikos 61".
+4. Confirm spoken acknowledgement.
+5. Confirm route line.
+6. Confirm first turn instruction/arrow.
+7. Start driving.
+8. Confirm screen stays on.
+9. Ask "kiek liko?"
+10. Confirm spoken response.
+11. Trigger reroute by missing a turn.
+12. Confirm route and instructions update.
+13. Arrive or stop.
+
+Second trip:
+14. Without closing app, enter another address.
+15. Confirm new route replaces old route.
+16. Confirm guidance and arrows appear.
+17. Confirm TTS still works.
+18. Confirm screen stays on again.
+
+Typed:
+19. Stop.
+20. Type "Taikos 61".
+21. Confirm same locality and route path as voice.
+
+Failure:
+22. Enter nonsense.
+23. Confirm clear error and app remains usable.
+24. Enter a valid address immediately afterward.
+25. Confirm navigation starts normally.
+
+FINAL REPORT
+
+Provide:
+
+1. Root-cause map for every reported symptom
+2. Exact lifecycle/state bug(s)
+3. Exact TTS bug(s)
+4. Why location marker could appear without route/arrows
+5. Why first trip could work and second fail
+6. Files changed
+7. Navigation state machine before/after
+8. Listener lifecycle before/after
+9. Screen-on implementation
+10. Error recovery behavior
+11. Tests added and count
+12. Compile/test/assemble results
+13. Real-device checklist
+14. Known limitations
+15. Commit hash
+16. Confirmation that nothing was pushed

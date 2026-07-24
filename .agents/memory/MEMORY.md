@@ -5,3 +5,7 @@
 - [ERROR 11 recovery](sr-error-11-recovery.md) — SpeechRecognizer error code 11 (ERROR_SERVER_DISCONNECTED, API 28+) is RECOVERABLE: destroy+recreate recognizer, 1200ms delay. It was previously routed to onFatalError, stopping the session permanently.
 - [SR generation IDs](sr-generation-ids.md) — Each startListening() increments generation; RecognitionListener captures its generation in a closure. All callbacks guard with isStale() — stale callbacks from old recognizer instances are no-ops.
 - [Continuous mode IDLE gate](continuous-mode-idle-gate.md) — In continuous mode, _voiceListeningState must NEVER be written to IDLE. Gate every write with if (!_continuousModeEnabled.value). continuousModeEnabled stays true through all restarts; only goes false on user stop, fatal error, or MAX_RETRIES.
+- [Nav session guard](nav-session-active.md) — sessionActive flag must be set before stopGuidance; guards stale RouteChanged/ArrivalListener callbacks on second trip.
+- [TTS watchdog pattern](tts-watchdog.md) — arm watchdog in onStart; cancel in onDone; forceComplete() on timeout; never use delay as normal path.
+- [resolveJob tracking](resolve-job-tracking.md) — destination coroutine tracked as Job?; cancel before relaunch, on stop, and in onCleared to prevent concurrent resolution.
+- [isRerouting lifetime](rerouting-lifetime.md) — isRerouting must NOT be cleared in syncStateFromNavigator; cleared only by next RemainingTimeOrDistanceChangedListener callback.
