@@ -1,5 +1,6 @@
 package lt.sturmanas.bajeristas.voice
 
+import android.util.Log
 import lt.sturmanas.bajeristas.navigation.ManeuverType
 import lt.sturmanas.bajeristas.personality.formatDistance
 
@@ -15,6 +16,10 @@ import lt.sturmanas.bajeristas.personality.formatDistance
  */
 class KentasNavigationPhraseFormatter {
 
+    private companion object {
+        private const val TAG = "KentasNavFmt"
+    }
+
     // Rotation cursor per maneuver type.
     private val rotationIndex = mutableMapOf<ManeuverType, Int>()
 
@@ -28,18 +33,27 @@ class KentasNavigationPhraseFormatter {
         distanceMeters: Int,
         nextRoadName: String,
     ): String {
-        val templates = phrasesFor(maneuver).takeIf { it.isNotEmpty() } ?: return ""
+        Log.i(TAG, "format ENTER maneuver=$maneuver dist=$distanceMeters nextRoad='$nextRoadName'")
+        val templates = phrasesFor(maneuver)
+        if (templates.isEmpty()) {
+            Log.w(TAG,
+                "format STOP reason=NO_PHRASES_FOR_MANEUVER maneuver=$maneuver " +
+                "— this maneuver type produces no speech (NONE/STRAIGHT/UNKNOWN/ARRIVE)")
+            return ""
+        }
         val idx = ((rotationIndex[maneuver] ?: -1) + 1) % templates.size
         rotationIndex[maneuver] = idx
 
-        val dist = formatDistance(distanceMeters)
-        val road = if (nextRoadName.isNotBlank()) " į $nextRoadName" else ""
+        val dist    = formatDistance(distanceMeters)
+        val road    = if (nextRoadName.isNotBlank()) " į $nextRoadName" else ""
         val roadDot = if (nextRoadName.isNotBlank()) " į $nextRoadName." else "."
 
-        return templates[idx]
+        val phrase = templates[idx]
             .replace("{dist}", dist)
             .replace("{road}", road)
             .replace("{road.}", roadDot)
+        Log.i(TAG, "format RESULT='$phrase'")
+        return phrase
     }
 
     // ── Phrase lists ───────────────────────────────────────────────────────

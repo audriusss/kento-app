@@ -243,21 +243,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * for that maneuver type. Returns early if speech is blocked by an active mic.
      */
     fun speakNavInstruction(navState: NavigationState, distanceMeters: Int) {
+        Log.i(TAG,
+            "speakNavInstruction ENTER maneuver=${navState.maneuverType} " +
+            "dist=$distanceMeters nextRoad='${navState.nextRoadName}' " +
+            "isSpeechBlocked=$isSpeechBlocked ttsReady=${speechCoordinator.settings.isEnabled}")
         if (isSpeechBlocked) {
-            Log.d(TAG, "speakNavInstruction: skipped — mic is active")
+            Log.w(TAG,
+                "speakNavInstruction STOP reason=SPEECH_BLOCKED voiceState=${voiceListeningState.value}")
             return
         }
-        if (navState.maneuverType == ManeuverType.ARRIVE) return
+        if (navState.maneuverType == ManeuverType.ARRIVE) {
+            Log.d(TAG, "speakNavInstruction STOP reason=ARRIVE_HANDLED_SEPARATELY")
+            return
+        }
         val phrase = phraseFormatter.format(
-            maneuver      = navState.maneuverType,
+            maneuver       = navState.maneuverType,
             distanceMeters = distanceMeters,
-            nextRoadName  = navState.nextRoadName,
+            nextRoadName   = navState.nextRoadName,
         )
+        Log.i(TAG,
+            "speakNavInstruction phrase='${phrase.take(80)}' blank=${phrase.isBlank()}")
         if (phrase.isNotBlank()) {
-            Log.d(TAG, "speakNavInstruction: interrupting conv for maneuver TTS")
+            Log.i(TAG, "speakNavInstruction → speakNavigation")
             speechCoordinator.speakNavigation(phrase) {
                 conversationController.resumeAfterNavInterrupt()
             }
+        } else {
+            Log.w(TAG,
+                "speakNavInstruction STOP reason=BLANK_PHRASE " +
+                "maneuver=${navState.maneuverType} dist=$distanceMeters")
         }
     }
 

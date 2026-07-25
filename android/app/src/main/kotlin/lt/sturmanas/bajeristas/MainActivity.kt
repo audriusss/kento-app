@@ -41,6 +41,11 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         const val FLOW_TAG = "KentasFlow"
+        /**
+         * Navigation-speech execution trace. Filter logcat by this tag to follow the
+         * full pipeline from NavState update → LaunchedEffect → speakNavInstruction → TTS.
+         */
+        const val NAV_TRACE_TAG = "KentasNavTrace"
     }
 
     private val engine by lazy {
@@ -223,11 +228,37 @@ private fun SturmanasApp(
     }
 
     LaunchedEffect(maneuverDist) {
-        if (!navState.isNavigating || maneuverDist <= 0) return@LaunchedEffect
-        if (viewModel.isSpeechBlocked) return@LaunchedEffect
+        // ── RUNTIME TRACE: filter logcat by KentasNavTrace to follow this pipeline ──
+        val ts = System.currentTimeMillis()
+        Log.i(MainActivity.NAV_TRACE_TAG,
+            "▶ MANEUVER_DISTANCE_CHANGED ts=$ts maneuverDist=$maneuverDist " +
+            "isNavigating=${navState.isNavigating} maneuver=${navState.maneuverType} " +
+            "nextRoad='${navState.nextRoadName}' isSpeechBlocked=${viewModel.isSpeechBlocked} " +
+            "announced=$announcedThresholds")
+
+        if (!navState.isNavigating) {
+            Log.d(MainActivity.NAV_TRACE_TAG, "  STOP ts=$ts reason=NOT_NAVIGATING")
+            return@LaunchedEffect
+        }
+        if (maneuverDist <= 0) {
+            Log.d(MainActivity.NAV_TRACE_TAG, "  STOP ts=$ts reason=DIST_ZERO_OR_NEGATIVE dist=$maneuverDist")
+            return@LaunchedEffect
+        }
+        if (viewModel.isSpeechBlocked) {
+            Log.d(MainActivity.NAV_TRACE_TAG,
+                "  STOP ts=$ts reason=SPEECH_BLOCKED voiceState=${viewModel.voiceListeningState.value}")
+            return@LaunchedEffect
+        }
         val threshold = listOf(500, 200, 50).firstOrNull { t ->
             maneuverDist <= t && t !in announcedThresholds
-        } ?: return@LaunchedEffect
+        }
+        if (threshold == null) {
+            Log.d(MainActivity.NAV_TRACE_TAG,
+                "  STOP ts=$ts reason=NO_THRESHOLD_MATCHED dist=$maneuverDist announced=$announcedThresholds")
+            return@LaunchedEffect
+        }
+        Log.i(MainActivity.NAV_TRACE_TAG,
+            "  PASS ts=$ts threshold=$threshold → calling speakNavInstruction")
         announcedThresholds.add(threshold)
         viewModel.speakNavInstruction(navState, maneuverDist)
     }
@@ -284,14 +315,23 @@ private fun SturmanasApp(
     // onDispose, which fires when the composable leaves the composition —
     // covering Activity destruction while navigation is active.
     DisposableEffect(navState.isNavigating) {
+        // ── RUNTIME TRACE: screen-on pipeline ────────────────────────────────────
+        Log.i(MainActivity.FLOW_TAG,
+            "SCREEN_ON_EFFECT_ENTERED isNavigating=${navState.isNavigating} " +
+            "activityNull=${activity == null} windowNull=${activity?.window == null}")
         if (navState.isNavigating) {
             activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            Log.i(MainActivity.FLOW_TAG, "KEEP_SCREEN_ON_ENABLED")
+            Log.i(MainActivity.FLOW_TAG,
+                "KEEP_SCREEN_ON_ENABLED addFlags called — " +
+                "activityNull=${activity == null} windowNull=${activity?.window == null}")
         } else {
             activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             Log.i(MainActivity.FLOW_TAG, "KEEP_SCREEN_ON_DISABLED reason=navigation-stopped")
         }
         onDispose {
+            Log.i(MainActivity.FLOW_TAG,
+                "SCREEN_ON_EFFECT_DISPOSED isNavigating=${navState.isNavigating} " +
+                "activityNull=${activity == null}")
             activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             Log.i(MainActivity.FLOW_TAG, "KEEP_SCREEN_ON_DISABLED reason=activity-disposed")
         }

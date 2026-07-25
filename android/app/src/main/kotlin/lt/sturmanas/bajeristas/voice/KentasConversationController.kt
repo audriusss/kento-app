@@ -209,7 +209,7 @@ class KentasConversationController(
         pendingRelistenJob?.cancel()
         pendingRelistenJob = null
         val myGen = generation
-        Log.i(TAG, "CONVERSATION_SESSION_OPENED session=$myGen")
+        Log.i(TAG, "CONVERSATION_SESSION_OPENED session=$myGen elapsedMs=${SystemClock.elapsedRealtime()}")
         // Do NOT open an inactivity window here — wait for the first onReadyForSpeech.
         // Startup latency (recognizer creation, SR service init) is not user inactivity.
         installCallbacks(myGen)
@@ -479,13 +479,17 @@ class KentasConversationController(
         if (existingDeadline == null) {
             val deadline = now + INACTIVITY_TIMEOUT_MS
             inactivityDeadlineMs = deadline
-            Log.i(TAG, "INACTIVITY_WINDOW_CREATED session=$myGen deadlineInMs=$INACTIVITY_TIMEOUT_MS")
+            Log.i(TAG,
+                "INACTIVITY_WINDOW_CREATED session=$myGen " +
+                "deadlineInMs=$INACTIVITY_TIMEOUT_MS elapsedMs=$now deadlineAt=${now + INACTIVITY_TIMEOUT_MS}")
             scheduleInactivityJob(myGen, INACTIVITY_TIMEOUT_MS)
         } else {
             val remaining = existingDeadline - now
-            Log.i(TAG, "INACTIVITY_WINDOW_PRESERVED session=$myGen remainingMs=$remaining")
+            Log.i(TAG,
+                "INACTIVITY_WINDOW_PRESERVED session=$myGen " +
+                "remainingMs=$remaining elapsedMs=$now deadlineAt=$existingDeadline")
             if (remaining <= 0L) {
-                Log.i(TAG, "INACTIVITY_DEADLINE_EXPIRED session=$myGen")
+                Log.i(TAG, "INACTIVITY_DEADLINE_EXPIRED session=$myGen elapsedMs=$now (immediate — window expired during relisten)")
                 inactivityDeadlineMs = null
                 stopConversation(reason = "inactivity-timeout")
             } else {
@@ -503,14 +507,25 @@ class KentasConversationController(
      */
     private fun scheduleInactivityJob(myGen: Long, remainingMs: Long) {
         inactivityJob?.cancel()
-        Log.i(TAG, "INACTIVITY_TIMEOUT_SCHEDULED session=$myGen remainingMs=$remainingMs")
+        val scheduledAt = SystemClock.elapsedRealtime()
+        Log.i(TAG,
+            "INACTIVITY_TIMEOUT_SCHEDULED session=$myGen " +
+            "remainingMs=$remainingMs scheduledAtElapsedMs=$scheduledAt " +
+            "willFireAtElapsedMs=${scheduledAt + remainingMs}")
         inactivityJob = scope.launch {
             delay(remainingMs)
+            val firedAt = SystemClock.elapsedRealtime()
             if (isCurrentGenValue(myGen) && inactivityDeadlineMs != null) {
-                Log.i(TAG, "INACTIVITY_DEADLINE_EXPIRED session=$myGen")
+                Log.i(TAG,
+                    "INACTIVITY_DEADLINE_EXPIRED session=$myGen " +
+                    "firedAtElapsedMs=$firedAt scheduledMs=$remainingMs")
                 inactivityDeadlineMs = null
                 inactivityJob = null   // self-clear before stopConversation to avoid double log
                 stopConversation(reason = "inactivity-timeout")
+            } else {
+                Log.d(TAG,
+                    "INACTIVITY_JOB_NOOP session=$myGen firedAt=$firedAt " +
+                    "isCurrentGen=${isCurrentGenValue(myGen)} deadlineNull=${inactivityDeadlineMs == null}")
             }
         }
     }
