@@ -1,5 +1,8 @@
 package lt.sturmanas.bajeristas.voice
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.test.TestScope
 import org.junit.Assert.*
 import org.junit.Test
 import java.lang.reflect.Field
@@ -64,9 +67,12 @@ import java.lang.reflect.Method
  *   Must NOT see INACTIVITY_WINDOW_CREATED more than once per turn.
  *
  * INT-D02 User speaks just before deadline:
- *   Open conversation → 29 s of silence (NO_MATCH cycles) → user speaks at 29.5 s →
- *   Expected: onBeginningOfSpeech clears deadline (INACTIVITY_WINDOW_CLEARED reason=beginning-of-speech),
- *   Kentas responds, new 30-second window opens for next turn.
+ *   Open conversation → 7 s of silence (NO_MATCH cycles) → user speaks at 7 s →
+ *   Expected: onBeginningOfSpeech PAUSES the job (INACTIVITY_JOB_PAUSED_DURING_SPEECH) but
+ *   preserves inactivityDeadlineMs. If recognizer returns ERROR_NO_MATCH, the next
+ *   onReadyForSpeech logs INACTIVITY_WINDOW_PRESERVED remainingMs≈23000 (not CREATED).
+ *   Only a valid onResults followed by AI TTS completion clears the deadline and opens a
+ *   fresh 30-second window for the next turn.
  *
  * INT-D03 Infrastructure failure during deadline window:
  *   onReadyForSpeech (CREATED, deadline=T+30) → 10 s later ERROR_SERVER_DISCONNECTED →
@@ -187,9 +193,14 @@ class ConversationInactivityDeadlineTest {
     /**
      * [clearInactivityWindow] must exist as a private method.
      *
-     * Called on: [onBeginningOfSpeech] (AC-D06), [onResult] (AC-D07), AI generation
-     * start, nav interrupt, and session close.  After calling it, [inactivityDeadlineMs]
-     * is null, so the next [openInactivityWindow] creates a fresh turn window (AC-D08).
+     * Called on: [onResult] (AC-D07), AI generation start, nav interrupt, and session close.
+     * After calling it, [inactivityDeadlineMs] is null so the next [openInactivityWindow]
+     * creates a fresh turn window (AC-D08).
+     *
+     * NOTE: [clearInactivityWindow] is NOT called from [onBeginningOfSpeech].
+     * [onBeginningOfSpeech] uses [pauseInactivityJobWhileSpeaking] instead, which preserves
+     * [inactivityDeadlineMs] so that an ERROR_NO_MATCH after speech counts down from the
+     * original absolute deadline, not a fresh 30-second window (AC-D10/D11/D12/D13).
      */
     @Test
     fun `clearInactivityWindow private method exists with String parameter`() {
@@ -200,8 +211,9 @@ class ConversationInactivityDeadlineTest {
         )
         assertNotNull(
             "KentasConversationController must have a private 'clearInactivityWindow(String)' method. " +
-            "Called from onBeginningOfSpeech (AC-D06) and onResult (AC-D07). " +
-            "After it returns, inactivityDeadlineMs is null so the next turn gets a fresh window.",
+            "Called from onResult (AC-D07), AI start, nav interrupt, and session close. " +
+            "After it returns, inactivityDeadlineMs is null so the next turn gets a fresh window. " +
+            "NOT called from onBeginningOfSpeech — that uses pauseInactivityJobWhileSpeaking instead.",
             method,
         )
     }
@@ -235,18 +247,25 @@ class ConversationInactivityDeadlineTest {
      *
      * Its presence means the timer was being cancelled and then restarted on the next
      * [onReadyForSpeech] — which was the pause/restart model that reset to full 30 s.
+     *
+     * The replacement has two distinct methods:
+     * - [clearInactivityWindow] — nulls the deadline; used for turn completion and session close.
+     * - [pauseInactivityJobWhileSpeaking] — cancels the job without touching the deadline;
+     *   used by [onBeginningOfSpeech] so an ERROR_NO_MATCH after speech counts down from
+     *   the original absolute deadline (AC-D10/D11/D12/D13).
      */
     @Test
-    fun `pauseInactivityTimer is removed — replaced by clearInactivityWindow`() {
+    fun `pauseInactivityTimer is removed — replaced by clearInactivityWindow and pauseInactivityJobWhileSpeaking`() {
         val method = getDeclaredMethodOrNull(
             KentasConversationController::class.java,
             "pauseInactivityTimer",
             String::class.java,
         )
         assertNull(
-            "pauseInactivityTimer must be removed. The new model uses clearInactivityWindow " +
-            "which also nulls inactivityDeadlineMs so the next onReadyForSpeech creates a fresh " +
-            "window only when a new turn has actually started (not on every relisten).",
+            "pauseInactivityTimer must be removed. " +
+            "The pause/restart model it represented reset the full 30-second window on every relisten. " +
+            "Its two responsibilities are now split: clearInactivityWindow (turn completion) and " +
+            "pauseInactivityJobWhileSpeaking (onBeginningOfSpeech, deadline preserved).",
             method,
         )
     }
@@ -335,7 +354,225 @@ class ConversationInactivityDeadlineTest {
         )
     }
 
+    // ── AC-D10 — pauseInactivityJobWhileSpeaking structural ──────────────
+
+    /**
+     * [pauseInactivityJobWhileSpeaking] must exist as a private method with a Long generation
+     * parameter. Its existence proves that [onBeginningOfSpeech] no longer calls
+     * [clearInactivityWindow], and that the deadline-preserving path is in place.
+     *
+     * If this method is absent, the AC-D11/D12/D13 behavioural tests are also meaningless
+     * because the fix was not applied.
+     */
+    @Test
+    fun `AC-D10 pauseInactivityJobWhileSpeaking private method exists with Long generation parameter`() {
+        val method = getDeclaredMethodOrNull(
+            KentasConversationController::class.java,
+            "pauseInactivityJobWhileSpeaking",
+            Long::class.javaPrimitiveType!!,
+        )
+        assertNotNull(
+            "KentasConversationController must have a private 'pauseInactivityJobWhileSpeaking(Long)' " +
+            "method. It must be called from onBeginningOfSpeech instead of clearInactivityWindow. " +
+            "It cancels the inactivityJob coroutine but does NOT null inactivityDeadlineMs, so that " +
+            "an ERROR_NO_MATCH after speech counts down from the original absolute deadline.",
+            method,
+        )
+    }
+
+    // ── AC-D11 — pauseInactivityJobWhileSpeaking preserves deadline ───────
+
+    /**
+     * After [pauseInactivityJobWhileSpeaking] is called, [inactivityDeadlineMs] must NOT be null.
+     *
+     * Regression: the old [clearInactivityWindow] call in [onBeginningOfSpeech] nulled the
+     * deadline. When the recogniser returned ERROR_NO_MATCH and relistened, [onReadyForSpeech]
+     * saw no existing deadline and created a fresh 30-second window — effectively resetting the
+     * countdown every time the user opened their mouth. This made the session never time out.
+     */
+    @Test
+    fun `AC-D11 pauseInactivityJobWhileSpeaking does not clear inactivityDeadlineMs`() {
+        val (ctrl, scope) = createTestController()
+        try {
+            val deadline = deadlineField()
+            val openWindow = openWindowMethod()
+            val pauseJob = pauseJobMethod()
+
+            // Simulate onReadyForSpeech: open the inactivity window.
+            openWindow.invoke(ctrl, GEN)
+            val beforePause = deadline.get(ctrl) as Long?
+            assertNotNull("openInactivityWindow must set inactivityDeadlineMs", beforePause)
+
+            // Simulate onBeginningOfSpeech: pause the job.
+            pauseJob.invoke(ctrl, GEN)
+            val afterPause = deadline.get(ctrl) as Long?
+
+            assertNotNull(
+                "inactivityDeadlineMs must NOT be null after pauseInactivityJobWhileSpeaking. " +
+                "Nulling it was the root cause of the deadline-reset bug: a subsequent " +
+                "onReadyForSpeech (after ERROR_NO_MATCH) would create a fresh 30-second window " +
+                "instead of counting down from the original deadline.",
+                afterPause,
+            )
+            assertEquals(
+                "inactivityDeadlineMs must be the same value before and after " +
+                "pauseInactivityJobWhileSpeaking — the deadline must not be touched.",
+                beforePause,
+                afterPause,
+            )
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    // ── AC-D12 — openInactivityWindow uses remaining slice ────────────────
+
+    /**
+     * When [inactivityDeadlineMs] is already set (simulating a turn with time remaining),
+     * [openInactivityWindow] must preserve it — not overwrite with a fresh 30-second window.
+     *
+     * Simulates: deadline was set earlier with ~23 seconds remaining (the remaining slice after
+     * 7 seconds of silence). [openInactivityWindow] must keep 23 000 ms, not reset to 30 000 ms.
+     */
+    @Test
+    fun `AC-D12 openInactivityWindow preserves existing deadline instead of opening fresh 30-second window`() {
+        val (ctrl, scope) = createTestController()
+        try {
+            val deadline = deadlineField()
+            val openWindow = openWindowMethod()
+
+            // Directly set a simulated remaining deadline (23 s from now=0 since SystemClock=0).
+            // SystemClock.elapsedRealtime() returns 0 in JVM unit tests (returnDefaultValues=true).
+            val simulatedRemaining = 23_000L
+            deadline.set(ctrl, simulatedRemaining)
+
+            // Simulate onReadyForSpeech after ERROR_NO_MATCH — must PRESERVE the deadline.
+            openWindow.invoke(ctrl, GEN)
+
+            val after = deadline.get(ctrl) as Long?
+            assertNotNull("inactivityDeadlineMs must not be null after openInactivityWindow", after)
+            assertEquals(
+                "openInactivityWindow must preserve an existing deadline (23 000 ms remaining) " +
+                "and NOT open a fresh ${KentasConversationController.INACTIVITY_TIMEOUT_MS} ms window. " +
+                "Resetting would grant extra silence budget for every NO_MATCH cycle.",
+                simulatedRemaining,
+                after,
+            )
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    // ── AC-D13 — full NO_MATCH sequence ──────────────────────────────────
+
+    /**
+     * Full sequence: open window → onBeginningOfSpeech → ERROR_NO_MATCH → relisten ready.
+     *
+     * After the complete cycle, [inactivityDeadlineMs] must equal the original value set by
+     * the first [openInactivityWindow] call — it must not have been reset to 30 000 ms.
+     *
+     * This is the end-to-end regression test for the bug logged in device diagnostics:
+     * ```
+     * onBeginningOfSpeech → INACTIVITY_WINDOW_CLEARED reason=beginning-of-speech
+     * ERROR_NO_MATCH → relisten → onReadyForSpeech → INACTIVITY_WINDOW_CREATED (fresh 30 s)
+     * ```
+     * After the fix the log sequence must be:
+     * ```
+     * onBeginningOfSpeech → INACTIVITY_JOB_PAUSED_DURING_SPEECH (deadline preserved)
+     * ERROR_NO_MATCH → relisten → onReadyForSpeech → INACTIVITY_WINDOW_PRESERVED remainingMs≈original
+     * ```
+     */
+    @Test
+    fun `AC-D13 full NO_MATCH sequence — deadline is original value after open, pause, and re-open`() {
+        val (ctrl, scope) = createTestController()
+        try {
+            val deadline = deadlineField()
+            val openWindow = openWindowMethod()
+            val pauseJob = pauseJobMethod()
+
+            // Step 1: onReadyForSpeech — open the inactivity window.
+            openWindow.invoke(ctrl, GEN)
+            val originalDeadline = deadline.get(ctrl) as Long?
+            assertNotNull("Step 1: openInactivityWindow must set inactivityDeadlineMs", originalDeadline)
+
+            // Step 2: onBeginningOfSpeech — pause the job, preserve the deadline.
+            pauseJob.invoke(ctrl, GEN)
+            assertEquals(
+                "Step 2: deadline must be unchanged after pauseInactivityJobWhileSpeaking",
+                originalDeadline,
+                deadline.get(ctrl) as Long?,
+            )
+
+            // Step 3: ERROR_NO_MATCH → relisten → onReadyForSpeech — open window again.
+            // With the fix: sees existingDeadline, uses remaining slice, preserves value.
+            // Without the fix (old bug): deadline was null here, created a fresh 30-second window.
+            openWindow.invoke(ctrl, GEN)
+            val afterRelisten = deadline.get(ctrl) as Long?
+
+            assertEquals(
+                "Step 3 (regression): after open → pause → re-open, inactivityDeadlineMs must " +
+                "equal the ORIGINAL value ($originalDeadline ms), not a fresh " +
+                "${KentasConversationController.INACTIVITY_TIMEOUT_MS} ms window. " +
+                "Any difference proves the deadline was reset during the NO_MATCH cycle.",
+                originalDeadline,
+                afterRelisten,
+            )
+        } finally {
+            scope.cancel()
+        }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────
+
+    /** Generation ID used in all behavioural tests — any non-zero value. */
+    private val GEN = 1L
+
+    /**
+     * Create a [KentasConversationController] without a real Context.
+     *
+     * The controller's primary constructor stores its parameters as fields — it has no init
+     * block and no property initialiser that calls Android APIs. Passing null for the
+     * Android-context-dependent parameters is safe as long as the test only invokes methods
+     * that do not dereference them (the inactivity-window methods only touch
+     * [inactivityDeadlineMs], [inactivityJob], and [scope]).
+     *
+     * Android stubs return default values in JVM unit tests because
+     * `android { testOptions { unitTests.isReturnDefaultValues = true } }` is set, so
+     * `SystemClock.elapsedRealtime()` returns 0 and `Log.i()` is a no-op.
+     *
+     * @return the controller paired with its [TestScope]; the caller must call
+     *   `scope.cancel()` in a `finally` block to release resources.
+     */
+    private fun createTestController(): Pair<KentasConversationController, CoroutineScope> {
+        val scope = TestScope()
+        val ctor = KentasConversationController::class.java.getDeclaredConstructor(
+            CoroutineScope::class.java,
+            SpeechRecognitionManager::class.java,
+            KentasSpeechCoordinator::class.java,
+            String::class.java,
+        ).also { it.isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val ctrl = ctor.newInstance(scope, null, null, "") as KentasConversationController
+        return Pair(ctrl, scope)
+    }
+
+    private fun deadlineField(): Field =
+        getDeclaredFieldOrNull(KentasConversationController::class.java, "inactivityDeadlineMs")
+            ?: error("inactivityDeadlineMs field not found — the absolute-deadline model may have been removed")
+
+    private fun openWindowMethod(): Method =
+        getDeclaredMethodOrNull(
+            KentasConversationController::class.java,
+            "openInactivityWindow",
+            Long::class.javaPrimitiveType!!,
+        ) ?: error("openInactivityWindow(Long) not found")
+
+    private fun pauseJobMethod(): Method =
+        getDeclaredMethodOrNull(
+            KentasConversationController::class.java,
+            "pauseInactivityJobWhileSpeaking",
+            Long::class.javaPrimitiveType!!,
+        ) ?: error("pauseInactivityJobWhileSpeaking(Long) not found — AC-D10 structural test must pass first")
 
     private fun getDeclaredFieldOrNull(clazz: Class<*>, name: String): Field? =
         runCatching {

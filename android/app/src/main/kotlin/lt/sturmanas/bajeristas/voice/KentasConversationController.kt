@@ -77,9 +77,13 @@ import lt.sturmanas.bajeristas.voice.askKentas
  *
  * - CREATED: first [onReadyForSpeech] after TTS / nav / session start.
  * - PRESERVED: subsequent [onReadyForSpeech] within the same turn.
- * - CLEARED: [onBeginningOfSpeech], valid [onResults], AI generation start,
- *   session close, nav interrupt.  Clearing makes the next [onReadyForSpeech]
- *   open a fresh 30-second window for the next turn.
+ * - PAUSED ([onBeginningOfSpeech]): the scheduled timeout job is cancelled while the user
+ *   is actively speaking, but [inactivityDeadlineMs] is NOT nulled.  If speech ends without
+ *   a valid result (ERROR_NO_MATCH), the next [openInactivityWindow] resumes from the
+ *   remaining slice of the same window — not a fresh 30-second window.
+ * - CLEARED (deadline nulled): valid [onResults], AI generation start, session close,
+ *   nav interrupt.  Clearing makes the next [onReadyForSpeech] open a fresh 30-second
+ *   window for the next turn.
  *
  * @param scope             CoroutineScope tied to ViewModel lifetime (Main dispatcher).
  * @param speechManager     SR wrapper (must already be initialised).
@@ -151,8 +155,9 @@ class KentasConversationController(
      *            across NO_MATCH/infra relisten cycles so only the remaining slice
      *            counts down each time, not a fresh 30 seconds.
      *
-     * Cleared by [clearInactivityWindow] on: [onBeginningOfSpeech], valid [onResults],
-     * AI generation start, nav interrupt, and any session close.
+     * Paused (job cancelled, deadline preserved) on: [onBeginningOfSpeech] — via
+     * [pauseInactivityJobWhileSpeaking].  Cleared (nulled) by [clearInactivityWindow]
+     * on: valid [onResults], AI generation start, nav interrupt, and any session close.
      */
     private var inactivityDeadlineMs: Long? = null
 
@@ -288,8 +293,11 @@ class KentasConversationController(
                     infraRetryCount = 0
                 }
                 _state.value = ConversationState.USER_SPEAKING
-                // User started speaking — clear the deadline so the next turn gets a fresh window.
-                clearInactivityWindow("beginning-of-speech")
+                // User started speaking — cancel the timeout job but PRESERVE inactivityDeadlineMs.
+                // If speech ends without a valid result (ERROR_NO_MATCH), the next onReadyForSpeech
+                // calls openInactivityWindow(), finds the existing deadline, and schedules only the
+                // remaining slice — not a fresh 30-second window.
+                pauseInactivityJobWhileSpeaking(myGen)
             }
         }
 
@@ -531,12 +539,42 @@ class KentasConversationController(
     }
 
     /**
+     * Suspend the running timeout job while the user is actively speaking.
+     *
+     * Distinct from [clearInactivityWindow]:
+     * - [clearInactivityWindow] nulls [inactivityDeadlineMs] → next [openInactivityWindow]
+     *   creates a fresh 30-second window for the new turn.
+     * - [pauseInactivityJobWhileSpeaking] cancels only the [inactivityJob] coroutine while
+     *   **preserving** [inactivityDeadlineMs].  When speech ends without a valid result
+     *   (ERROR_NO_MATCH), the next [onReadyForSpeech] → [openInactivityWindow] sees the
+     *   existing deadline and schedules only the remaining slice — not a new 30-second window.
+     *
+     * Call site: [onBeginningOfSpeech] ONLY.
+     */
+    private fun pauseInactivityJobWhileSpeaking(myGen: Long) {
+        val hadJob = inactivityJob?.isActive == true
+        if (hadJob || inactivityDeadlineMs != null) {
+            Log.i(TAG,
+                "INACTIVITY_JOB_PAUSED_DURING_SPEECH session=$myGen " +
+                "hadActiveJob=$hadJob deadlinePreservedMs=$inactivityDeadlineMs " +
+                "— timeout paused while user speaks; deadline preserved for next onReadyForSpeech")
+        }
+        inactivityJob?.cancel()
+        inactivityJob = null
+        // CRITICAL: inactivityDeadlineMs is intentionally NOT cleared here.
+        // The deadline resumes from the remaining slice on the next onReadyForSpeech.
+    }
+
+    /**
      * Clear the inactivity window — cancel the job and null the deadline.
      *
-     * Called when a new conversational turn begins (user started speaking or gave a result)
+     * Called when a new conversational turn begins (user gave a valid result or AI starts)
      * and when the session closes for any reason.  After clearing, the next call to
      * [openInactivityWindow] (from [onReadyForSpeech] after AI TTS) will create a
      * fresh 30-second window for the new turn.
+     *
+     * NOT called from [onBeginningOfSpeech] — use [pauseInactivityJobWhileSpeaking] there
+     * so that an ERROR_NO_MATCH following speech counts down from the original deadline.
      */
     private fun clearInactivityWindow(reason: String) {
         val hadDeadline = inactivityDeadlineMs != null
