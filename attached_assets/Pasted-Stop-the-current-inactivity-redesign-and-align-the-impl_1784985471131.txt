@@ -1,0 +1,108 @@
+Stop the current inactivity redesign and align the implementation with the actual product behaviour.
+
+The app has two independent layers:
+
+1. Navigation session
+2. Optional conversation session
+
+Navigation must remain active at all times after a route starts.
+
+Expected behaviour:
+
+- User enters a destination.
+- Route is displayed.
+- Kentas continuously announces navigation:
+  - turn left
+  - turn right
+  - make a U-turn
+  - rerouting
+  - arrival
+- User may press the conversation button at any time.
+- Conversation starts without stopping navigation.
+- Kentas can chat and joke.
+- If a navigation instruction becomes due during conversation:
+  1. interrupt conversation TTS/listening if necessary
+  2. speak the navigation instruction immediately
+  3. resume the conversation session afterwards
+- After Kentas says the navigation instruction, conversation continues from the same session.
+- If nobody speaks to Kentas for 30 seconds, close only the conversation session.
+- After conversation timeout, return to navigation-only mode.
+- Navigation must never stop because conversation timed out.
+
+Important architecture:
+
+Navigation and conversation are not mutually exclusive states.
+
+Use independent state:
+
+navigationActive: Boolean
+conversationActive: Boolean
+
+Valid combinations:
+
+navigationActive=true, conversationActive=false
+navigationActive=true, conversationActive=true
+navigationActive=false, conversationActive=true
+
+Do not model this as one exclusive mode enum where conversation replaces navigation.
+
+Required audit:
+
+1. Find every place where starting conversation:
+- pauses navigation callbacks
+- blocks navigation TTS
+- changes isNavigating
+- cancels navigation jobs
+- prevents maneuver announcements
+
+2. Find every place where conversation timeout:
+- stops TTS globally
+- closes navigation
+- resets route state
+- disables navigation speech
+
+3. Trace navigation instruction priority:
+maneuver event
+→ navigation phrase
+→ interrupt current chat speech/listening
+→ speak navigation
+→ resume conversation listening
+
+4. Confirm that speech-blocking logic does not silently discard navigation instructions while the microphone is active.
+Navigation instructions must be queued or delivered after safely interrupting conversation.
+
+5. The 30-second timer applies only to conversation inactivity.
+When it expires:
+- conversationActive=false
+- speech recognizer stops
+- chat UI returns to idle
+- navigationActive remains unchanged
+- route and maneuver announcements continue
+
+6. Do not redesign personality.
+Do not change route rendering.
+Do not change destination selection.
+
+Implement the smallest fix necessary.
+
+Add tests for:
+
+- navigation active without conversation
+- conversation starts while navigation remains active
+- maneuver instruction interrupts chat TTS
+- maneuver instruction interrupts listening
+- conversation resumes after navigation instruction
+- 30 seconds of conversation inactivity closes conversation only
+- navigation continues after conversation timeout
+- route state is unchanged by conversation close
+
+Commit locally.
+Do not push.
+
+Final report:
+- current incorrect state coupling
+- corrected state model
+- exact interruption/resume flow
+- files changed
+- tests added
+- commit hash

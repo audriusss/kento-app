@@ -1,0 +1,92 @@
+Runtime logs prove the current inactivity model is wrong for the product.
+
+Evidence:
+
+ERROR_SERVER_DISCONNECTED
+infra retry succeeds
+onReadyForSpeech occurs
+INACTIVITY_WINDOW_PRESERVED remainingMs=-1763
+conversation closes immediately with inactivity-timeout
+
+The 30-second timeout must represent 30 seconds of actual idle listening time.
+
+It must NOT be an absolute conversation-session lifetime.
+
+Implement a simple inactivity-budget model.
+
+Required behaviour:
+
+1. Start a fresh 30-second inactivity window when the recognizer becomes ready for the first time.
+
+2. Pause the inactivity countdown while:
+- the user is speaking
+- speech results are being processed
+- Kentas is generating an AI response
+- Kentas is speaking through TTS
+- SpeechRecognizer is recovering from infrastructure errors such as ERROR_SERVER_DISCONNECTED
+
+3. Infrastructure retry time must not consume the inactivity budget.
+
+4. After a successful meaningful user interaction and Kentas finishes replying:
+- start a fresh 30-second inactivity window when listening becomes ready again
+
+5. After ERROR_NO_MATCH caused by silence:
+- preserve and resume the remaining inactivity budget
+- do not reset to 30 seconds on every NO_MATCH loop
+
+6. If ERROR_NO_MATCH happens after onBeginningOfSpeech but no meaningful text was recognised:
+- resume the remaining budget from before speech began
+- do not count speaking duration as inactivity
+
+7. Close the conversation only after a total of 30 seconds of actual idle listening time.
+
+Keep the implementation simple.
+
+Recommended state:
+
+private var inactivityRemainingMs = 30_000L
+private var inactivityStartedAtMs: Long? = null
+private var inactivityJob: Job? = null
+
+Functions:
+
+startOrResumeInactivityCountdown()
+pauseInactivityCountdown(reason)
+resetInactivityCountdown(reason)
+clearInactivityCountdown(reason)
+
+When pausing:
+- subtract only elapsed active-listening time from inactivityRemainingMs
+- cancel the Job
+- do not subtract time spent speaking, processing, TTS, or reconnecting
+
+When resetting after a meaningful completed interaction:
+- inactivityRemainingMs = 30_000L
+
+Add tests for:
+
+1. 10 seconds idle + 5 seconds speaking + NO_MATCH:
+   20 seconds remain, not 15 and not 30.
+
+2. 10 seconds idle + 4 seconds ERROR_SERVER_DISCONNECTED recovery:
+   20 seconds remain after reconnect.
+
+3. Successful user result + Kentas reply:
+   next ready state starts with a fresh 30 seconds.
+
+4. Repeated silence NO_MATCH loops:
+   countdown eventually expires after 30 seconds total idle listening.
+
+5. Conversation never closes while the user or Kentas is speaking.
+
+Do not modify personality, navigation, TTS content or unrelated architecture.
+
+Commit locally.
+Do not push.
+
+Report:
+- old incorrect model
+- new inactivity-budget lifecycle
+- exact state transitions
+- tests added
+- commit hash
