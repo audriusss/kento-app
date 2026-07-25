@@ -1,0 +1,76 @@
+The runtime logs have identified the conversation regression.
+
+Do not perform another broad audit.
+
+Fix this exact bug.
+
+Evidence from device logs:
+
+onBeginningOfSpeech gen=11
+INACTIVITY_WINDOW_CLEARED reason=beginning-of-speech
+onEndOfSpeech
+ERROR_NO_MATCH
+NO_MATCH_RELISTEN
+...
+onReadyForSpeech
+INACTIVITY_WINDOW_CREATED deadlineInMs=30000
+
+Root cause:
+
+onBeginningOfSpeech() clears the absolute inactivity deadline.
+
+When speech recognition later returns ERROR_NO_MATCH, the next onReadyForSpeech() creates a fresh 30-second deadline.
+
+This resets the conversation inactivity window instead of preserving the original absolute deadline.
+
+Required behaviour:
+
+1. Do not clear inactivityDeadlineMs in onBeginningOfSpeech().
+
+2. When speech begins:
+- cancel only the currently scheduled timeout Job if needed
+- preserve the absolute deadline value
+- mark that the user is currently speaking
+
+3. After onResults, ERROR_NO_MATCH, or recoverable infrastructure reconnect:
+- reschedule using the remaining time from the existing absolute deadline
+- do not create a fresh 30-second window unless no deadline exists
+
+4. A new 30-second deadline may only be created when:
+- the conversation session initially becomes ready
+- a successful meaningful interaction explicitly starts a new inactivity period, if that is the intended product behaviour
+
+5. ERROR_SERVER_DISCONNECTED code 11 is recoverable here.
+The logs prove recovery succeeds after one retry.
+Do not treat it as the root cause.
+
+6. Add regression tests for this exact sequence:
+
+- session opens
+- onReadyForSpeech creates deadline T+30s
+- 7 seconds pass
+- onBeginningOfSpeech occurs
+- recognizer returns ERROR_NO_MATCH
+- relisten becomes ready
+- deadline remains the original T+30s
+- remaining time is approximately 23 seconds, not reset to 30 seconds
+
+Also test:
+- timeout Job is paused/cancelled while actual speech is in progress
+- deadline value survives NO_MATCH
+- deadline value survives ERROR_SERVER_DISCONNECTED recovery
+- deadline expires at the original absolute time
+
+Keep the change limited to KentasConversationController and its tests.
+
+Do not modify personality, navigation or TTS.
+
+Commit locally.
+Do not push.
+
+Report:
+- exact root cause
+- old lifecycle
+- corrected lifecycle
+- tests added
+- commit hash
