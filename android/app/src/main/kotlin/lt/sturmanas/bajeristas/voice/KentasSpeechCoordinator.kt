@@ -117,6 +117,34 @@ class KentasSpeechCoordinator(
         ttsManager.speak(text)
     }
 
+    /**
+     * Stop only conversation speech. Safe to call when navigation TTS is in progress.
+     *
+     * If [onNavigationDone] is set (a navigation utterance is in progress), the TTS engine
+     * is **not** stopped — the nav utterance finishes naturally and fires [onNavigationDone]
+     * (typically [KentasConversationController.resumeAfterNavInterrupt], which is a no-op
+     * when the conversation has already been stopped).
+     *
+     * If no navigation utterance is in progress, stops TTS immediately (same behaviour
+     * as [stop] for the conversation-only case).
+     *
+     * Call site: [KentasConversationController.stopConversation] only.
+     * Full teardown (navigation + conversation) uses [stop] or [release].
+     */
+    fun stopConversationSpeechOnly() {
+        onConversationDone = null
+        if (onNavigationDone != null) {
+            // Navigation TTS is in progress — do NOT stop the engine.
+            // The nav utterance will finish naturally and fire onNavigationDone.
+            Log.d(TAG, "stopConversationSpeechOnly: navigation TTS in progress — engine preserved")
+            return
+        }
+        // No navigation playing — safe to stop any conversation TTS.
+        watchdogJob?.cancel()
+        watchdogJob = null
+        ttsManager.stop()
+    }
+
     /** Stop any playing speech immediately. Does NOT invoke any pending callbacks. */
     fun stop() {
         onConversationDone = null

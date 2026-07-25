@@ -233,7 +233,11 @@ class KentasConversationController(
         clearInactivityWindow(reason)
         aiJob?.cancel()
         speechManager.cancel()
-        speechCoordinator.stop()
+        // stopConversationSpeechOnly rather than stop() so that any navigation utterance
+        // currently in progress (e.g. an instruction that interrupted this conversation) is
+        // not killed — the nav TTS fires its own onDone callback, which is a no-op because
+        // the session generation has already been incremented by this point.
+        speechCoordinator.stopConversationSpeechOnly()
         history.clear()
         _state.value = ConversationState.IDLE
     }

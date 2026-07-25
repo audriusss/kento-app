@@ -244,11 +244,9 @@ private fun SturmanasApp(
             Log.d(MainActivity.NAV_TRACE_TAG, "  STOP ts=$ts reason=DIST_ZERO_OR_NEGATIVE dist=$maneuverDist")
             return@LaunchedEffect
         }
-        if (viewModel.isSpeechBlocked) {
-            Log.d(MainActivity.NAV_TRACE_TAG,
-                "  STOP ts=$ts reason=SPEECH_BLOCKED voiceState=${viewModel.voiceListeningState.value}")
-            return@LaunchedEffect
-        }
+        // NOTE: isSpeechBlocked no longer gates navigation — speakNavInstruction() cancels SR
+        // first and then delivers the instruction. The threshold is recorded so the same
+        // distance is not announced twice even after the SR restart.
         val threshold = listOf(500, 200, 50).firstOrNull { t ->
             maneuverDist <= t && t !in announcedThresholds
         }

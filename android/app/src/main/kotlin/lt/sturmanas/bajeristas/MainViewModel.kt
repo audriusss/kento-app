@@ -116,7 +116,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, VoiceListeningState.IDLE)
 
-    /** True while the microphone is hot — maneuver TTS must not fire. */
+    /**
+     * True while the microphone is hot (SR session is listening or user is speaking).
+     *
+     * Used for UI display (mic button visuals) and diagnostic logging only.
+     * Navigation TTS ([speakNavInstruction], [speakRouteReady], [speakArrival]) is
+     * **not** gated by this flag — when it is true those methods cancel the SR session
+     * first and then deliver the navigation instruction, after which
+     * [KentasConversationController.resumeAfterNavInterrupt] restarts listening.
+     */
     val isSpeechBlocked: Boolean
         get() = voiceListeningState.value.let {
             it == VoiceListeningState.LISTENING || it == VoiceListeningState.USER_SPEAKING
@@ -247,10 +255,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             "speakNavInstruction ENTER maneuver=${navState.maneuverType} " +
             "dist=$distanceMeters nextRoad='${navState.nextRoadName}' " +
             "isSpeechBlocked=$isSpeechBlocked ttsReady=${speechCoordinator.settings.isEnabled}")
+        // Navigation takes priority over the conversation mic.  If SR is active we cancel
+        // it now; resumeAfterNavInterrupt() restarts it once the nav utterance finishes.
         if (isSpeechBlocked) {
-            Log.w(TAG,
-                "speakNavInstruction STOP reason=SPEECH_BLOCKED voiceState=${voiceListeningState.value}")
-            return
+            Log.i(TAG, "speakNavInstruction — mic is hot, cancelling SR to deliver nav instruction")
+            speechRecognitionManager.cancel()
         }
         if (navState.maneuverType == ManeuverType.ARRIVE) {
             Log.d(TAG, "speakNavInstruction STOP reason=ARRIVE_HANDLED_SEPARATELY")
@@ -280,7 +289,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * Called from MainActivity when navigation phase transitions to NAVIGATING.
      */
     fun speakRouteReady(destinationName: String) {
-        if (isSpeechBlocked) return
+        if (isSpeechBlocked) {
+            Log.i(TAG, "speakRouteReady — mic is hot, cancelling SR to deliver route-ready announcement")
+            speechRecognitionManager.cancel()
+        }
         val dest = destinationName.ifBlank { "tikslą" }
         speechCoordinator.speakNavigation("Radau maršrutą. Važiuojam į $dest.") {
             conversationController.resumeAfterNavInterrupt()
@@ -296,7 +308,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * "Atvykote!" — it does not invite the confirmation the dialog requires.
      */
     fun speakArrival() {
-        if (isSpeechBlocked) return
+        if (isSpeechBlocked) {
+            Log.i(TAG, "speakArrival — mic is hot, cancelling SR to deliver arrival announcement")
+            speechRecognitionManager.cancel()
+        }
         speechCoordinator.speakNavigation("Atrodo, jau atvykome. Baigti maršrutą?")
     }
 
