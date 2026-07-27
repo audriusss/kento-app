@@ -46,14 +46,14 @@ class SileroVadProcessor(modelBytes: ByteArray) : Closeable {
     companion object {
         private const val TAG = "SileroVad"
 
-        /** Required sample rate for the v4 model. */
-        const val SAMPLE_RATE = 16_000
+        /** Required sample rate for the v4 model. Forwarded from [PipelineConfig]. */
+        const val SAMPLE_RATE: Int = PipelineConfig.SAMPLE_RATE
 
-        /** Samples per inference chunk: 512 = 32 ms at 16 kHz. */
-        const val CHUNK_SAMPLES = 512
+        /** Samples per inference chunk: 512 = 32 ms at 16 kHz. Forwarded from [PipelineConfig]. */
+        const val CHUNK_SAMPLES: Int = PipelineConfig.CHUNK_SAMPLES
 
-        /** Bytes per chunk: 512 × 2 (int16 = 2 bytes per sample). */
-        const val CHUNK_BYTES = CHUNK_SAMPLES * 2
+        /** Bytes per chunk: CHUNK_SAMPLES × 2 (int16 = 2 bytes per sample). */
+        const val CHUNK_BYTES: Int = CHUNK_SAMPLES * 2
 
         // LSTM state tensor total elements: 2 × 1 × 64 = 128.
         private const val STATE_SIZE = 2 * 1 * 64

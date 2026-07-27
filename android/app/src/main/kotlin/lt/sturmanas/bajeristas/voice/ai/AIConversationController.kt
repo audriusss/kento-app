@@ -57,10 +57,11 @@ class AIConversationController(
 
     // ─── Microphone pipeline ──────────────────────────────────────────────
     //
-    // Transcripts arrive on an IO thread and are dispatched to the main thread
-    // via handler.post before entering processPacket().
+    // All transcripts enter through the single public entry point
+    // onTranscriptReceived(), which performs the phase/mode gate checks before
+    // calling processPacket().  The handler.post() ensures main-thread delivery.
     private val pipeline: MicrophonePipeline = pipelineFactory { text ->
-        handler.post { if (!destroyed) processPacket(text, isFinal = true) }
+        handler.post { if (!destroyed) onTranscriptReceived(text) }
     }
 
     // ─── TTS ─────────────────────────────────────────────────────────────
@@ -402,6 +403,9 @@ class AIConversationController(
         if (depth == 1) {
             prePausedPhase = phase
             transitionTo(Phase.PAUSED_BY_NAVIGATION)  // calls pipeline.mute()
+            // Reset VAD state at navigation start so any audio captured just
+            // before the mute cannot bleed into post-navigation listening.
+            pipeline.resetVadAndSegmenter()
             clearUtteranceBuffer("nav_interrupt")
             stopAiSpeech()
         }
@@ -422,7 +426,9 @@ class AIConversationController(
         if (remainingDepth == 0) {
             handler.postDelayed(navResumeWatchdogRunnable, 2000)
             handler.removeCallbacks(navResumeRunnable)
-            handler.postDelayed(navResumeRunnable, 100)
+            // Use the same post-TTS cooldown as AI TTS so speaker echo from
+            // navigation announcements decays before VAD is re-armed.
+            handler.postDelayed(navResumeRunnable, PipelineConfig.POST_TTS_COOLDOWN_MS)
         }
     }
 
@@ -538,16 +544,6 @@ class AIConversationController(
             }
         }
         handler.postDelayed(inactivityRunnable!!, 30000)
-    }
-
-    private fun startInactivityTimer() {
-        cancelInactivityTimer()
-        inactivityRunnable = Runnable {
-            Log.i(TAG, "AI_ACTIVE_WINDOW_EXPIRED: returning to IDLE")
-            mode = ConversationMode.IDLE
-            transitionTo(Phase.IDLE)
-        }
-        handler.postDelayed(inactivityRunnable!!, 60000)
     }
 
     private fun cancelInactivityTimer() {

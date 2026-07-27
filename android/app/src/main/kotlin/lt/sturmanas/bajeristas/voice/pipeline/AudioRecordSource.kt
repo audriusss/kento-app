@@ -9,9 +9,7 @@ import android.util.Log
  * Thin wrapper around [AudioRecord] that captures continuous 16 kHz mono
  * PCM 16-bit audio and exposes it as fixed-size chunks.
  *
- * ## Design constraints (per Phase 2 spec)
- * - Does NOT use [android.speech.SpeechRecognizer].
- * - Does NOT set [android.media.AudioManager.MODE_IN_COMMUNICATION].
+ * ## Design constraints
  * - Does NOT call setCommunicationDevice.
  * - Does NOT request a specific physical microphone.
  * - All reads are blocking; callers must invoke [readChunk] from a

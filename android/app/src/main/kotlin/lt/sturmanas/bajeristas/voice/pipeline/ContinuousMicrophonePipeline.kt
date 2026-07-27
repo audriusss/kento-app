@@ -9,6 +9,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -16,20 +17,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * → WavEncoder → OpenAI Transcription → [onTranscriptReady].
  *
  * This class implements [MicrophonePipeline] and is the sole microphone input
- * source for the production voice system.  It replaces `SpeechRecognizer` completely.
- *
- * ## What this class does
- * 1. Opens the microphone with [AudioRecordSource] (silent, no beeps).
- * 2. Passes 32 ms PCM chunks through [SileroVadProcessor].
- * 3. Feeds probabilities to [UtteranceSegmenter] to detect speech boundaries.
- * 4. On utterance completion: encodes PCM as WAV, sends to [TranscriptionClient],
- *    and delivers the Lithuanian transcript via [onTranscriptReady].
- *
- * ## What this class does NOT do
- * - It does NOT touch [lt.sturmanas.bajeristas.voice.ai.AIConversationController] state directly.
- * - It does NOT call `processPacket()` or `KentasChat` directly.
- * - It does NOT modify `NavigationVoiceController` or `ConversationCoordinator`.
- * - It does NOT use `SpeechRecognizer`.
+ * source for the production voice system.
  *
  * ## Lifecycle
  * - [start] is idempotent; [stop] is safe to call when not running.
@@ -37,25 +25,25 @@ import java.util.concurrent.atomic.AtomicInteger
  * - Only call [stop] on teardown (i.e. from `release()`).
  *
  * ## Mute/unmute
- * Use [mute]/[unmute] as the normal phase-transition control.  [AudioRecord] keeps
- * recording while muted; audio frames are discarded at the [UtteranceSegmenter] level
- * so no transcription work is started and no network calls are made.
+ * [AudioRecord] keeps recording while muted; audio frames are discarded at the
+ * [UtteranceSegmenter] level so no transcription work is started.
+ * Muting also increments [generationId] so any HTTP response still in-flight
+ * from before the mute is silently discarded on arrival.
  *
  * ## Thread safety
- * [start], [stop], [mute], [unmute], [resetVadAndSegmenter] are all safe to call
- * from any thread.  [onTranscriptReady] is invoked from a background coroutine;
- * the caller is responsible for posting to the main thread if needed.
+ * [start], [stop], [mute], [unmute], [resetVadAndSegmenter] are all safe to
+ * call from any thread.  [onTranscriptReady] is invoked from a background
+ * coroutine — callers must post to the main thread themselves if needed.
  *
- * @param context             Application or Activity context (used only inside [start]
- *                            to load the ONNX model from assets; not stored after that).
+ * @param context             Any [Context]; [applicationContext] is extracted
+ *                            immediately to avoid Activity leaks.
  * @param transcriptionClient STT backend.
- * @param onTranscriptReady   Called with every non-blank transcript.  Invoked from a
- *                            background (IO) coroutine — callers must post to the main
- *                            thread themselves if they touch UI or main-thread state.
+ * @param onTranscriptReady   Called with every non-blank transcript.  Invoked
+ *                            on an IO coroutine — post to main thread as needed.
  * @param segmenterConfig     VAD segmenter tuning (defaults from [PipelineConfig]).
  */
 class ContinuousMicrophonePipeline(
-    private val context: Context,
+    context: Context,
     private val transcriptionClient: TranscriptionClient,
     private val onTranscriptReady: (String) -> Unit,
     private val segmenterConfig: UtteranceSegmenter.Config = UtteranceSegmenter.Config(),
@@ -65,10 +53,15 @@ class ContinuousMicrophonePipeline(
         private const val TAG = "MicPipeline"
     }
 
+    // applicationContext extracted immediately — prevents Activity leak.
+    private val appContext: Context = context.applicationContext
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val activeTranscriptions = AtomicInteger(0)
 
-    @Volatile private var running = false
+    // AtomicBoolean makes start() race-safe: compareAndSet ensures only one
+    // concurrent caller can transition false → true and launch captureJob.
+    private val running = AtomicBoolean(false)
     private var captureJob: Job? = null
 
     // Held as fields so resetVadAndSegmenter() can reach them from any thread.
@@ -78,16 +71,23 @@ class ContinuousMicrophonePipeline(
 
     @Volatile private var muteRequested = false
 
+    /**
+     * Generation counter — incremented every time the pipeline is muted or
+     * stopped.  Each transcription coroutine captures its generation at launch
+     * and discards its result if the counter has advanced by the time the HTTP
+     * response arrives, preventing stale transcripts from reaching the
+     * controller after a mute or release.
+     */
+    @Volatile private var generationId = 0
+
     // ── MicrophonePipeline ─────────────────────────────────────────────────
 
     /**
      * Start continuous capture + VAD.  No-op if already running.
-     *
      * [android.Manifest.permission.RECORD_AUDIO] must be granted before calling.
      */
     override fun start() {
-        if (running) return
-        running = true
+        if (!running.compareAndSet(false, true)) return   // already running — no-op
         Log.i(TAG, "MIC_PIPELINE_STARTED")
         captureJob = scope.launch { runPipeline() }
     }
@@ -97,7 +97,8 @@ class ContinuousMicrophonePipeline(
      * Safe to call when not running.
      */
     override fun stop() {
-        running = false
+        running.set(false)
+        generationId++                                    // discard any in-flight transcripts
         captureJob?.cancel()
         scope.coroutineContext.cancelChildren()
         Log.i(TAG, "MIC_PIPELINE_STOPPED")
@@ -106,11 +107,12 @@ class ContinuousMicrophonePipeline(
     /**
      * Mute the pipeline.  In-progress utterances are discarded; [AudioRecord]
      * keeps recording so no hardware warm-up delay is needed on unmute.
-     *
-     * Call before AI or navigation TTS begins to prevent self-recognition.
+     * Also increments [generationId] to discard any transcript currently
+     * in-flight over HTTP.
      */
     override fun mute() {
         muteRequested = true
+        generationId++                                    // discard in-flight transcripts
     }
 
     /** Resume after [mute]. Pre-roll is cleared on unmute to purge TTS echo. */
@@ -121,13 +123,13 @@ class ContinuousMicrophonePipeline(
     /**
      * Reset Silero VAD LSTM state and [UtteranceSegmenter] state machine to SILENCE.
      *
-     * Called at TTS boundaries so residual speaker echo cannot influence VAD scoring.
-     * Safe to call while the pipeline is muted.
+     * Called at TTS boundaries so residual speaker echo cannot influence VAD
+     * scoring.  Safe to call while the pipeline is muted.
      *
-     * Note: called from the main thread while the capture loop runs on IO.  Both
-     * [SileroVadProcessor.reset] and [UtteranceSegmenter.reset] perform simple field
-     * assignments; the pipeline is muted when this is called so no utterance is in
-     * flight, making the benign data race inconsequential.
+     * Note: called from the main thread while the capture loop runs on IO.
+     * Both [SileroVadProcessor.reset] and [UtteranceSegmenter.reset] perform
+     * simple field assignments; the pipeline is muted when this is called so
+     * no utterance is in flight, making the benign data race inconsequential.
      */
     override fun resetVadAndSegmenter() {
         segmenter?.reset()
@@ -138,7 +140,7 @@ class ContinuousMicrophonePipeline(
     // ── Capture loop ───────────────────────────────────────────────────────
 
     private suspend fun runPipeline() {
-        val modelBytes = context.assets.open("silero_vad.onnx").use { it.readBytes() }
+        val modelBytes = appContext.assets.open("silero_vad.onnx").use { it.readBytes() }
 
         val vadInstance = SileroVadProcessor(modelBytes)
         val segmenterInstance = UtteranceSegmenter(segmenterConfig)
@@ -149,7 +151,7 @@ class ContinuousMicrophonePipeline(
 
         if (!source.initialize()) {
             Log.e(TAG, "MIC_AUDIORECORD_INIT_FAILED")
-            running = false
+            running.set(false)
             vad = null
             segmenter = null
             return
@@ -164,7 +166,7 @@ class ContinuousMicrophonePipeline(
         var lastMuteState = false
 
         try {
-            while (isActive && running) {
+            while (isActive && running.get()) {
                 // ── Mute gate ─────────────────────────────────────────────
                 val nowMuted = muteRequested
                 if (nowMuted != lastMuteState) {
@@ -209,7 +211,7 @@ class ContinuousMicrophonePipeline(
     ) {
         when (event) {
             is UtteranceSegmenter.Event.SpeechCandidate -> {
-                // Already logged by the VAD_SPEECH_CANDIDATE line in the capture loop.
+                // Logged by the VAD_SPEECH_CANDIDATE line in the capture loop.
             }
 
             is UtteranceSegmenter.Event.SpeechStarted -> {
@@ -228,12 +230,16 @@ class ContinuousMicrophonePipeline(
 
                 val pcmSnapshot = event.pcm
                 val durationMs = event.durationMs
+                // Capture the generation at utterance completion.  If the pipeline
+                // is muted or stopped before the HTTP response arrives, generationId
+                // will have advanced and the transcript will be silently dropped.
+                val capturedGeneration = generationId
 
                 // Bounded fire-and-forget transcription.
                 if (activeTranscriptions.incrementAndGet() <= PipelineConfig.MAX_CONCURRENT_TRANSCRIPTIONS) {
                     scope.launch {
                         try {
-                            transcribeAndDeliver(pcmSnapshot, durationMs)
+                            transcribeAndDeliver(pcmSnapshot, durationMs, capturedGeneration)
                         } finally {
                             activeTranscriptions.decrementAndGet()
                         }
@@ -250,13 +256,24 @@ class ContinuousMicrophonePipeline(
         }
     }
 
-    private suspend fun transcribeAndDeliver(pcm: ByteArray, durationMs: Long) {
+    private suspend fun transcribeAndDeliver(pcm: ByteArray, durationMs: Long, generation: Int) {
         val wav = WavEncoder.encode(pcm)
-        Log.i(TAG, "STT_UPLOAD_STARTED wavBytes=${wav.size}")
+        Log.i(TAG, "STT_UPLOAD_STARTED wavBytes=${wav.size} generation=$generation")
         val startMs = System.currentTimeMillis()
 
         transcriptionClient.transcribe(wav, language = "lt")
             .onSuccess { transcript ->
+                // Check generation before delivering: if generationId has advanced
+                // since this coroutine was launched, the pipeline was muted or
+                // stopped while the HTTP request was in-flight.  Drop silently.
+                if (generationId != generation) {
+                    Log.d(
+                        TAG,
+                        "STT_TRANSCRIPT_DISCARDED reason=stale_generation " +
+                        "captured=$generation current=$generationId",
+                    )
+                    return@onSuccess
+                }
                 val latencyMs = System.currentTimeMillis() - startMs
                 Log.i(
                     TAG,
@@ -269,8 +286,6 @@ class ContinuousMicrophonePipeline(
             }
             .onFailure { err ->
                 Log.e(TAG, "STT_UPLOAD_FAILED reason=${err.message}")
-                // Pipeline returns to listening automatically: mute state is unchanged
-                // and the next utterance will be processed normally.
             }
     }
 }

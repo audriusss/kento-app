@@ -38,6 +38,11 @@ import org.junit.Test
  * PI-17  pipelineActionForPhase(LISTENING) == UNMUTE — mic open when ready to listen.
  * PI-18  pipelineActionForPhase(THINKING) == MUTE — nav update must not unmute during AI think.
  * PI-19  pipelineActionForPhase(PAUSED_BY_NAVIGATION) == MUTE — nav audio owns the pipe.
+ *
+ * Exhaustive coverage (PI-20..PI-22)
+ * PI-20  All MUTE-action phases are covered — catches a new Phase added without updating pipelineActionForPhase.
+ * PI-21  All UNMUTE-action phases are covered.
+ * PI-22  postTtsTargetPhase covers all ConversationMode values.
  */
 class VoicePipelineIntegrationTest {
 
@@ -274,5 +279,63 @@ class VoicePipelineIntegrationTest {
 
     @Test fun `Phase PAUSED_BY_NAVIGATION returns MUTE so nav audio owns the pipeline`() {
         assertEquals(PipelineAction.MUTE, pipelineActionForPhase(Phase.PAUSED_BY_NAVIGATION))
+    }
+
+    // ── PI-20 — exhaustive MUTE-action phases ─────────────────────────────
+    //
+    // Catches a newly added Phase enum value that was not mapped in
+    // pipelineActionForPhase (would cause a compile-time when-exhaustive error,
+    // but this test documents the expected set explicitly).
+
+    @Test fun `all expected phases that MUTE the pipeline are enumerated`() {
+        val expectedMutePhases = setOf(
+            Phase.THINKING,
+            Phase.SPEAKING,
+            Phase.PAUSED_BY_NAVIGATION,
+        )
+        expectedMutePhases.forEach { phase ->
+            assertEquals(
+                "Phase.$phase should map to MUTE",
+                PipelineAction.MUTE,
+                pipelineActionForPhase(phase),
+            )
+        }
+    }
+
+    // ── PI-21 — exhaustive UNMUTE-action phases ────────────────────────────
+
+    @Test fun `all expected phases that UNMUTE the pipeline are enumerated`() {
+        val expectedUnmutePhases = setOf(
+            Phase.IDLE,
+            Phase.LISTENING,
+            Phase.COLLECTING,
+            Phase.WAITING_FOR_CONTINUATION,
+            Phase.MUTED,    // mic stays open for voice unmute detection
+        )
+        expectedUnmutePhases.forEach { phase ->
+            assertEquals(
+                "Phase.$phase should map to UNMUTE",
+                PipelineAction.UNMUTE,
+                pipelineActionForPhase(phase),
+            )
+        }
+    }
+
+    // ── PI-22 — exhaustive postTtsTargetPhase coverage ────────────────────
+
+    @Test fun `postTtsTargetPhase covers all ConversationMode values`() {
+        // ACTIVE → LISTENING: mic opens after AI TTS finishes.
+        assertEquals(Phase.LISTENING, postTtsTargetPhase(ConversationMode.ACTIVE))
+        // MUTED → MUTED: confirmation TTS must not reopen the mic.
+        assertEquals(Phase.MUTED, postTtsTargetPhase(ConversationMode.MUTED))
+        // IDLE → IDLE: no listening in pure idle mode after TTS.
+        assertEquals(Phase.IDLE, postTtsTargetPhase(ConversationMode.IDLE))
+
+        // Exhaustiveness: every ConversationMode value must be handled.
+        ConversationMode.values().forEach { mode ->
+            // Just calling the function must not throw (exhaustive when).
+            val result = postTtsTargetPhase(mode)
+            assertNotNull("postTtsTargetPhase($mode) must return a non-null Phase", result)
+        }
     }
 }

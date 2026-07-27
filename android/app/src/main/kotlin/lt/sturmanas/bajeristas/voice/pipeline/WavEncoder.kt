@@ -25,7 +25,7 @@ object WavEncoder {
      */
     fun encode(
         pcm: ByteArray,
-        sampleRate: Int = 16_000,
+        sampleRate: Int = PipelineConfig.SAMPLE_RATE,
         channels: Int = 1,
         bitsPerSample: Int = 16,
     ): ByteArray {
@@ -72,7 +72,7 @@ object WavEncoder {
      */
     fun durationMs(
         pcmBytes: Int,
-        sampleRate: Int = 16_000,
+        sampleRate: Int = PipelineConfig.SAMPLE_RATE,
         channels: Int = 1,
         bitsPerSample: Int = 16,
     ): Long {
