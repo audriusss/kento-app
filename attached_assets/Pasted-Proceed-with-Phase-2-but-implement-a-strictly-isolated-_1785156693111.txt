@@ -1,0 +1,209 @@
+Proceed with Phase 2, but implement a strictly isolated Proof of Concept first.
+
+We agree with the architecture audit, with one adjustment:
+
+Do not hard-code the architecture around whisper-1.
+
+Use the current recommended OpenAI transcription model available through the existing OpenAI audio transcription endpoint, and design the transcription layer behind an interface so the provider or model can be replaced later without changing the microphone, VAD, or conversation logic.
+
+GOAL OF THIS PHASE
+
+Build and validate this isolated pipeline only:
+
+AudioRecord
+→ continuous 16 kHz mono PCM capture
+→ local Silero VAD
+→ detect speech start and end
+→ create one utterance audio buffer
+→ encode PCM as WAV in memory
+→ send it to OpenAI transcription
+→ print the final Lithuanian transcript to Logcat
+
+Do NOT connect it to:
+- AIConversationController
+- processPacket()
+- KentasChat
+- ConversationCoordinator
+- NavigationVoiceController
+- navigation state
+- AI TTS
+- current SpeechRecognizer lifecycle
+
+This phase must prove that silent continuous recording, VAD segmentation, WAV encoding, and Lithuanian transcription work reliably before integration.
+
+IMPLEMENTATION REQUIREMENTS
+
+1. Create a provider-independent interface:
+
+interface TranscriptionClient {
+    suspend fun transcribe(
+        wavBytes: ByteArray,
+        language: String = "lt"
+    ): Result<String>
+}
+
+2. Implement:
+
+OpenAiTranscriptionClient
+
+Requirements:
+- reuse the existing OkHttp setup and existing OpenAI API key mechanism where practical
+- use multipart/form-data
+- send the audio as an in-memory WAV file
+- use the current recommended OpenAI speech-to-text model supported by the project’s API setup
+- keep the model name in one configuration constant
+- do not scatter model names across classes
+- set Lithuanian language explicitly when supported
+- use a transcription-focused prompt only if it genuinely improves Lithuanian recognition
+- do not log the API key
+- do not log or permanently store raw audio
+- return clear errors for HTTP failures, malformed JSON, empty transcript, and timeout
+
+3. Add these isolated classes under:
+
+voice/pipeline/
+
+- AudioRecordSource.kt
+- SileroVadProcessor.kt
+- UtteranceSegmenter.kt
+- WavEncoder.kt
+- TranscriptionClient.kt
+- OpenAiTranscriptionClient.kt
+- ContinuousMicrophonePoc.kt
+
+4. AudioRecord configuration:
+
+- sample rate: 16,000 Hz
+- channel: mono
+- encoding: PCM 16-bit
+- use an appropriate audio source for speech recognition
+- choose a safe buffer size using AudioRecord.getMinBufferSize()
+- perform all microphone reads off the main thread
+- release AudioRecord safely
+- handle permission or initialisation failure cleanly
+- do not use SpeechRecognizer
+- do not use MODE_IN_COMMUNICATION
+- do not call setCommunicationDevice
+- do not request a specific physical microphone
+
+5. Silero VAD:
+
+- use ONNX Runtime Android
+- bundle the model under app/src/main/assets/
+- verify the exact model input shape, sample count, state tensors, sample rate, and output shape from the selected Silero model version
+- do not guess the ONNX tensor contract
+- keep Silero state between audio chunks as required by that model version
+- reset its state between completed utterances
+- expose configurable:
+  - speech probability threshold
+  - minimum speech duration
+  - trailing silence duration
+  - maximum utterance duration
+  - pre-speech buffer duration
+
+The pre-speech buffer is important so the first syllable is not cut off.
+
+6. Utterance segmentation:
+
+Use a small explicit state machine:
+
+SILENCE
+→ POSSIBLE_SPEECH
+→ SPEECH
+→ TRAILING_SILENCE
+→ emit utterance
+→ SILENCE
+
+Requirements:
+- reject very short noise bursts
+- include a short pre-roll before confirmed speech
+- finish the utterance after configurable trailing silence
+- enforce a maximum utterance duration
+- discard audio while muted
+- clear partial buffers after mute/unmute so TTS audio cannot leak into the next utterance
+
+7. PoC control:
+
+Add a temporary developer-only way to start and stop ContinuousMicrophonePoc without modifying the production voice flow.
+
+Preferred options:
+- a BuildConfig.DEBUG-only diagnostic control, or
+- use the existing diagnostic screen if it still exists and can be changed without affecting production navigation
+
+Do not put permanent test buttons on the main driving screen.
+
+8. Logging:
+
+Add concise Logcat messages:
+
+MIC_POC_STARTED
+MIC_POC_STOPPED
+MIC_AUDIORECORD_READY sampleRate=... bufferSize=...
+VAD_SPEECH_CANDIDATE probability=...
+VAD_SPEECH_STARTED
+VAD_SPEECH_ENDED durationMs=... pcmBytes=...
+VAD_UTTERANCE_DISCARDED reason=...
+STT_UPLOAD_STARTED wavBytes=...
+STT_UPLOAD_COMPLETED latencyMs=... transcriptLength=...
+STT_TRANSCRIPT text="..."
+STT_UPLOAD_FAILED reason=...
+
+Do not log PCM samples, WAV data, authorization headers, or the API key.
+
+9. Concurrency and lifecycle:
+
+- use coroutines or a dedicated worker thread
+- never perform network calls on the microphone read loop
+- after an utterance is emitted, transcription must run separately while microphone capture continues
+- limit concurrent transcription requests
+- use a small bounded queue or reject additional utterances safely if required
+- stopping the PoC must cancel capture, VAD processing, and pending work cleanly
+- avoid leaking Activity or Context references
+
+10. Tests:
+
+Add unit tests for:
+
+- WAV header correctness
+- PCM byte count and duration calculation
+- pre-roll inclusion
+- short noise rejection
+- trailing silence completion
+- maximum utterance duration
+- mute clearing the active utterance
+- empty transcription response handling
+- HTTP error handling where practical
+
+11. Build verification:
+
+Run:
+
+./gradlew :app:compileDebugKotlin
+./gradlew :app:testDebugUnitTest
+
+Fix only issues caused by this PoC.
+
+IMPORTANT CONSTRAINTS
+
+Do not remove the existing SpeechRecognizer implementation yet.
+Do not modify the current conversation state machine.
+Do not modify semantic buffering.
+Do not modify AI or navigation TTS.
+Do not broadly refactor MainActivity or MainViewModel.
+Do not begin Phase 3 integration.
+Do not claim the PoC works without showing compile/test output and the exact manual test procedure.
+
+FINAL REPORT
+
+After implementation, report:
+
+1. Files added and modified.
+2. Exact OpenAI transcription model selected and why.
+3. Exact Silero VAD model/version used.
+4. Exact ONNX input/output tensor contract verified.
+5. Default VAD thresholds selected.
+6. How to start and stop the PoC.
+7. Expected Logcat sequence.
+8. Build and test results.
+9. Known risks.
+10. What must be proven on the physical Xiaomi device before Phase 3.
