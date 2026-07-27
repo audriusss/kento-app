@@ -4,7 +4,6 @@ import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -13,50 +12,32 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 /**
- * [TranscriptionClient] backed by the OpenAI audio transcription API.
+ * [TranscriptionClient] that proxies audio through the Šturmanas Bajeristas
+ * backend (`POST /api/transcribe`) rather than calling OpenAI directly.
  *
- * The implementation is deliberately isolated: it shares no state with
- * [lt.sturmanas.bajeristas.voice.ai.KentasChat] and creates its own
- * [OkHttpClient] with transcription-appropriate timeouts.
+ * ## Why a backend proxy?
+ * Embedding the OpenAI API key in the APK would expose it to anyone who
+ * decompiles the app.  The backend holds the key in an environment variable
+ * and performs all privileged provider calls server-side.
  *
- * ## Model
- * [MODEL] is the single configuration point.  Change it here to switch
- * providers or model versions without touching any other class.
+ * ## Request format
+ *   - Method:        POST
+ *   - URL:           `$backendUrl/api/transcribe?lang=$language`
+ *   - Content-Type:  audio/wav
+ *   - Body:          raw WAV bytes
+ *   - Header:        X-Session-Id: <session UUID>
  *
- * ## Security
- * - The API key is never logged.
- * - Raw audio bytes are never logged or written to disk.
+ * ## Response
+ *   { "text": "transcribed text" }
  */
 class OpenAiTranscriptionClient(
-    private val apiKey: String,
+    private val backendUrl: String,
+    private val sessionId: String = "unset",
     private val client: OkHttpClient = defaultClient(),
 ) : TranscriptionClient {
 
     companion object {
         private const val TAG = "OpenAiStt"
-
-        /**
-         * Current recommended OpenAI speech-to-text model.
-         *
-         * Delegates to [PipelineConfig.TRANSCRIPTION_MODEL] so there is a
-         * single source of truth for the model name.
-         */
-        const val MODEL = PipelineConfig.TRANSCRIPTION_MODEL
-
-        private const val ENDPOINT = "https://api.openai.com/v1/audio/transcriptions"
-
-        /**
-         * Lithuanian-specific prompt.
-         *
-         * Whisper-family models use the prompt to bias the vocabulary toward
-         * expected terms before decoding begins.  For a navigation assistant
-         * the most valuable seeds are proper nouns (cities, road names) and
-         * common driving commands.  The prompt is intentionally short; longer
-         * prompts reduce, not improve, accuracy in practice.
-         */
-        private const val LT_PROMPT =
-            "Kentas, navigacija, Lietuva, Vilnius, Kaunas, Klaipėda, " +
-            "sukite, pasukite, važiuokite, sustokite, tiesiog."
 
         private fun defaultClient(): OkHttpClient =
             OkHttpClient.Builder()
@@ -70,29 +51,18 @@ class OpenAiTranscriptionClient(
         wavBytes: ByteArray,
         language: String,
     ): Result<String> = withContext(Dispatchers.IO) {
-        if (apiKey.isBlank()) {
+        if (backendUrl.isBlank()) {
             return@withContext Result.failure(
-                IllegalStateException("OpenAI API key is not configured")
+                IllegalStateException("Backend URL not configured (BACKEND_URL in local.properties)")
             )
         }
 
-        val requestBody = MultipartBody.Builder()
-            .setType(MultipartBody.FORM)
-            .addFormDataPart(
-                name = "file",
-                filename = "audio.wav",
-                body = wavBytes.toRequestBody("audio/wav".toMediaType()),
-            )
-            .addFormDataPart("model", MODEL)
-            .addFormDataPart("language", language)
-            .addFormDataPart("response_format", "json")
-            .addFormDataPart("prompt", LT_PROMPT)
-            .build()
+        val url = "$backendUrl/api/transcribe?lang=$language"
 
         val request = Request.Builder()
-            .url(ENDPOINT)
-            .addHeader("Authorization", "Bearer $apiKey")
-            .post(requestBody)
+            .url(url)
+            .addHeader("X-Session-Id", sessionId)
+            .post(wavBytes.toRequestBody("audio/wav".toMediaType()))
             .build()
 
         return@withContext try {
@@ -100,7 +70,7 @@ class OpenAiTranscriptionClient(
                 val body = response.body?.string()
 
                 if (!response.isSuccessful) {
-                    Log.e(TAG, "STT_HTTP_ERROR code=${response.code}")
+                    Log.e(TAG, "STT_HTTP_ERROR code=${response.code} body=${body?.take(200)}")
                     return@use Result.failure(
                         IOException("HTTP ${response.code}: ${response.message}")
                     )

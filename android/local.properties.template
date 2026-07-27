@@ -7,6 +7,13 @@
 ## Android SDK path (set automatically by Android Studio, or set manually)
 sdk.dir=/path/to/android/sdk
 
+## Šturmanas Bajeristas backend URL
+## All privileged AI calls (transcription, chat) are proxied through this server.
+## The OpenAI API key must NOT go here — it belongs only in the server's environment.
+## Development:  https://<your-replit-dev-domain>/api-server
+## Production:   https://<your-deployment-url>/api-server
+BACKEND_URL=
+
 ## Google Maps / Navigation SDK API key
 ## Required for Phase 2 real navigation. Without this key the app
 ## automatically uses MockNavigationEngine (green placeholder map).

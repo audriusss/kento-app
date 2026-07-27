@@ -7,16 +7,17 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
-// Read GOOGLE_MAPS_API_KEY from local.properties (never committed to source control).
+// Read secrets from local.properties (never committed to source control).
 val localProperties = Properties().also { props ->
     val localFile = rootProject.file("local.properties")
     if (localFile.exists()) props.load(localFile.inputStream())
 }
 val googleMapsApiKey: String = localProperties.getProperty("GOOGLE_MAPS_API_KEY", "")
-// OpenAI API key — must be set in local.properties (never committed to source control).
-// Compiled into BuildConfig.OPENAI_API_KEY. Stays empty string when not set;
-// KentasChat.askKentas() returns a Lithuanian error message in that case.
-val openAiApiKey: String = localProperties.getProperty("OPENAI_API_KEY", "")
+// Backend base URL — all privileged AI calls are proxied through this server.
+// The OpenAI API key MUST NOT be placed here; it belongs only in the backend's
+// OPENAI_API_KEY environment variable.
+// Example: https://your-backend.replit.app/api-server
+val backendUrl: String = localProperties.getProperty("BACKEND_URL", "")
 
 android {
     namespace = "lt.sturmanas.bajeristas"
@@ -35,7 +36,8 @@ android {
         // Stays empty string when local.properties has no key → MockNavigationEngine is used.
         manifestPlaceholders["GOOGLE_MAPS_API_KEY"] = googleMapsApiKey
         buildConfigField("String", "GOOGLE_MAPS_API_KEY", "\"$googleMapsApiKey\"")
-        buildConfigField("String", "OPENAI_API_KEY", "\"$openAiApiKey\"")
+        // Backend proxy URL — AI requests route through this server, never directly to OpenAI.
+        buildConfigField("String", "BACKEND_URL", "\"$backendUrl\"")
     }
 
     buildTypes {

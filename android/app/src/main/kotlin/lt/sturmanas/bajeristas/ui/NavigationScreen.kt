@@ -8,16 +8,17 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
@@ -68,6 +69,7 @@ fun NavigationScreen(
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
+        // ── Map view fills available space above the bottom controls ──────
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -78,12 +80,13 @@ fun NavigationScreen(
                 modifier = Modifier.fillMaxSize(),
             )
 
+            // Status chips — floated over the map, top-centre
             Column(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .padding(top = 16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 val phaseLabel = when (navigationState.phase) {
                     NavigationPhase.RESOLVING_ADDRESS -> "Ieškomas adresas…"
@@ -115,14 +118,22 @@ fun NavigationScreen(
                             text = aiStatus,
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onTertiaryContainer
+                            color = MaterialTheme.colorScheme.onTertiaryContainer,
                         )
                     }
                 }
             }
         }
 
-        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+        // ── Bottom controls — maneuver info + stop button ─────────────────
+        // navigationBarsPadding() ensures this column is never hidden behind
+        // the Android 3-button or gesture navigation bar.
+        Column(
+            modifier = Modifier
+                .padding(horizontal = 16.dp, top = 12.dp)
+                .navigationBarsPadding()
+                .padding(bottom = 8.dp),
+        ) {
             Card(
                 modifier  = Modifier.fillMaxWidth(),
                 elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
@@ -140,7 +151,10 @@ fun NavigationScreen(
                             style      = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                         )
-                        Text(text = navigationState.nextRoadName, style = MaterialTheme.typography.bodySmall)
+                        Text(
+                            text  = navigationState.nextRoadName,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
                     }
                     Column(horizontalAlignment = Alignment.End) {
                         val dist = navigationState.distanceToNextManeuverMeters
@@ -155,8 +169,24 @@ fun NavigationScreen(
                 }
             }
 
-            TextButton(onClick = onStopNavigation, modifier = Modifier.align(Alignment.CenterHorizontally)) {
-                Text("Baigti navigaciją", color = MaterialTheme.colorScheme.error)
+            Spacer(modifier = Modifier.height(4.dp))
+
+            // "Baigti navigaciją" — full-width button; min 48 dp touch target.
+            Button(
+                onClick  = onStopNavigation,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer,
+                    contentColor   = MaterialTheme.colorScheme.onErrorContainer,
+                ),
+            ) {
+                Text(
+                    "Baigti navigaciją",
+                    style      = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
             }
         }
     }

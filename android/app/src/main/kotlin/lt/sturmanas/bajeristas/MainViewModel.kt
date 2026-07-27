@@ -12,6 +12,7 @@ import lt.sturmanas.bajeristas.navigation.NavigationState
 import lt.sturmanas.bajeristas.voice.ai.AIConversationController
 import lt.sturmanas.bajeristas.voice.coordination.ConversationCoordinator
 import lt.sturmanas.bajeristas.voice.navigation.NavigationVoiceController
+import lt.sturmanas.bajeristas.voice.ai.KentasChat
 import lt.sturmanas.bajeristas.voice.pipeline.OpenAiTranscriptionClient
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -53,7 +54,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         Log.d(TAG, "initAI invoked: aiController is null? ${aiController == null}")
         if (aiController != null) return
         Log.i(TAG, "AI_INITIALIZING")
-        val transcriptionClient = OpenAiTranscriptionClient(BuildConfig.OPENAI_API_KEY)
+        // Route all AI calls through the backend proxy — the API key never lives in the APK.
+        KentasChat.init(BuildConfig.BACKEND_URL)
+        val sessionId = java.util.UUID.randomUUID().toString()
+        val transcriptionClient = OpenAiTranscriptionClient(
+            backendUrl = BuildConfig.BACKEND_URL,
+            sessionId  = sessionId,
+        )
         val controller = AIConversationController(
             context = context,
             getNextManeuverDist = { voiceController.getLatestDistance() },

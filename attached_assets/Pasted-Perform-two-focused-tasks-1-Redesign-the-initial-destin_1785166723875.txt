@@ -1,0 +1,267 @@
+Perform two focused tasks:
+
+1. Redesign the initial destination screen.
+2. Audit production readiness for approximately 100 users.
+
+Do not modify the currently working AudioRecord, Silero VAD, STT, conversation, TTS, or Google Navigation SDK behaviour.
+
+==================================================
+1. INITIAL SCREEN REDESIGN
+==================================================
+
+The current screen is visually too plain:
+
+- white background
+- excessive empty space
+- generic title “Navigacija”
+- plain destination field
+- disabled grey button
+- no Šturmanas Bajeristas personality
+- bottom UI must also respect Android system navigation bar insets
+
+Create a polished but simple Lithuanian navigation start screen.
+
+STYLE
+
+Use the same visual identity as the active navigation UI:
+
+- dark teal / petrol-green primary surface
+- rounded cards and buttons
+- clear large typography
+- strong contrast
+- modern but not over-designed
+- comfortable for one-handed use in a car
+- no clutter
+- no unnecessary animations
+
+CONTENT
+
+Replace the generic title with:
+
+“Šturmanas Bajeristas”
+
+Use a conversational heading such as:
+
+“Kur varom?”
+
+Destination field placeholder:
+
+“Įvesk adresą arba vietą”
+
+Primary button:
+
+“Važiuojam”
+
+Add a microphone action for voice destination input if the existing destination voice flow supports it. Do not invent a non-working microphone feature.
+
+Optional secondary content:
+
+- up to 3 recent destinations, only if recent-destination data already exists
+- do not restore Home or Work address functionality
+- do not add account/profile/settings features
+
+LAYOUT
+
+Suggested structure:
+
+- app identity near the top
+- large conversational heading
+- destination input card
+- voice destination action
+- prominent primary navigation button
+- recent destinations below, if available
+
+Ensure:
+
+- all touch targets are at least 48 dp
+- layout works on small Xiaomi screens
+- keyboard does not hide the main action
+- all bottom controls stay above the 3-button and gesture navigation bars
+- status bar and navigation bar WindowInsets are handled properly
+- no hardcoded device-specific bottom spacing
+- portrait layout does not overlap system UI
+
+Also fix the active navigation “Baigti navigaciją” button so it remains fully visible and tappable above the Android system navigation bar.
+
+Use WindowInsetsCompat or the correct Compose WindowInsets mechanism already used by the project.
+
+==================================================
+2. PRODUCTION READINESS FOR 100 USERS
+==================================================
+
+Audit the existing architecture for:
+
+- 100 registered users
+- 10–20 simultaneously active voice users
+- a possible burst of up to 100 simultaneous requests
+
+Do not over-engineer or introduce Kubernetes, microservices, or unnecessary infrastructure.
+
+Inspect the actual code and determine:
+
+A. API KEY SECURITY
+
+Verify that:
+
+- OpenAI API keys are not bundled inside the Android APK
+- no secret is present in BuildConfig, strings.xml, source code, or client-visible network requests
+- secrets exist only on the backend
+- Android communicates with our backend rather than directly exposing privileged provider credentials
+
+If the Android client currently contains a provider secret, report it as a critical issue and move privileged requests behind the backend without breaking the current user flow.
+
+B. USER AND SESSION ISOLATION
+
+Verify that every request has a stable user/device/session identifier.
+
+Ensure:
+
+- one user’s conversation context cannot mix with another user’s
+- transcription uploads are associated with the correct session
+- navigation state is never stored globally on the server
+- server-side mutable singleton state is not shared between users
+- conversation history has bounded size and expiration
+
+C. RATE LIMITING
+
+Add simple backend rate limiting where missing.
+
+Protect:
+
+- transcription endpoint
+- AI chat endpoint
+- TTS endpoint, if server-based
+- authentication or device-registration endpoint
+
+Use sensible limits and return clear HTTP 429 responses.
+
+Avoid blocking normal driving conversation.
+
+D. REQUEST LIMITS
+
+Enforce:
+
+- maximum audio upload size
+- maximum audio duration where available
+- accepted MIME types
+- request timeout
+- AI response timeout
+- maximum prompt/history length
+- maximum generated response length
+
+Reject invalid requests before sending them to external AI providers.
+
+E. CONCURRENCY AND PERFORMANCE
+
+Check whether the backend:
+
+- blocks the Node.js event loop
+- reads large audio files fully into memory unnecessarily
+- uses synchronous filesystem operations in request handlers
+- stores temporary files without deleting them
+- has a concurrency bottleneck or global mutex
+- has safe HTTP client connection and timeout settings
+
+For the target scale, prefer streaming or bounded buffers where practical, but do not redesign working code without evidence.
+
+F. FAILURE HANDLING
+
+Ensure:
+
+- provider timeout produces a controlled response
+- provider 429 is handled
+- provider 500/503 is handled
+- Android receives a useful retryable error
+- duplicate mobile retries do not accidentally create duplicate AI responses
+- failed temporary uploads are cleaned up
+- no request waits forever
+
+G. USAGE AND COST VISIBILITY
+
+Add lightweight structured logs or counters for:
+
+- user/session ID, anonymized where appropriate
+- endpoint
+- request duration
+- audio duration or upload bytes
+- STT provider latency
+- AI latency
+- TTS latency
+- provider status
+- success/failure
+- estimated or provider-reported token/audio usage where available
+
+Do not log raw audio, full private transcripts, API keys, or authorization headers.
+
+Provide a simple calculation method for estimating:
+
+- daily STT minutes
+- AI requests
+- AI input/output tokens
+- TTS characters or seconds
+- approximate cost per active user
+
+Do not hardcode speculative prices. Keep pricing configuration separate so it can be updated.
+
+H. DEPLOYMENT BASICS
+
+Verify:
+
+- production environment variables
+- HTTPS assumptions
+- process restart mechanism
+- health endpoint
+- graceful shutdown
+- log rotation
+- body size limits
+- CORS configuration
+- reverse-proxy timeout compatibility
+
+Do not expose internal health details publicly.
+
+==================================================
+TESTS
+==================================================
+
+Add tests for:
+
+- user/session separation
+- oversized audio rejection
+- unsupported MIME rejection
+- rate-limit response
+- provider timeout handling
+- provider 429 handling
+- duplicate request protection if supported
+- conversation history bounding
+- bottom system-bar inset layout logic where testable
+- destination screen enabled/disabled state
+
+Run all available tests.
+
+If Android SDK is available:
+
+./gradlew :app:compileDebugKotlin
+./gradlew :app:testDebugUnitTest
+
+Do not modify the stable microphone mute gate.
+
+==================================================
+FINAL REPORT
+==================================================
+
+Return:
+
+1. Screenshot or detailed description of the new start screen.
+2. Exact files changed for the UI.
+3. How system bar insets were fixed.
+4. Whether any API secret was exposed in the Android app.
+5. Current request flow from Android to AI providers.
+6. Identified bottlenecks for 100 users.
+7. Changes implemented for security, limits, and concurrency.
+8. Suggested safe initial capacity.
+9. Tests and results.
+10. Build result.
+11. Commit hash.
+12. Push result.
+
+Implement the changes, test them, commit, and push to origin/main.
