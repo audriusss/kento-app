@@ -68,12 +68,12 @@ class UtteranceSegmenter(val config: Config = Config()) {
      *                          (Silero VAD v4: 32 ms).
      */
     data class Config(
-        val speechThreshold: Float = 0.50f,
-        val minSpeechMs: Int = 250,
-        val trailingSilenceMs: Int = 600,
-        val maxUtteranceMs: Int = 15_000,
-        val preRollMs: Int = 200,
-        val chunkMs: Int = 32,
+        val speechThreshold: Float = PipelineConfig.SPEECH_THRESHOLD,
+        val minSpeechMs: Int = PipelineConfig.MIN_SPEECH_MS,
+        val trailingSilenceMs: Int = PipelineConfig.TRAILING_SILENCE_MS,
+        val maxUtteranceMs: Int = PipelineConfig.MAX_UTTERANCE_MS,
+        val preRollMs: Int = PipelineConfig.PRE_ROLL_MS,
+        val chunkMs: Int = PipelineConfig.CHUNK_MS,
     )
 
     // ── Events emitted per chunk ─────────────────────────────────────────

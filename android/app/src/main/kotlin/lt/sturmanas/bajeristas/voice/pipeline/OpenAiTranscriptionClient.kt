@@ -38,14 +38,10 @@ class OpenAiTranscriptionClient(
         /**
          * Current recommended OpenAI speech-to-text model.
          *
-         * gpt-4o-transcribe (released March 2025) supersedes whisper-1 in
-         * accuracy across all languages, including Lithuanian.  It supports
-         * the same /v1/audio/transcriptions endpoint and all existing
-         * parameters (language, prompt, response_format).
-         *
-         * Update this constant to switch models project-wide.
+         * Delegates to [PipelineConfig.TRANSCRIPTION_MODEL] so there is a
+         * single source of truth for the model name.
          */
-        const val MODEL = "gpt-4o-transcribe"
+        const val MODEL = PipelineConfig.TRANSCRIPTION_MODEL
 
         private const val ENDPOINT = "https://api.openai.com/v1/audio/transcriptions"
 

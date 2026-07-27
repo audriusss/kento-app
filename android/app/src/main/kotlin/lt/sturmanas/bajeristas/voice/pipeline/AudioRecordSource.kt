@@ -28,8 +28,8 @@ import android.util.Log
  *                     model chunk size: 512 samples = 32 ms at 16 kHz).
  */
 class AudioRecordSource(
-    val sampleRate: Int = SileroVadProcessor.SAMPLE_RATE,
-    val chunkSamples: Int = SileroVadProcessor.CHUNK_SAMPLES,
+    val sampleRate: Int = PipelineConfig.SAMPLE_RATE,
+    val chunkSamples: Int = PipelineConfig.CHUNK_SAMPLES,
 ) {
 
     companion object {

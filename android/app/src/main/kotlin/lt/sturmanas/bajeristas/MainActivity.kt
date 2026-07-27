@@ -22,7 +22,6 @@ import lt.sturmanas.bajeristas.navigation.MockNavigationEngine
 import lt.sturmanas.bajeristas.navigation.NavigationController
 import lt.sturmanas.bajeristas.ui.NavigationScreen
 import lt.sturmanas.bajeristas.ui.StartScreen
-import lt.sturmanas.bajeristas.ui.debug.PocDebugOverlay
 import lt.sturmanas.bajeristas.ui.theme.SturmanasTheme
 
 class MainActivity : ComponentActivity() {
@@ -164,8 +163,4 @@ private fun SturmanasApp(
         )
     }
 
-    // DEBUG-only VAD PoC overlay.
-    // PocDebugOverlay is a no-op in release builds (guarded by BuildConfig.DEBUG internally).
-    // Never touches production voice state, ConversationController, or NavigationController.
-    PocDebugOverlay()
 }

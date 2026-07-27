@@ -1,102 +1,103 @@
 package lt.sturmanas.bajeristas.voice.ai
 
 import android.content.Context
-import android.content.Intent
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
-import android.media.AudioDeviceInfo
-import android.os.Build
-import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
+import lt.sturmanas.bajeristas.voice.pipeline.ContinuousMicrophonePipeline
+import lt.sturmanas.bajeristas.voice.pipeline.MicrophonePipeline
+import lt.sturmanas.bajeristas.voice.pipeline.PipelineConfig
+import lt.sturmanas.bajeristas.voice.pipeline.TranscriptionClient
 import java.util.Locale
 import java.util.UUID
 
 /**
  * Persistent Conversation Engine.
- * Manages logical user utterances across multiple STT sessions.
+ * Manages logical user utterances and drives the conversation state machine.
  * The single authoritative source of truth for conversation state and text.
+ *
+ * Microphone input is provided exclusively by [MicrophonePipeline]
+ * (AudioRecord → Silero VAD → OpenAI Transcription).  [SpeechRecognizer] is not used.
+ *
+ * ## Pipeline lifecycle rule
+ * [AudioRecord] stays alive as long as the voice system is active.  Phase transitions
+ * control [MicrophonePipeline.mute]/[MicrophonePipeline.unmute]; the pipeline is only
+ * [MicrophonePipeline.stop]ped in [release].
+ *
+ * ## Self-recognition protection
+ * Before any TTS (AI or navigation) begins, the pipeline is muted and VAD/segmenter
+ * state is reset.  After TTS finishes, a [PipelineConfig.POST_TTS_COOLDOWN_MS] cooldown
+ * elapses before unmuting so speaker echo does not trigger a false transcript.
  */
 class AIConversationController(
     private val context: Context,
     private val getNextManeuverDist: () -> Int,
-    private val onStateChanged: (String) -> Unit
-) : TextToSpeech.OnInitListener, RecognitionListener {
-
-    enum class ConversationMode { IDLE, ACTIVE, MUTED }
-    enum class Phase {
-        IDLE,
-        LISTENING,
-        COLLECTING,
-        WAITING_FOR_CONTINUATION,
-        THINKING,
-        SPEAKING,
-        PAUSED_BY_NAVIGATION,
-        MUTED
-    }
+    private val onStateChanged: (String) -> Unit,
+    transcriptionClient: TranscriptionClient,
+    /**
+     * Factory that produces the [MicrophonePipeline].  The factory receives a
+     * transcript-ready callback and returns the pipeline.  The default creates a
+     * [ContinuousMicrophonePipeline]; pass a fake in tests.
+     */
+    pipelineFactory: ((String) -> Unit) -> MicrophonePipeline = { cb ->
+        ContinuousMicrophonePipeline(context, transcriptionClient, cb)
+    },
+) : TextToSpeech.OnInitListener {
 
     private val TAG = "AIController"
-    
+
+    // ─── Handlers — declared first so pipeline factory closure can capture them ──
+    private val handler = Handler(Looper.getMainLooper())
+    private val watchdogHandler = Handler(Looper.getMainLooper())
+
+    // ─── Microphone pipeline ──────────────────────────────────────────────
+    //
+    // Transcripts arrive on an IO thread and are dispatched to the main thread
+    // via handler.post before entering processPacket().
+    private val pipeline: MicrophonePipeline = pipelineFactory { text ->
+        handler.post { if (!destroyed) processPacket(text, isFinal = true) }
+    }
+
+    // ─── TTS ─────────────────────────────────────────────────────────────
     private var tts: TextToSpeech? = TextToSpeech(context, this)
     private var isTtsReady = false
     private var sentences = listOf<String>()
     private var currentIndex = 0
     private var isInterrupted = false
 
-    private var speechRecognizer: SpeechRecognizer? = null
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
-    private val recognizerIntent: Intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-        putExtra(RecognizerIntent.EXTRA_LANGUAGE, "lt-LT")
-        putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-        putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-        
-        // Strict Int extras for patient speech timing
-        putExtra("android.speech.extra.SPEECH_INPUT_MINIMUM_LENGTH_MILLIS", 2500)
-        putExtra("android.speech.extra.SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS", 10000)
-        putExtra("android.speech.extra.SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS", 10000)
-    }
-
     private val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
-        .setAudioAttributes(AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
-            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-            .build())
+        .setAudioAttributes(
+            AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+        )
         .build()
 
-    // ─── AUTHORITATIVE STATE (Private) ───
+    // ─── AUTHORITATIVE STATE (Private) ───────────────────────────────────
     private var mode = ConversationMode.IDLE
     private var phase = Phase.IDLE
     private var prePausedPhase: Phase? = null
-    private var originalAudioMode: Int? = null
-    
-    // Internal state management
-    @Volatile private var generation = 0L
-    private var isListeningSessionActive = false
-    private var restartScheduled = false
-    private var destroyed = false
-    private var navigationSpeaking = false
 
-    private val handler = Handler(Looper.getMainLooper())
+    private var destroyed = false
+
     private val continuationRunnable = Runnable { checkBufferCompletion(isTimeout = true) }
     private var inactivityRunnable: Runnable? = null
     private var hasOpenerFired = false
 
     private var currentAiUtteranceId: String? = null
     private var aiTtsTerminalHandled = false
-    private val watchdogHandler = Handler(Looper.getMainLooper())
     private val watchdogRunnable = Runnable { handleTtsWatchdog() }
 
     private val activeNavUtterances = mutableSetOf<String>()
-    
+
     private val navResumeWatchdogRunnable = Runnable {
         if (phase == Phase.PAUSED_BY_NAVIGATION && activeNavUtterances.isEmpty()) {
             Log.w(TAG, "CONV_NAV_RESUME_WATCHDOG triggered")
@@ -110,21 +111,32 @@ class AIConversationController(
         }
     }
 
+    // Cooldown runnable: fired after AI TTS terminal to reset VAD and unmute.
+    // Routes back to Phase.MUTED when mode == MUTED so mute-command confirmation
+    // TTS does NOT reopen the mic (see postTtsTargetPhase in ConversationState.kt).
+    private val postTtsCooldownRunnable = Runnable {
+        if (!destroyed) {
+            pipeline.resetVadAndSegmenter()
+            transitionTo(postTtsTargetPhase(mode))
+        }
+    }
+
     private val strongWakeWords = setOf("kente", "kentai", "kentas", "kenta", "kentu", "kentui", "kentei")
     private val exactWakePhrases = setOf("kente", "kentai", "ei kente", "ei kentai", "klausyk kente", "klausyk kentai")
     private val questionWords = setOf("kur", "kada", "kodel", "kaip", "kas", "ar", "kiek", "koks", "kokia")
-    private val acknowledgements = setOf("jo", "aha", "nu", "gerai", "mhm", "okei")
 
     private val muteCommands = setOf("uzsiciaup", "tylek", "baik", "ramiai", "issijunk")
     private val unmuteCommands = setOf("kalbek", "grizk", "bazarinam", "isijunk", "gali kalbeti")
 
-    // ─── BUFFER MANAGER (Persistent) ───
+    // ─── BUFFER MANAGER (Persistent) ─────────────────────────────────────
     private val utteranceBuffer = StringBuilder()
     private var bufferOwner = "NONE"
 
     private fun logBufferOp(op: String, data: String = "") {
         val trace = Log.getStackTraceString(Throwable())
-        val shortTrace = trace.split("\n").filter { it.contains("lt.sturmanas.bajeristas") && !it.contains("logBufferOp") }.take(3).joinToString(" -> ")
+        val shortTrace = trace.split("\n")
+            .filter { it.contains("lt.sturmanas.bajeristas") && !it.contains("logBufferOp") }
+            .take(3).joinToString(" -> ")
         Log.d(TAG, "BUFFER_$op owner=$bufferOwner text='$utteranceBuffer' new='$data' trace=$shortTrace")
     }
 
@@ -136,15 +148,12 @@ class AIConversationController(
             logBufferOp("UPDATED", text)
             return
         }
-
         val baseWords = base.split(" ").filter { it.isNotBlank() }
-        val newWords = text.split(" ").filter { it.isNotBlank() }
-
+        val newWords  = text.split(" ").filter { it.isNotBlank() }
         var overlapSize = 0
         for (i in 1..baseWords.size.coerceAtMost(newWords.size)) {
             if (baseWords.takeLast(i) == newWords.take(i)) overlapSize = i
         }
-
         val toAppend = newWords.drop(overlapSize).joinToString(" ")
         if (toAppend.isNotBlank()) {
             utteranceBuffer.append(" ")
@@ -165,7 +174,6 @@ class AIConversationController(
         Log.i(TAG, "AI_CONSTRUCTOR_ENTER")
         Log.i(TAG, "CONV_ENGINE_INIT locale=${Locale.getDefault()}")
         Log.i(TAG, "BUFFER_CREATED")
-        prepareRecognizer()
         transitionTo(Phase.IDLE)
         Log.i(TAG, "AI_CONSTRUCTOR_EXIT")
     }
@@ -175,189 +183,92 @@ class AIConversationController(
         Log.i(TAG, "CONV_STATE from=$phase to=$newPhase")
         phase = newPhase
         bufferOwner = newPhase.name
-        
+
         // Sync UI
         val uiText = when (newPhase) {
-            Phase.IDLE, Phase.LISTENING, Phase.COLLECTING, Phase.WAITING_FOR_CONTINUATION -> "Klausau..."
-            Phase.THINKING -> "Kentas galvoja..."
-            Phase.SPEAKING -> "Kentas kalba..."
-            Phase.MUTED -> "Muted"
-            Phase.PAUSED_BY_NAVIGATION -> "Navigacija..."
+            Phase.IDLE, Phase.LISTENING, Phase.COLLECTING,
+            Phase.WAITING_FOR_CONTINUATION -> "Klausau..."
+            Phase.THINKING              -> "Kentas galvoja..."
+            Phase.SPEAKING              -> "Kentas kalba..."
+            Phase.MUTED                 -> "Muted"
+            Phase.PAUSED_BY_NAVIGATION  -> "Navigacija..."
         }
         onStateChanged(uiText)
 
-        // Entry logic
-        when (newPhase) {
-            Phase.IDLE -> {
-                // Buffer is preserved until inactivity triggers or query sent.
-                startSttSession()
+        // Pipeline control: AudioRecord stays alive; mute/unmute drives phases.
+        // Phase.MUTED is intentionally UNMUTED here — the hardware mic keeps recording
+        // so the driver can speak an unmute command.  The mode-level guard in
+        // processPacket() blocks all non-unmute content when mode==MUTED.
+        when (pipelineActionForPhase(newPhase)) {
+            PipelineAction.UNMUTE -> {
+                pipeline.unmute()
+                pipeline.start()   // idempotent
             }
-            Phase.LISTENING, Phase.COLLECTING -> startSttSession()
-            Phase.THINKING, Phase.SPEAKING, Phase.PAUSED_BY_NAVIGATION -> stopSttSession()
-            else -> {}
+            PipelineAction.MUTE -> {
+                pipeline.mute()
+            }
         }
     }
 
-    private fun prepareRecognizer() {
-        if (destroyed) return
-        try {
-            speechRecognizer?.destroy()
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
-                setRecognitionListener(this@AIConversationController)
-            }
-            Log.i(TAG, "STT_RECOGNIZER_RECREATED reason=init_or_recovery")
-        } catch (e: Exception) {
-            Log.e(TAG, "prepareRecognizer failed", e)
-        }
-    }
+    // ─── Public entry point for transcripts ──────────────────────────────
 
-    fun startListening() {
-        if (destroyed) return
-        if (phase == Phase.MUTED || phase == Phase.PAUSED_BY_NAVIGATION) return
-        startSttSession()
-    }
-
-    private var firstPartialAt = 0L
-    private var sttSessionStartedAt = 0L
-
-    private fun startSttSession() {
-        val requestTime = System.currentTimeMillis()
-        
-        // --- EXPANDED AUDIO ROUTING DIAGNOSTICS ---
-        try {
-            val modeStr = when (audioManager.mode) {
-                AudioManager.MODE_NORMAL -> "NORMAL"
-                AudioManager.MODE_RINGTONE -> "RING"
-                AudioManager.MODE_IN_CALL -> "IN_CALL"
-                AudioManager.MODE_IN_COMMUNICATION -> "COMM"
-                else -> "UNKNOWN(${audioManager.mode})"
-            }
-            
-            val inputs = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
-            val inputDetails = inputs.joinToString("\n") { device ->
-                val typeName = when (device.type) {
-                    AudioDeviceInfo.TYPE_BUILTIN_MIC -> "BUILTIN_MIC"
-                    AudioDeviceInfo.TYPE_WIRED_HEADSET -> "WIRED_HEADSET"
-                    AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> "WIRED_HEADPHONES"
-                    AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "BT_SCO"
-                    AudioDeviceInfo.TYPE_USB_DEVICE -> "USB"
-                    AudioDeviceInfo.TYPE_USB_HEADSET -> "USB_HEADSET"
-                    else -> "TYPE_${device.type}"
-                }
-                "  - [Input] id=${device.id}, type=${device.type}($typeName), product=${device.productName}, channels=${device.channelCounts.contentToString()}, rates=${device.sampleRates.contentToString()}"
-            }
-
-            val wiredHeadset = inputs.any { it.type == AudioDeviceInfo.TYPE_WIRED_HEADSET || it.type == AudioDeviceInfo.TYPE_USB_HEADSET }
-
-            val commDevice = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                audioManager.communicationDevice?.let { "id=${it.id}, type=${it.type}" } ?: "NONE"
-            } else "N/A(<S)"
-
-            Log.i(TAG, "AUDIO_INPUT_DIAG: mode=$modeStr wired=$wiredHeadset btSco=${audioManager.isBluetoothScoOn} commDevice=$commDevice")
-            Log.i(TAG, "AUDIO_INPUT_DEVICES:\n$inputDetails")
-            Log.i(TAG, "AUDIO_SOURCE_CHECK: setCommunicationDevice was NOT found in project grep.")
-        } catch (e: Exception) {
-            Log.e(TAG, "AUDIO_INPUT_DIAG_FAILED", e)
-        }
-        // ------------------------------------------
-
-        Log.d(TAG, "STT_START_SESSION_REQUEST phase=$phase mode=$mode sessionActive=$isListeningSessionActive navSpeaking=$navigationSpeaking destroyed=$destroyed time=$requestTime")
-        
-        if (isListeningSessionActive || restartScheduled || destroyed || navigationSpeaking || phase == Phase.THINKING || phase == Phase.SPEAKING || phase == Phase.PAUSED_BY_NAVIGATION) {
-            val reason = when {
-                isListeningSessionActive -> "already_active"
-                restartScheduled -> "restart_scheduled"
-                destroyed -> "destroyed"
-                navigationSpeaking -> "nav_speaking"
-                phase == Phase.THINKING -> "phase_thinking"
-                phase == Phase.SPEAKING -> "phase_speaking"
-                phase == Phase.PAUSED_BY_NAVIGATION -> "phase_paused_nav"
-                else -> "unknown"
-            }
-            Log.d(TAG, "STT_START_SESSION_SKIPPED reason=$reason")
+    /**
+     * Entry point for transcripts delivered by [MicrophonePipeline].
+     *
+     * Must only be called on the main thread (the pipeline posts here via handler).
+     */
+    fun onTranscriptReceived(text: String) {
+        // Defensive guard: pipeline may deliver stale callbacks after mute if a
+        // transcription was in-flight at the moment mute was requested.
+        if (phase == Phase.MUTED) {
+            Log.d(TAG, "CONV_TRANSCRIPT_IGNORED phase=MUTED text='$text'")
             return
         }
-
-        generation++
-        isListeningSessionActive = true
-        Log.i(TAG, "STT_SESSION_CREATED gen=$generation mode=$mode phase=$phase")
-        
-        handler.post {
-            if (destroyed || !isListeningSessionActive) {
-                 Log.d(TAG, "STT_SESSION_START_CANCELLED destroyed=$destroyed active=$isListeningSessionActive")
-                 return@post
-            }
-            try {
-                if (speechRecognizer == null) {
-                    Log.d(TAG, "STT_SESSION_RECREATING_RECOGNIZER")
-                    prepareRecognizer()
-                }
-                
-                if (speechRecognizer != null) {
-                    sttSessionStartedAt = System.currentTimeMillis()
-                    firstPartialAt = 0L
-                    
-                    // --- EXPERIMENT: Set Audio Mode ---
-                    try {
-                        originalAudioMode = audioManager.mode
-                        audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-                        Log.i(TAG, "AUDIO_MODE_CHANGED old=$originalAudioMode new=IN_COMMUNICATION")
-                    } catch (e: Exception) {
-                        Log.e(TAG, "FAILED_TO_SET_AUDIO_MODE", e)
-                    }
-                    
-                    Log.d(TAG, "STT_SESSION_START_ATTEMPT gen=$generation time=$sttSessionStartedAt")
-                    speechRecognizer?.startListening(recognizerIntent)
-                } else {
-                    isListeningSessionActive = false
-                    restoreAudioMode()
-                    scheduleSttRestart(2000)
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "startSttSession error", e)
-                isListeningSessionActive = false
-                restoreAudioMode()
-                scheduleSttRestart(2000)
-            }
-        }
+        processPacket(text, isFinal = true)
     }
 
-    private fun stopSttSession() {
-        isListeningSessionActive = false
-        speechRecognizer?.cancel()
-        restoreAudioMode()
+    // ─── Public lifecycle ─────────────────────────────────────────────────
+
+    /**
+     * Called by the navigation layer when navigation begins, to ensure the mic is
+     * active in a listening phase.  This must NOT override an active TTS phase or
+     * muted/navigation-paused state — those phases control the pipeline through
+     * [transitionTo] and must not be pre-empted by external callers.
+     *
+     * Guard rule: only proceed when [pipelineActionForPhase] for the current phase is
+     * [PipelineAction.UNMUTE] AND the driver has not explicitly muted the assistant.
+     */
+    fun startListening() {
+        if (destroyed) return
+        // Do not unmute during TTS or navigation audio; let transitionTo() remain the
+        // sole authority for pipeline control during those phases.
+        if (pipelineActionForPhase(phase) == PipelineAction.MUTE) return
+        // Respect explicit user mute — nav updates must not override mode==MUTED.
+        if (phase == Phase.MUTED) return
+        pipeline.unmute()
+        pipeline.start()
     }
 
-    private fun restoreAudioMode() {
-        val old = originalAudioMode ?: return
-        try {
-            audioManager.mode = old
-            Log.i(TAG, "AUDIO_MODE_RESTORED old=IN_COMMUNICATION new=$old")
-        } catch (e: Exception) {
-            Log.e(TAG, "FAILED_TO_RESTORE_AUDIO_MODE", e)
-        } finally {
-            originalAudioMode = null
-        }
-    }
-
-    private fun scheduleSttRestart(delayMs: Long) {
-        if (destroyed || navigationSpeaking || restartScheduled) return
-        restartScheduled = true
-        handler.postAtTime({
-            restartScheduled = false
-            startSttSession()
-        }, RESTART_TOKEN, android.os.SystemClock.uptimeMillis() + delayMs)
-    }
-
-    // ─── CONVERSATION LOGIC ───
+    // ─── CONVERSATION LOGIC ───────────────────────────────────────────────
 
     private fun processPacket(text: String, isFinal: Boolean) {
         if (text.isBlank()) return
-        
+
+        // Hard guard: if the user has explicitly muted the assistant, drop all transcripts
+        // (including in-flight callbacks that arrived after mute was applied).
+        // Only explicit unmute commands pass through (checked below before this guard fires).
+        if (mode == ConversationMode.MUTED) {
+            val norm = normalizeText(text)
+            if (!unmuteCommands.any { norm.contains(it) }) {
+                Log.d(TAG, "CONV_PACKET_IGNORED mode=MUTED text='$text'")
+                return
+            }
+        }
+
         val norm = normalizeText(text)
         Log.i(TAG, if (isFinal) "CONV_PACKET_FINAL text='$text'" else "CONV_PACKET_PARTIAL text='$text'")
 
-        // 1. Immediate Commands (Pre-buffer check)
+        // 1. Immediate commands (pre-buffer)
         if (muteCommands.any { norm.contains(it) } && (norm.contains("kent") || mode == ConversationMode.ACTIVE)) {
             Log.i(TAG, "CONV_EVENT type=MUTE_COMMAND")
             mode = ConversationMode.MUTED
@@ -366,7 +277,7 @@ class AIConversationController(
             speak("Gerai kapitone. Patylėsiu. Tik navigacija liks.")
             return
         }
-        
+
         if (unmuteCommands.any { norm.contains(it) }) {
             Log.i(TAG, "CONV_EVENT type=UNMUTE_COMMAND")
             mode = ConversationMode.ACTIVE
@@ -383,7 +294,7 @@ class AIConversationController(
             return
         }
 
-        // 2. Buffer Interaction
+        // 2. Buffer interaction
         if (isFinal) {
             appendToBuffer(text)
             checkBufferCompletion(isTimeout = false)
@@ -406,8 +317,8 @@ class AIConversationController(
                 reason = "timeout"
             } else {
                 if (mode != ConversationMode.ACTIVE) {
-                     clearUtteranceBuffer("too_short_on_timeout")
-                     transitionTo(Phase.IDLE)
+                    clearUtteranceBuffer("too_short_on_timeout")
+                    transitionTo(Phase.IDLE)
                 }
                 return
             }
@@ -419,7 +330,6 @@ class AIConversationController(
                 speak("Klausau.")
                 return
             }
-            
             val isQuestion = tokensContainQuestion(norm) || currentText.endsWith("?")
             if (isQuestion && norm.split(" ").size >= 2) {
                 shouldSend = true
@@ -443,7 +353,7 @@ class AIConversationController(
         transitionTo(Phase.THINKING)
         KentasChat.askKentas(text) { reply ->
             Log.i(TAG, "CONV_EVENT type=AI_RESPONSE_RECEIVED")
-            handler.post { 
+            handler.post {
                 if (phase == Phase.THINKING) {
                     speak(reply)
                 }
@@ -457,20 +367,13 @@ class AIConversationController(
         Log.d(TAG, "CONV_CONTINUATION_TIMER_RESET")
     }
 
-    private fun normalizeText(text: String): String {
-        return text.lowercase()
-            .replace("ą", "a")
-            .replace("č", "c")
-            .replace("ę", "e")
-            .replace("ė", "e")
-            .replace("į", "i")
-            .replace("š", "s")
-            .replace("ų", "u")
-            .replace("ū", "u")
-            .replace("ž", "z")
+    private fun normalizeText(text: String): String =
+        text.lowercase()
+            .replace("ą", "a").replace("č", "c").replace("ę", "e")
+            .replace("ė", "e").replace("į", "i").replace("š", "s")
+            .replace("ų", "u").replace("ū", "u").replace("ž", "z")
             .replace(Regex("[^a-z0-9\\s]"), "")
             .trim()
-    }
 
     private fun isWakeWordOnly(text: String): Boolean {
         val norm = normalizeText(text)
@@ -480,77 +383,10 @@ class AIConversationController(
         return tokens.all { strongWakeWords.contains(it) || it.startsWith("kent") || it == "ei" || it == "klausyk" }
     }
 
-    private fun tokensContainQuestion(norm: String): Boolean {
-        val tokens = norm.split(Regex("\\s+")).filter { it.isNotBlank() }
-        return tokens.any { questionWords.contains(it) }
-    }
+    private fun tokensContainQuestion(norm: String): Boolean =
+        norm.split(Regex("\\s+")).filter { it.isNotBlank() }.any { questionWords.contains(it) }
 
-    // ─── STT CALLBACKS (Packet Receiver) ───
-
-    override fun onReadyForSpeech(params: Bundle?) {
-        val readyTime = System.currentTimeMillis()
-        Log.i(TAG, "STT_READY_AT=$readyTime deltaSinceStart=${readyTime - sttSessionStartedAt}ms")
-    }
-    override fun onBeginningOfSpeech() {
-        val beginTime = System.currentTimeMillis()
-        Log.i(TAG, "STT_BEGIN_AT=$beginTime deltaSinceReady=${if (sttSessionStartedAt > 0) beginTime - sttSessionStartedAt else 0}ms")
-        if (phase == Phase.LISTENING || phase == Phase.IDLE) transitionTo(Phase.COLLECTING)
-    }
-    override fun onRmsChanged(rmsdB: Float) {}
-    override fun onBufferReceived(buffer: ByteArray?) {}
-    override fun onEndOfSpeech() {
-        Log.i(TAG, "CONV_EVENT type=STT_PACKET_END")
-    }
-
-    override fun onError(error: Int) {
-        Log.i(TAG, "CONV_EVENT type=STT_ERROR code=$error")
-        isListeningSessionActive = false
-        restoreAudioMode()
-        
-        val isListeningPhase = phase == Phase.LISTENING || phase == Phase.COLLECTING || phase == Phase.IDLE
-        if (isListeningPhase && !destroyed && !navigationSpeaking) {
-            when (error) {
-                SpeechRecognizer.ERROR_SERVER_DISCONNECTED -> {
-                    Log.w(TAG, "STT_RECOGNIZER_RECREATED reason=code_11")
-                    prepareRecognizer()
-                    scheduleSttRestart(2000)
-                }
-                SpeechRecognizer.ERROR_NO_MATCH -> {
-                    // Persistent buffer means code 7 is fine. Just restart listener.
-                    val delay = if (mode == ConversationMode.IDLE) 2000L else 600L
-                    scheduleSttRestart(delay)
-                }
-                else -> scheduleSttRestart(1000)
-            }
-        }
-    }
-
-    override fun onResults(results: Bundle?) {
-        isListeningSessionActive = false
-        restoreAudioMode()
-        val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-        val text = matches?.maxByOrNull { it.length } ?: ""
-        processPacket(text, isFinal = true)
-        
-        // Auto-restart listening packet if we are still collecting/listening
-        if (phase == Phase.LISTENING || phase == Phase.COLLECTING || phase == Phase.IDLE) {
-            scheduleSttRestart(600)
-        }
-    }
-
-    override fun onPartialResults(partialResults: Bundle?) {
-        val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-        val text = matches?.maxByOrNull { it.length } ?: ""
-        if (text.isNotBlank() && firstPartialAt == 0L) {
-            firstPartialAt = System.currentTimeMillis()
-            Log.d(TAG, "STT_FIRST_PARTIAL_AT=$firstPartialAt deltaSinceReady=${if (sttSessionStartedAt > 0) firstPartialAt - sttSessionStartedAt else 0}ms text='$text'")
-        }
-        processPacket(text, isFinal = false)
-    }
-
-    override fun onEvent(eventType: Int, params: Bundle?) {}
-
-    // ─── EXTERNAL CONTROL ───
+    // ─── EXTERNAL CONTROL ────────────────────────────────────────────────
 
     fun onNavigationStarted(utteranceId: String) {
         handler.removeCallbacks(navResumeRunnable)
@@ -558,18 +394,18 @@ class AIConversationController(
             Log.d(TAG, "CONV_NAV_START_IGNORED id=$utteranceId (already tracked)")
             return
         }
-        
+
         activeNavUtterances.add(utteranceId)
         val depth = activeNavUtterances.size
         Log.i(TAG, "CONV_NAV_PAUSE previousPhase=$phase depth=$depth id=$utteranceId")
-        
+
         if (depth == 1) {
-            navigationSpeaking = true
             prePausedPhase = phase
-            transitionTo(Phase.PAUSED_BY_NAVIGATION)
+            transitionTo(Phase.PAUSED_BY_NAVIGATION)  // calls pipeline.mute()
+            clearUtteranceBuffer("nav_interrupt")
             stopAiSpeech()
         }
-        
+
         handler.removeCallbacks(navResumeWatchdogRunnable)
     }
 
@@ -578,11 +414,11 @@ class AIConversationController(
             Log.d(TAG, "CONV_NAV_FINISH_IGNORED id=$utteranceId (not tracked)")
             return
         }
-        
+
         activeNavUtterances.remove(utteranceId)
         val remainingDepth = activeNavUtterances.size
         Log.i(TAG, "CONV_NAV_FINISH remainingDepth=$remainingDepth id=$utteranceId")
-        
+
         if (remainingDepth == 0) {
             handler.postDelayed(navResumeWatchdogRunnable, 2000)
             handler.removeCallbacks(navResumeRunnable)
@@ -599,9 +435,8 @@ class AIConversationController(
             Log.d(TAG, "CONV_LISTEN_RESUME_SKIPPED reason=queue_not_empty")
             return
         }
-        
-        Log.i(TAG, "CONV_LISTEN_RESUME_REQUESTED delay=100")
-        navigationSpeaking = false
+
+        Log.i(TAG, "CONV_LISTEN_RESUME_REQUESTED cooldown=${PipelineConfig.POST_TTS_COOLDOWN_MS}ms")
         handler.removeCallbacks(navResumeWatchdogRunnable)
         handler.removeCallbacks(navResumeRunnable)
 
@@ -609,6 +444,10 @@ class AIConversationController(
             Phase.SPEAKING, Phase.THINKING -> Phase.LISTENING
             else -> prePausedPhase ?: Phase.IDLE
         }
+
+        // Reset VAD state so nav TTS echo cannot trigger a false transcript.
+        pipeline.resetVadAndSegmenter()
+        // transitionTo() calls pipeline.unmute() for listening phases.
         transitionTo(resumePhase)
         Log.i(TAG, "STT_SESSION_READY_AFTER_NAV")
     }
@@ -627,14 +466,19 @@ class AIConversationController(
 
     fun speak(text: String) {
         if (!isTtsReady || destroyed) return
-        
+
+        // Mute mic and reset VAD before TTS begins.
+        // transitionTo(SPEAKING) below calls pipeline.mute(); resetVadAndSegmenter()
+        // clears any in-flight utterance data so echo cannot contaminate the next listen.
         transitionTo(Phase.SPEAKING)
+        pipeline.resetVadAndSegmenter()
+
         aiTtsTerminalHandled = false
         currentAiUtteranceId = UUID.randomUUID().toString().substring(0, 8)
         sentences = text.split(Regex("(?<=[.!?])\\s+")).filter { it.isNotBlank() }
         currentIndex = 0
         isInterrupted = false
-        
+
         Log.i(TAG, "AI_TTS_REQUESTED utteranceId=$currentAiUtteranceId textLength=${text.length}")
         armWatchdog(text.length)
         playNextAiSentence()
@@ -667,17 +511,18 @@ class AIConversationController(
         if (aiTtsTerminalHandled && reason != "CANCELLED_BY_NAVIGATION") return
         aiTtsTerminalHandled = true
         Log.i(TAG, "AI_TTS_TERMINAL reason=$reason")
-        
+
         watchdogHandler.removeCallbacks(watchdogRunnable)
         audioManager.abandonAudioFocusRequest(focusRequest)
-        
+
+        // Cancel any pending cooldown, then schedule a fresh one.
+        handler.removeCallbacks(postTtsCooldownRunnable)
+
         if (reason != "CANCELLED_BY_NAVIGATION") {
-            if (mode == ConversationMode.ACTIVE) {
-                transitionTo(Phase.LISTENING)
-            } else {
-                transitionTo(Phase.IDLE)
-            }
+            // Wait for speaker echo to decay before unmuting the mic.
+            handler.postDelayed(postTtsCooldownRunnable, PipelineConfig.POST_TTS_COOLDOWN_MS)
         }
+        // CANCELLED_BY_NAVIGATION: the nav path re-evaluates phase independently.
     }
 
     fun resetIdleTimer() {
@@ -685,7 +530,7 @@ class AIConversationController(
         cancelInactivityTimer()
         inactivityRunnable = Runnable {
             val dist = getNextManeuverDist()
-            if (dist > 500 && !navigationSpeaking && phase == Phase.IDLE) {
+            if (dist > 500 && phase == Phase.IDLE) {
                 hasOpenerFired = true
                 speak(KentasChat.getOpener())
             } else {
@@ -740,15 +585,12 @@ class AIConversationController(
 
     fun release() {
         destroyed = true
-        restoreAudioMode()
+        pipeline.stop()
         watchdogHandler.removeCallbacksAndMessages(null)
         handler.removeCallbacksAndMessages(null)
         tts?.shutdown()
-        speechRecognizer?.destroy()
+        tts = null
         cancelInactivityTimer()
-    }
-
-    companion object {
-        private val RESTART_TOKEN = Any()
+        Log.i(TAG, "AI_CONTROLLER_RELEASED")
     }
 }

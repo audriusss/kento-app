@@ -12,6 +12,7 @@ import lt.sturmanas.bajeristas.navigation.NavigationState
 import lt.sturmanas.bajeristas.voice.ai.AIConversationController
 import lt.sturmanas.bajeristas.voice.coordination.ConversationCoordinator
 import lt.sturmanas.bajeristas.voice.navigation.NavigationVoiceController
+import lt.sturmanas.bajeristas.voice.pipeline.OpenAiTranscriptionClient
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -52,18 +53,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         Log.d(TAG, "initAI invoked: aiController is null? ${aiController == null}")
         if (aiController != null) return
         Log.i(TAG, "AI_INITIALIZING")
+        val transcriptionClient = OpenAiTranscriptionClient(BuildConfig.OPENAI_API_KEY)
         val controller = AIConversationController(
-            context,
-            { voiceController.getLatestDistance() }
-        ) { status: String ->
-            _aiStatus.value = status
-            when (status) {
-                "Klausau..." -> conversationCoordinator.startListening()
-                "Kentas galvoja..." -> {} // Coordinator no longer needs to track these
-                "Kentas kalba..." -> {}
-                else -> {}
-            }
-        }
+            context = context,
+            getNextManeuverDist = { voiceController.getLatestDistance() },
+            onStateChanged = { status: String ->
+                _aiStatus.value = status
+                when (status) {
+                    "Klausau..."       -> conversationCoordinator.startListening()
+                    "Kentas galvoja..." -> {}
+                    "Kentas kalba..."  -> {}
+                    else               -> {}
+                }
+            },
+            transcriptionClient = transcriptionClient,
+        )
         aiController = controller
         
         conversationCoordinator.setTriggers(
