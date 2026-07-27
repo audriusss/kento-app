@@ -1,0 +1,231 @@
+Perform a final production-readiness audit of Task #33 before pushing.
+
+Do not add new features.
+Do not redesign the architecture.
+Do not broadly refactor working code.
+
+GOAL
+
+Verify that the completed migration from Android SpeechRecognizer to:
+
+AudioRecord
+→ Silero VAD
+→ TranscriptionClient
+→ OpenAI transcription
+→ AIConversationController
+
+is internally consistent, leak-free, race-safe, and ready for Android Studio device testing.
+
+AUDIT CHECKLIST
+
+1. Old architecture removal
+
+Run a full project-wide search and confirm there are zero functional references to:
+
+- SpeechRecognizer
+- RecognitionListener
+- RecognizerIntent
+- startSttSession
+- stopSttSession
+- scheduleSttRestart
+- ERROR_NO_MATCH
+- ERROR_SERVER_DISCONNECTED
+- MODE_IN_COMMUNICATION
+
+Comments or migration notes mentioning the old architecture should also be removed if no longer useful.
+
+2. Pipeline lifecycle
+
+Verify:
+
+- only one AudioRecord instance can exist
+- repeated start() calls are safe
+- repeated stop() calls are safe
+- release() cannot race with active capture
+- ONNX session is closed exactly once
+- AudioRecord is released exactly once
+- pending coroutine/network work is cancelled on release
+- no Activity reference is retained
+- applicationContext is used where appropriate
+
+3. State machine invariants
+
+Confirm with code inspection and tests:
+
+- LISTENING and COLLECTING allow pipeline audio processing
+- THINKING mutes and clears active utterance state
+- SPEAKING mutes and clears active utterance state
+- PAUSED_BY_NAVIGATION mutes and clears active utterance state
+- MUTED still allows hearing only the explicit unmute command
+- all other transcripts are ignored while mode == MUTED
+- pipeline cannot unmute during THINKING
+- pipeline cannot unmute during SPEAKING
+- pipeline cannot unmute while navigation is active
+- pipeline cannot unmute while any active navigation utterance remains
+- post-TTS cooldown respects the current mode and phase
+- stale delayed runnables cannot incorrectly unmute the pipeline
+
+4. Transcript safety
+
+Verify:
+
+- final transcript enters through one method only
+- transcript enters existing processPacket(text, isFinal = true)
+- no duplicate transcript path exists
+- blank transcripts are ignored
+- transcription errors do not change the controller into a broken phase
+- late transcription callbacks after mute/release are ignored safely
+- transcripts captured before navigation/TTS cannot be delivered afterwards as stale input
+
+Pay special attention to in-flight transcription results.
+
+If necessary, add a generation/session token so results produced before mute/reset/release are discarded.
+
+5. Self-recognition prevention
+
+Verify the exact order for AI TTS:
+
+- pipeline mute
+- clear active utterance
+- reset VAD and segmenter
+- start TTS
+- TTS terminal callback
+- cooldown
+- reset again
+- phase-safe unmute
+
+Verify the same invariant for navigation speech.
+
+No microphone audio containing AI TTS or navigation TTS should reach transcription.
+
+6. Navigation race conditions
+
+Inspect:
+
+- activeNavUtterances set handling
+- duplicate start callbacks
+- duplicate finish callbacks
+- IMMEDIATE navigation QUEUE_FLUSH behaviour
+- finish callback after a flushed utterance
+- navigation watchdog behaviour
+- AI TTS interrupted by navigation
+- navigation ending while AI is still speaking
+
+Confirm the pipeline only resumes when all blockers are gone.
+
+7. Transcription concurrency
+
+Verify:
+
+- microphone capture never waits for HTTP
+- bounded transcription concurrency works
+- queue-full behaviour does not crash
+- failed upload releases its concurrency slot
+- timeout releases its concurrency slot
+- transcript callbacks are delivered on the correct dispatcher/thread
+- multiple utterances cannot reorder in a way that breaks conversation logic
+
+If transcripts may finish out of order, either serialize them or explicitly justify why ordering is safe.
+
+8. Configuration
+
+Confirm PipelineConfig.kt is the single source of truth for:
+
+- sample rate
+- chunk samples/bytes
+- speech threshold
+- minimum speech duration
+- trailing silence
+- pre-roll
+- max utterance duration
+- post-TTS cooldown
+- transcription concurrency limit
+- transcription model
+
+Remove duplicated constants elsewhere.
+
+9. Android API correctness
+
+Review Android-dependent classes for:
+
+- RECORD_AUDIO permission handling
+- AudioRecord state validation
+- minimum buffer sizing
+- blocking read behaviour
+- SecurityException handling
+- IllegalStateException handling
+- app background/lifecycle behaviour
+- required foreground service implications, if continuous listening is intended while app is backgrounded
+- ONNX asset loading
+- ABI packaging
+
+Do not claim these are runtime-verified in Replit.
+
+10. Tests
+
+Add or update regression tests for any missing high-risk cases, especially:
+
+- stale transcription result after mute
+- stale transcription result after release
+- navigation start while transcription is in flight
+- AI TTS start while transcription is in flight
+- out-of-order transcription completion
+- duplicate navigation finish callback
+- cooldown runnable firing after mode changed to MUTED
+- cooldown runnable firing while navigation restarted
+- release during active AudioRecord loop
+
+Run all available pure-JVM tests.
+
+11. Static compile review
+
+Since Android SDK may be unavailable:
+
+- inspect all changed Android files line-by-line
+- verify constructor argument names
+- verify imports
+- verify coroutine scope ownership
+- verify visibility and nullability
+- verify ONNX Runtime API usage
+- verify OkHttp API usage
+- verify Compose debug overlay was fully removed
+
+12. Git status
+
+Before commit:
+
+- show git status
+- ensure no downloaded test jars, temporary stubs, logs, generated files, or local SDK files are tracked
+- ensure silero_vad.onnx is tracked
+- ensure no API key or local.properties is tracked
+
+13. Final commit and push
+
+Only after the audit is clean:
+
+- commit with:
+  Replace SpeechRecognizer with AudioRecord VAD pipeline
+
+- push to origin main
+
+FINAL REPORT
+
+Return:
+
+1. Audit findings.
+2. Bugs found and fixed.
+3. Files modified during the final audit.
+4. Final test count and result.
+5. Any Android-only risks still unverified.
+6. Exact git status before commit.
+7. Commit hash.
+8. Push result.
+9. Exact Android Studio commands:
+   git pull origin main
+   ./gradlew :app:compileDebugKotlin
+   ./gradlew :app:testDebugUnitTest
+
+Do not say production-ready unless all static checks are clean.
+Clearly separate:
+- verified in Replit
+- must be verified on Xiaomi hardware.
