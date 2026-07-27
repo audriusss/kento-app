@@ -98,8 +98,13 @@ dependencies {
 
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs_nio:2.1.5")
 
+    // Phase 2 VAD pipeline — ONNX Runtime for Silero VAD (production)
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.18.0")
+
     testImplementation(libs.junit)
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+    // Phase 2 VAD pipeline tests — MockWebServer for OpenAiTranscriptionClient HTTP tests
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 
     debugImplementation(libs.androidx.ui.tooling)
 }
