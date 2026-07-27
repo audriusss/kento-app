@@ -66,7 +66,15 @@ class ManeuverMapperTest {
         assertEquals(ManeuverType.SLIGHT_RIGHT, ManeuverMapper.fromSdk(Maneuver.TURN_SLIGHT_RIGHT))
     }
 
-    // KEEP_LEFT / KEEP_RIGHT removed: constants do not exist in SDK 7.8.0 TBT Maneuver.
+    @Test
+    fun `TURN_KEEP_LEFT maps to SLIGHT_LEFT`() {
+        assertEquals(ManeuverType.SLIGHT_LEFT, ManeuverMapper.fromSdk(Maneuver.TURN_KEEP_LEFT))
+    }
+
+    @Test
+    fun `TURN_KEEP_RIGHT maps to SLIGHT_RIGHT`() {
+        assertEquals(ManeuverType.SLIGHT_RIGHT, ManeuverMapper.fromSdk(Maneuver.TURN_KEEP_RIGHT))
+    }
 
     @Test
     fun `TURN_SHARP_LEFT maps to SHARP_LEFT`() {
@@ -79,8 +87,22 @@ class ManeuverMapperTest {
     }
 
     // ── U-turns ───────────────────────────────────────────────────────────
-    // UTURN_LEFT / UTURN_RIGHT removed: constants do not exist in SDK 7.8.0 TBT Maneuver.
-    // U-turn intent is expressed by ROUNDABOUT_U_TURN (tested in the roundabout group).
+
+    @Test
+    fun `all U-turn variants map to UTURN`() {
+        listOf(
+            Maneuver.TURN_U_TURN_CLOCKWISE,
+            Maneuver.TURN_U_TURN_COUNTERCLOCKWISE,
+            Maneuver.ON_RAMP_U_TURN_CLOCKWISE,
+            Maneuver.ON_RAMP_U_TURN_COUNTERCLOCKWISE,
+            Maneuver.OFF_RAMP_U_TURN_CLOCKWISE,
+            Maneuver.OFF_RAMP_U_TURN_COUNTERCLOCKWISE,
+            Maneuver.ROUNDABOUT_U_TURN_CLOCKWISE,
+            Maneuver.ROUNDABOUT_U_TURN_COUNTERCLOCKWISE,
+        ).forEach { m ->
+            assertEquals("$m should map to UTURN", ManeuverType.UTURN, ManeuverMapper.fromSdk(m))
+        }
+    }
 
     // ── Roundabouts ───────────────────────────────────────────────────────
 

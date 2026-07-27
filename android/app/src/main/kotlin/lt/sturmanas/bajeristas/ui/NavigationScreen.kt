@@ -10,16 +10,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CameraAlt
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -28,7 +23,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
@@ -36,45 +30,23 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import lt.sturmanas.bajeristas.community.CommunityMarkerRepository
 import lt.sturmanas.bajeristas.navigation.ManeuverType
 import lt.sturmanas.bajeristas.navigation.NavigationController
 import lt.sturmanas.bajeristas.navigation.NavigationPhase
 import lt.sturmanas.bajeristas.navigation.NavigationState
-import lt.sturmanas.bajeristas.safety.ConversationPermission
-import lt.sturmanas.bajeristas.voice.VoiceListeningState
 
 @Composable
 fun NavigationScreen(
     navigationState: NavigationState,
     navigationController: NavigationController,
-    conversationPermission: ConversationPermission,
-    /** Current conversation state — drives MicButton visual. */
-    voiceListeningState: VoiceListeningState = VoiceListeningState.IDLE,
-    /** True while a conversation session is active — shows the green ring. */
-    isConversationActive: Boolean = false,
-    onMicPress: () -> Unit,
     onStopNavigation: () -> Unit,
-    /** Called when the user taps the speed-camera report button. */
-    onReportMarker: (type: CommunityMarkerRepository.MarkerType, lat: Double, lng: Double) -> Unit,
-    /** True while the arrival confirmation dialog should be visible. */
-    showArrivalDialog: Boolean = false,
-    /** Called when the user confirms arrival — caller must stop navigation. */
-    onArrivalConfirmed: () -> Unit = {},
-    /** Called when the user declines — navigation continues, dialog closes. */
-    onArrivalDeclined: () -> Unit = {},
+    aiStatus: String = "IDLE",
 ) {
     val ctx = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val engine = remember { navigationController.engine }
-
-    // Create the NavigationView during composition (inside remember), NOT inside
-    // the AndroidView factory. The factory runs at layout time — after side-effects.
-    // Creating it here guarantees the view (and its onCreate call) completes before
-    // any side-effects fire.
     val navView = remember(engine) { engine.createNavigationView(ctx) }
 
-    // ── NavigationView lifecycle management ───────────────────────────────
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
@@ -91,16 +63,11 @@ fun NavigationScreen(
             val state = lifecycleOwner.lifecycle.currentState
             if (state.isAtLeast(Lifecycle.State.RESUMED)) engine.onPause()
             if (state.isAtLeast(Lifecycle.State.STARTED)) engine.onStop()
-            // IMPORTANT: call onViewDestroy(), NOT onDestroy().
-            // onViewDestroy() tears down NavigationView only; Navigator stays alive
-            // so startNavigation() works again without re-initialising the SDK.
             engine.onViewDestroy()
         }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-
-        // ── Navigation map ─────────────────────────────────────────────────
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -111,100 +78,51 @@ fun NavigationScreen(
                 modifier = Modifier.fillMaxSize(),
             )
 
-            // Phase-based loading overlays
-            val phaseLabel = when (navigationState.phase) {
-                NavigationPhase.RESOLVING_ADDRESS -> "Ieškomas adresas…"
-                NavigationPhase.CALCULATING_ROUTE -> "Skaičiuojamas maršrutas…"
-                else -> null
-            }
-            if (phaseLabel != null) {
-                Surface(
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(top = 16.dp),
-                    color = MaterialTheme.colorScheme.secondaryContainer,
-                    shape = MaterialTheme.shapes.medium,
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+            Column(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                val phaseLabel = when (navigationState.phase) {
+                    NavigationPhase.RESOLVING_ADDRESS -> "Ieškomas adresas…"
+                    NavigationPhase.CALCULATING_ROUTE -> "Skaičiuojamas maršrutas…"
+                    else -> null
+                }
+                if (phaseLabel != null) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.secondaryContainer,
+                        shape = MaterialTheme.shapes.medium,
                     ) {
-                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                        Text(phaseLabel, style = MaterialTheme.typography.bodySmall)
+                        Row(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Text(phaseLabel, style = MaterialTheme.typography.bodySmall)
+                        }
                     }
                 }
-            }
 
-            // Rerouting overlay
-            if (navigationState.isRerouting) {
-                Surface(
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(top = 16.dp),
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                    shape = MaterialTheme.shapes.medium,
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                        Text("Perskaičiuojamas maršrutas…", style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-            }
-
-            // Arrival overlay
-            if (navigationState.hasArrived) {
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = Color(0xCC1B6CA8),
-                ) {
-                    Column(
-                        modifier = Modifier.fillMaxSize(),
-                        verticalArrangement = Arrangement.Center,
-                        horizontalAlignment = Alignment.CenterHorizontally,
+                if (aiStatus != "IDLE") {
+                    Surface(
+                        color = MaterialTheme.colorScheme.tertiaryContainer,
+                        shape = MaterialTheme.shapes.medium,
                     ) {
                         Text(
-                            "Atvykote!",
-                            style = MaterialTheme.typography.headlineLarge,
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold,
-                        )
-                        Text(
-                            navigationState.destinationName,
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = Color.White,
+                            text = aiStatus,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer
                         )
                     }
                 }
             }
         }
 
-        // ── Bottom panel ──────────────────────────────────────────────────
         Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
-
-            // Error banner
-            navigationState.errorMessage?.let { error ->
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 8.dp),
-                    color = MaterialTheme.colorScheme.errorContainer,
-                    shape = MaterialTheme.shapes.small,
-                ) {
-                    Text(
-                        text = error,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onErrorContainer,
-                    )
-                }
-            }
-
-            // Maneuver info card
             Card(
                 modifier  = Modifier.fillMaxWidth(),
                 elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
@@ -222,12 +140,7 @@ fun NavigationScreen(
                             style      = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                         )
-                        val roadInfo = when {
-                            navigationState.nextRoadName.isNotBlank()    -> navigationState.nextRoadName
-                            navigationState.currentRoadName.isNotBlank() -> navigationState.currentRoadName
-                            else -> "—"
-                        }
-                        Text(text = roadInfo, style = MaterialTheme.typography.bodySmall)
+                        Text(text = navigationState.nextRoadName, style = MaterialTheme.typography.bodySmall)
                     }
                     Column(horizontalAlignment = Alignment.End) {
                         val dist = navigationState.distanceToNextManeuverMeters
@@ -242,93 +155,12 @@ fun NavigationScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Safety / conversation status
-            val (permColor, permText) = when (conversationPermission) {
-                ConversationPermission.ALLOWED    -> Color(0xFF2E7D32) to "Pokalbis leidžiamas"
-                ConversationPermission.SHORT_ONLY -> Color(0xFFF57F17) to "Tik trumpai — artėja manevras"
-                ConversationPermission.BLOCKED    -> Color(0xFFC62828) to "Navigacija turi prioritetą"
+            TextButton(onClick = onStopNavigation, modifier = Modifier.align(Alignment.CenterHorizontally)) {
+                Text("Baigti navigaciją", color = MaterialTheme.colorScheme.error)
             }
-            Text(text = permText, style = MaterialTheme.typography.labelMedium, color = permColor)
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // Controls row: mic | stop | marker report
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                val micEnabled = conversationPermission != ConversationPermission.BLOCKED
-                MicButton(
-                    state                = if (micEnabled) voiceListeningState else VoiceListeningState.IDLE,
-                    statusText           = "",
-                    enabled              = micEnabled,
-                    isConversationActive = isConversationActive,
-                    onClick              = onMicPress,
-                    size                 = 80.dp,
-                )
-
-                TextButton(onClick = onStopNavigation) {
-                    Text("Baigti", color = MaterialTheme.colorScheme.error)
-                }
-
-                // Speed-camera / police report button
-                OutlinedButton(
-                    onClick = {
-                        // TODO: get current location from LocationProvider.cachedLocation
-                        val loc = lt.sturmanas.bajeristas.navigation.LocationProvider.cachedLocation
-                        if (loc != null) {
-                            onReportMarker(
-                                CommunityMarkerRepository.MarkerType.SPEED_CAMERA,
-                                loc.latitude,
-                                loc.longitude,
-                            )
-                        }
-                    },
-                ) {
-                    androidx.compose.material3.Icon(
-                        imageVector        = Icons.Default.CameraAlt,
-                        contentDescription = "Pranešti apie radaro/policijos postą",
-                        modifier           = Modifier.size(16.dp),
-                    )
-                    Spacer(modifier = Modifier.size(4.dp))
-                    Text("Radaras", style = MaterialTheme.typography.labelMedium)
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Divider before ETA bar (removed in simplification — kept for spacing)
         }
     }
-
-    // ── Arrival confirmation dialog ────────────────────────────────────────
-    //
-    // Shown when the SDK fires ArrivalListener and the caller sets showArrivalDialog=true.
-    // onDismissRequest is a no-op: the user MUST make an explicit choice.  Dismissing by
-    // tapping outside or pressing Back would leave the dialog state inconsistent.
-    if (showArrivalDialog) {
-        AlertDialog(
-            onDismissRequest = { /* require explicit button press */ },
-            title            = { Text("Atrodo, jau atvykome") },
-            text             = { Text("Baigti maršrutą?") },
-            confirmButton    = {
-                Button(onClick = onArrivalConfirmed) {
-                    Text("Taip, atvykau")
-                }
-            },
-            dismissButton    = {
-                TextButton(onClick = onArrivalDeclined) {
-                    Text("Dar ne")
-                }
-            },
-        )
-    }
 }
-
-// ── Label helpers ─────────────────────────────────────────────────────────────
 
 private fun maneuverLabel(type: ManeuverType): String = when (type) {
     ManeuverType.NONE, ManeuverType.STRAIGHT -> "Tiesiai"

@@ -14,7 +14,6 @@ import com.google.android.libraries.mapsplatform.turnbyturn.model.Maneuver
  *    [fromSdk]; use [fromSdkNullable] for a null-safe entry point.
  *
  * Constants absent from SDK 7.8.0 TBT Maneuver (removed from this mapper):
- *  - KEEP_LEFT / KEEP_RIGHT       — do not exist in this package
  *  - UTURN_LEFT / UTURN_RIGHT     — do not exist in this package
  *
  * Rules:
@@ -22,10 +21,8 @@ import com.google.android.libraries.mapsplatform.turnbyturn.model.Maneuver
  *  - Any unrecognised integer maps to [ManeuverType.UNKNOWN] — never throws.
  *  - No business logic here; [SafetyController] decides what to do with the result.
  *
- * Note: [fromSdk] is not called with live SDK data yet because the NavigationEngine
- * currently sets ManeuverType.UNKNOWN directly (Navigator currentStep API is pending
- * confirmation). The mapper is retained for when step data becomes available, and for
- * unit-test coverage of the mapping table itself.
+ * Note: This mapper is used by GoogleNavigationEngine to convert real-time
+ * integers from the TBT feed (via NavInfoService) into internal types.
  */
 object ManeuverMapper {
 
@@ -47,15 +44,24 @@ object ManeuverMapper {
         Maneuver.TURN_LEFT -> ManeuverType.TURN_LEFT
         Maneuver.TURN_RIGHT -> ManeuverType.TURN_RIGHT
 
-        // KEEP_LEFT / KEEP_RIGHT do not exist in SDK 7.8.0 TBT Maneuver.
+        Maneuver.TURN_KEEP_LEFT,
         Maneuver.TURN_SLIGHT_LEFT -> ManeuverType.SLIGHT_LEFT
+
+        Maneuver.TURN_KEEP_RIGHT,
         Maneuver.TURN_SLIGHT_RIGHT -> ManeuverType.SLIGHT_RIGHT
 
         Maneuver.TURN_SHARP_LEFT -> ManeuverType.SHARP_LEFT
         Maneuver.TURN_SHARP_RIGHT -> ManeuverType.SHARP_RIGHT
 
-        // UTURN_LEFT / UTURN_RIGHT do not exist in SDK 7.8.0 TBT Maneuver.
-        // U-turn intent arrives via ROUNDABOUT_U_TURN (see below).
+        Maneuver.TURN_U_TURN_CLOCKWISE,
+        Maneuver.TURN_U_TURN_COUNTERCLOCKWISE,
+        Maneuver.ON_RAMP_U_TURN_CLOCKWISE,
+        Maneuver.ON_RAMP_U_TURN_COUNTERCLOCKWISE,
+        Maneuver.OFF_RAMP_U_TURN_CLOCKWISE,
+        Maneuver.OFF_RAMP_U_TURN_COUNTERCLOCKWISE,
+        Maneuver.ROUNDABOUT_U_TURN_CLOCKWISE,
+        Maneuver.ROUNDABOUT_U_TURN_COUNTERCLOCKWISE,
+        -> ManeuverType.UTURN
 
         Maneuver.ROUNDABOUT_CLOCKWISE,
         Maneuver.ROUNDABOUT_COUNTERCLOCKWISE,
@@ -79,9 +85,6 @@ object ManeuverMapper {
 
         Maneuver.ROUNDABOUT_STRAIGHT_CLOCKWISE,
         Maneuver.ROUNDABOUT_STRAIGHT_COUNTERCLOCKWISE,
-
-        Maneuver.ROUNDABOUT_U_TURN_CLOCKWISE,
-        Maneuver.ROUNDABOUT_U_TURN_COUNTERCLOCKWISE,
             -> ManeuverType.ROUNDABOUT
 
         Maneuver.OFF_RAMP_LEFT,

@@ -81,6 +81,8 @@ data class NavigationState(
     val nextRoadName: String = "",
     /** Next maneuver the driver must perform. */
     val maneuverType: ManeuverType = ManeuverType.NONE,
+    /** Exit number for roundabout maneuvers. */
+    val exitNumber: Int? = null,
     /** Distance to the next maneuver in metres. [Int.MAX_VALUE] when unknown. */
     val distanceToNextManeuverMeters: Int = Int.MAX_VALUE,
     /** Total remaining route distance in metres. */
