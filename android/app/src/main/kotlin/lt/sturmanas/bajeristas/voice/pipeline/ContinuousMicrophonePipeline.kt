@@ -26,15 +26,24 @@ import java.util.concurrent.atomic.AtomicInteger
  * - Only call [stop] on teardown (i.e. from `release()`).
  *
  * ## Mute/unmute
- * [AudioRecord] keeps recording while muted; audio frames are discarded at the
- * [UtteranceSegmenter] level so no transcription work is started.
+ * [AudioRecord] keeps recording while muted; the mute gate is checked
+ * **after** each [AudioRecord] read so the hardware buffer is always drained.
+ * A muted chunk is discarded immediately — Silero inference, VAD logging,
+ * and [UtteranceSegmenter] processing are all skipped.  This ensures that
+ * neither VAD_SPEECH_CANDIDATE nor VAD_SPEECH_STARTED can fire while muted.
+ *
  * Muting also increments [generationId] so any HTTP response still in-flight
  * from before the mute is silently discarded on arrival.
  *
+ * On [unmute] the caller (AIConversationController) resets Silero and the
+ * segmenter via [resetVadAndSegmenter] before the gate is re-opened.
+ *
  * ## Thread safety
  * [start], [stop], [mute], [unmute], [resetVadAndSegmenter] are all safe to
- * call from any thread.  [onTranscriptReady] is invoked from a background
- * coroutine — callers must post to the main thread themselves if needed.
+ * call from any thread.  [muteRequested] is an [AtomicBoolean] — writes from
+ * the main thread are immediately visible to the IO capture loop.
+ * [onTranscriptReady] is invoked from a background coroutine — callers must
+ * post to the main thread themselves if needed.
  *
  * @param context             Any [Context]; [applicationContext] is extracted
  *                            immediately to avoid Activity leaks.
@@ -52,6 +61,13 @@ class ContinuousMicrophonePipeline(
 
     companion object {
         private const val TAG = "MicPipeline"
+
+        /**
+         * Log a MIC_AUDIO_DISCARDED_WHILE_MUTED line every N discarded chunks
+         * to keep Logcat readable during long TTS segments.
+         * 100 chunks × 32 ms/chunk = one log line every ~3.2 s.
+         */
+        private const val MUTED_DISCARD_LOG_INTERVAL = 100L
     }
 
     // applicationContext extracted immediately — prevents Activity leak.
@@ -70,7 +86,15 @@ class ContinuousMicrophonePipeline(
     @Volatile private var segmenter: UtteranceSegmenter? = null
     @Volatile private var vad: SileroVadProcessor? = null
 
-    @Volatile private var muteRequested = false
+    /**
+     * Mute flag.  Written from the main thread, read from the IO capture loop.
+     * AtomicBoolean guarantees immediate cross-thread visibility without the
+     * subtle read-reordering risk of a plain @Volatile Boolean.
+     *
+     * The capture loop reads this flag **after** each AudioRecord read so the
+     * hardware buffer is never stalled.
+     */
+    private val muteRequested = AtomicBoolean(false)
 
     /**
      * Generation counter — incremented every time the pipeline is muted or
@@ -78,6 +102,10 @@ class ContinuousMicrophonePipeline(
      * and discards its result if the counter has advanced by the time the HTTP
      * response arrives, preventing stale transcripts from reaching the
      * controller after a mute or release.
+     *
+     * Written only on the main thread (in [mute] and [stop]); read on IO
+     * threads from transcription coroutines.  @Volatile is sufficient because
+     * there is a single writer.
      */
     @Volatile private var generationId = 0
 
@@ -102,7 +130,7 @@ class ContinuousMicrophonePipeline(
         generationId++                                    // discard any in-flight transcripts
         captureJob?.cancel()
         scope.coroutineContext.cancelChildren()
-        Log.i(TAG, "MIC_PIPELINE_STOPPED")
+        Log.i(TAG, "MIC_PIPELINE_STOPPED generation=$generationId")
     }
 
     /**
@@ -110,15 +138,29 @@ class ContinuousMicrophonePipeline(
      * keeps recording so no hardware warm-up delay is needed on unmute.
      * Also increments [generationId] to discard any transcript currently
      * in-flight over HTTP.
+     *
+     * The mute takes effect on the very next chunk read after this call
+     * because the capture loop checks [muteRequested] immediately after each
+     * [AudioRecord] read.  No Silero inference or segmenter processing occurs
+     * on discarded chunks.
      */
     override fun mute() {
-        muteRequested = true
-        generationId++                                    // discard in-flight transcripts
+        val gen = ++generationId                          // discard in-flight transcripts
+        muteRequested.set(true)
+        Log.i(TAG, "MIC_PIPELINE_MUTED generation=$gen")
     }
 
-    /** Resume after [mute]. Pre-roll is cleared on unmute to purge TTS echo. */
+    /**
+     * Resume after [mute].
+     *
+     * The caller must call [resetVadAndSegmenter] before or after this so
+     * Silero LSTM state and segmenter state machine start clean.
+     * AIConversationController always does this via [postTtsCooldownRunnable]
+     * and [resumeAfterNavigation].
+     */
     override fun unmute() {
-        muteRequested = false
+        muteRequested.set(false)
+        Log.i(TAG, "MIC_PIPELINE_UNMUTED generation=$generationId")
     }
 
     /**
@@ -127,15 +169,15 @@ class ContinuousMicrophonePipeline(
      * Called at TTS boundaries so residual speaker echo cannot influence VAD
      * scoring.  Safe to call while the pipeline is muted.
      *
-     * Note: called from the main thread while the capture loop runs on IO.
+     * The capture loop is gated on [muteRequested] so this call races with a
+     * loop iteration that has already passed the mute check at most once.
      * Both [SileroVadProcessor.reset] and [UtteranceSegmenter.reset] perform
-     * simple field assignments; the pipeline is muted when this is called so
-     * no utterance is in flight, making the benign data race inconsequential.
+     * simple field assignments, making the benign data race inconsequential.
      */
     override fun resetVadAndSegmenter() {
         segmenter?.reset()
         vad?.reset()
-        Log.d(TAG, "MIC_VAD_SEGMENTER_RESET")
+        Log.d(TAG, "MIC_VAD_SEGMENTER_RESET generation=$generationId")
     }
 
     // ── Capture loop ───────────────────────────────────────────────────────
@@ -164,21 +206,46 @@ class ContinuousMicrophonePipeline(
             "bufferSize=${source.chunkBytes}",
         )
 
-        var lastMuteState = false
+        // Discard counter for rate-limited muted-chunk logging.
+        var discardedChunks = 0L
+        // True while the previous chunk was muted; used to emit MIC_SELF_AUDIO_BLOCKED
+        // exactly once per mute window (on the first discarded chunk).
+        var wasMutedLastChunk = false
 
         try {
             while (currentCoroutineContext().isActive && running.get()) {
-                // ── Mute gate ─────────────────────────────────────────────
-                val nowMuted = muteRequested
-                if (nowMuted != lastMuteState) {
-                    if (nowMuted) segmenterInstance.mute() else segmenterInstance.unmute()
-                    lastMuteState = nowMuted
-                }
 
-                // ── Read one chunk (blocking) ─────────────────────────────
+                // ── Always drain AudioRecord ───────────────────────────────
+                // The blocking read is unconditional so the hardware buffer
+                // never stalls or overflows while the pipeline is muted.
                 val chunk = source.readChunk() ?: continue
 
-                // ── VAD inference ─────────────────────────────────────────
+                // ── Mute gate (post-read) ──────────────────────────────────
+                // Checked AFTER the read: the main thread may set muteRequested
+                // at any moment during the blocking readChunk() call.  Because
+                // the flag is read here — after the hardware data is safely in
+                // hand — there is no window where a muted chunk slips through
+                // to Silero, VAD logging, or the segmenter.
+                if (muteRequested.get()) {
+                    discardedChunks++
+                    if (!wasMutedLastChunk) {
+                        // First chunk of a new mute window: log self-audio block.
+                        Log.i(TAG, "MIC_SELF_AUDIO_BLOCKED generation=$generationId")
+                        wasMutedLastChunk = true
+                    } else if (discardedChunks % MUTED_DISCARD_LOG_INTERVAL == 0L) {
+                        Log.d(TAG, "MIC_AUDIO_DISCARDED_WHILE_MUTED chunks=$discardedChunks")
+                    }
+                    continue
+                }
+
+                // Transitioning from muted → unmuted: reset discard tracking.
+                if (wasMutedLastChunk) {
+                    Log.d(TAG, "MIC_AUDIO_DISCARDED_WHILE_MUTED chunks=$discardedChunks")
+                    discardedChunks = 0L
+                    wasMutedLastChunk = false
+                }
+
+                // ── VAD inference (only when not muted) ───────────────────
                 val prob = try {
                     vadInstance.process(chunk)
                 } catch (e: Exception) {
@@ -190,7 +257,7 @@ class ContinuousMicrophonePipeline(
                     Log.v(TAG, "VAD_SPEECH_CANDIDATE probability=${"%.3f".format(prob)}")
                 }
 
-                // ── Segmenter ─────────────────────────────────────────────
+                // ── Segmenter (only when not muted) ───────────────────────
                 val events = segmenterInstance.processChunk(chunk, prob)
                 for (event in events) {
                     handleSegmenterEvent(event, segmenterInstance, vadInstance)
@@ -270,7 +337,7 @@ class ContinuousMicrophonePipeline(
                 if (generationId != generation) {
                     Log.d(
                         TAG,
-                        "STT_TRANSCRIPT_DISCARDED reason=stale_generation " +
+                        "STT_RESULT_DISCARDED_STALE " +
                         "captured=$generation current=$generationId",
                     )
                     return@onSuccess

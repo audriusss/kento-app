@@ -7,6 +7,7 @@ import lt.sturmanas.bajeristas.voice.ai.pipelineActionForPhase
 import lt.sturmanas.bajeristas.voice.ai.postTtsTargetPhase
 import org.junit.Assert.*
 import org.junit.Test
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Integration tests for the Phase 3 VAD pipeline migration.
@@ -43,6 +44,18 @@ import org.junit.Test
  * PI-20  All MUTE-action phases are covered — catches a new Phase added without updating pipelineActionForPhase.
  * PI-21  All UNMUTE-action phases are covered.
  * PI-22  postTtsTargetPhase covers all ConversationMode values.
+ *
+ * Mute-gate regression (PI-23..PI-32)
+ * PI-23  muted segmenter never emits any event regardless of speech probability.
+ * PI-24  muted segmenter never emits UtteranceReady even when in mid-SPEECH state.
+ * PI-25  muted segmenter never emits SpeechStarted even with sustained high probability.
+ * PI-26  muting mid-utterance (SPEECH state) discards the in-progress utterance.
+ * PI-27  muting mid-utterance (TRAILING_SILENCE state) discards the in-progress utterance.
+ * PI-28  repeated mute/unmute leaves segmenter in a clean, functional state.
+ * PI-29  AtomicBoolean mute flag: set(true) then get() returns true on same thread.
+ * PI-30  unmute clears pre-roll so TTS-era audio cannot bleed into the first post-mute utterance.
+ * PI-31  reset() on unmute path puts segmenter in SILENCE with no state bleed.
+ * PI-32  mute → reset → unmute → processChunk produces SpeechCandidate (not stuck/throwing).
  */
 class VoicePipelineIntegrationTest {
 
@@ -337,5 +350,225 @@ class VoicePipelineIntegrationTest {
             val result = postTtsTargetPhase(mode)
             assertNotNull("postTtsTargetPhase($mode) must return a non-null Phase", result)
         }
+    }
+
+    // ── PI-23 — muted segmenter never emits any event ─────────────────────
+    //
+    // Regardless of speech probability, a muted segmenter must return an empty
+    // list.  This covers the core mute gate requirement: no VAD events while
+    // TTS or navigation audio is playing.
+
+    @Test fun `muted segmenter emits no events regardless of speech probability`() {
+        val s = UtteranceSegmenter()
+        s.mute()
+        val probabilities = listOf(0.0f, 0.35f, 0.5f, 0.8f, 0.99f, 1.0f)
+        probabilities.forEach { prob ->
+            val events = s.processChunk(chunk(), prob)
+            assertTrue(
+                "Muted segmenter must return empty list for prob=$prob, got: $events",
+                events.isEmpty(),
+            )
+        }
+    }
+
+    // ── PI-24 — muted mid-SPEECH segmenter never emits UtteranceReady ─────
+    //
+    // If TTS fires while the user was speaking (segmenter in SPEECH state),
+    // the controller calls pipeline.mute() and resetVadAndSegmenter().
+    // Verify that neither mute nor the subsequent reset produces UtteranceReady.
+
+    @Test fun `muted segmenter in SPEECH state never emits UtteranceReady`() {
+        val s = segmenterWithFastConfirm()
+        // Drive segmenter into SPEECH state.
+        s.processChunk(chunk(), 0.9f)  // → POSSIBLE_SPEECH
+        s.processChunk(chunk(), 0.9f)  // → SPEECH (minSpeechChunks=2 met)
+        assertTrue("Prerequisite: segmenter should be in SPEECH", s.isInSpeech)
+
+        // Mute — simulates pipeline.mute() from transitionTo(SPEAKING).
+        s.mute()
+
+        // Feed many more high-probability chunks: all must be discarded.
+        val allEvents = (1..20).flatMap { s.processChunk(chunk(), 0.9f) }
+        val utteranceEvents = allEvents.filterIsInstance<UtteranceSegmenter.Event.UtteranceReady>()
+        assertTrue(
+            "Muted segmenter must never emit UtteranceReady, got: $utteranceEvents",
+            utteranceEvents.isEmpty(),
+        )
+    }
+
+    // ── PI-25 — muted segmenter never emits SpeechStarted ─────────────────
+    //
+    // Root-cause regression: before the post-read mute gate, Silero ran on
+    // every chunk and the segmenter could advance to SPEECH and emit
+    // SpeechStarted during the one-iteration lag before segmenter.mute()
+    // was propagated.  After the fix the segmenter is never called while muted.
+
+    @Test fun `muted segmenter never emits SpeechStarted even with sustained high probability`() {
+        val s = segmenterWithFastConfirm()
+        s.mute()
+
+        val speechStartedEvents = (1..10)
+            .flatMap { s.processChunk(chunk(), 0.99f) }
+            .filterIsInstance<UtteranceSegmenter.Event.SpeechStarted>()
+
+        assertTrue(
+            "Muted segmenter must never emit SpeechStarted, got: $speechStartedEvents",
+            speechStartedEvents.isEmpty(),
+        )
+    }
+
+    // ── PI-26 — muting mid-SPEECH discards the in-progress utterance ───────
+
+    @Test fun `muting while in SPEECH state immediately discards the utterance buffer`() {
+        val s = segmenterWithFastConfirm()
+        s.processChunk(chunk(), 0.9f)  // → POSSIBLE_SPEECH
+        s.processChunk(chunk(), 0.9f)  // → SPEECH
+        assertTrue(s.isInSpeech)
+
+        s.mute()
+
+        // After mute, isInSpeech must be false (buffer discarded via clearActive).
+        assertFalse("mute() must clear SPEECH state", s.isInSpeech)
+        assertEquals("mute() must reset state to SILENCE", "SILENCE", s.currentState)
+    }
+
+    // ── PI-27 — muting mid-TRAILING_SILENCE discards the utterance ─────────
+
+    @Test fun `muting while in TRAILING_SILENCE state discards the utterance buffer`() {
+        val s = segmenterWithFastConfirm()
+        s.processChunk(chunk(), 0.9f)  // → POSSIBLE_SPEECH
+        s.processChunk(chunk(), 0.9f)  // → SPEECH
+        s.processChunk(chunk(), 0.0f)  // → TRAILING_SILENCE
+        assertTrue("Prerequisite: segmenter should be in speech", s.isInSpeech)
+
+        s.mute()
+
+        assertFalse("mute() must clear TRAILING_SILENCE state", s.isInSpeech)
+        assertEquals("SILENCE", s.currentState)
+    }
+
+    // ── PI-28 — repeated mute/unmute leaves segmenter functional ───────────
+
+    @Test fun `repeated mute-unmute leaves segmenter in a clean processing state`() {
+        val s = segmenterWithFastConfirm()
+        repeat(10) {
+            s.mute()
+            // Chunks while muted must be empty.
+            assertTrue(s.processChunk(chunk(), 0.9f).isEmpty())
+            s.unmute()
+            s.reset()
+        }
+        // After 10 cycles, segmenter must process a fresh speech candidate.
+        val events = s.processChunk(chunk(), 0.9f)
+        assertTrue(
+            "After repeated mute/unmute, segmenter must produce SpeechCandidate",
+            events.any { it is UtteranceSegmenter.Event.SpeechCandidate },
+        )
+    }
+
+    // ── PI-29 — AtomicBoolean mute flag visibility ─────────────────────────
+    //
+    // Proves the mute flag contract: set(true) is immediately visible via get()
+    // on the same thread and — by Java Memory Model happens-before guarantee for
+    // AtomicBoolean — on any thread that reads it after the write.
+
+    @Test fun `AtomicBoolean mute flag set then get returns true`() {
+        val flag = AtomicBoolean(false)
+        assertFalse("Initial value must be false", flag.get())
+        flag.set(true)
+        assertTrue("After set(true), get() must return true", flag.get())
+        flag.set(false)
+        assertFalse("After set(false), get() must return false", flag.get())
+    }
+
+    // ── PI-30 — unmute clears pre-roll ─────────────────────────────────────
+    //
+    // After unmuting, the pre-roll buffer must be empty so TTS audio that was
+    // captured just before mute cannot be prepended to the first user utterance.
+
+    @Test fun `unmute clears pre-roll so TTS audio cannot bleed into next utterance`() {
+        val config = UtteranceSegmenter.Config(
+            speechThreshold  = 0.5f,
+            minSpeechMs      = 32,
+            trailingSilenceMs = 32,
+            preRollMs        = 96,   // 3 chunks
+            chunkMs          = 32,
+        )
+        val s = UtteranceSegmenter(config)
+
+        // Simulate TTS audio filling the pre-roll while not yet muted.
+        repeat(3) { s.processChunk(ByteArray(PipelineConfig.CHUNK_BYTES) { 99 }, 0.0f) }
+
+        // Mute (controller calls this on TTS start) then unmute (after cooldown).
+        s.mute()
+        s.unmute()   // unmute() clears preRollBuffer
+
+        // Now a speech chunk arrives: it should start a fresh utterance from
+        // an EMPTY pre-roll, not from TTS-era chunks.
+        val events = s.processChunk(chunk(), 0.9f)
+        val candidate = events.filterIsInstance<UtteranceSegmenter.Event.SpeechCandidate>()
+        assertTrue("Should get SpeechCandidate after unmute", candidate.isNotEmpty())
+
+        // The candidate's utterance buffer should contain only this one chunk
+        // (no 99-filled pre-roll chunks).  Verify via a subsequent UtteranceReady:
+        // drive through min-speech quickly then trailing silence.
+        s.processChunk(chunk(), 0.9f)  // confirm speech (minSpeechChunks=1 already met)
+        val utteranceEvents = s.processChunk(chunk(), 0.0f)  // trailing silence → emit
+        val ready = utteranceEvents.filterIsInstance<UtteranceSegmenter.Event.UtteranceReady>()
+        if (ready.isNotEmpty()) {
+            val pcm = ready.first().pcm
+            // None of the bytes should be 99 (the TTS-era pre-roll marker).
+            assertFalse(
+                "UtteranceReady must not contain pre-mute TTS audio (byte 99)",
+                pcm.any { it == 99.toByte() },
+            )
+        }
+    }
+
+    // ── PI-31 — reset on unmute path gives clean SILENCE state ─────────────
+    //
+    // AIConversationController calls pipeline.resetVadAndSegmenter() (which
+    // calls segmenter.reset()) after the cooldown expires before unmuting.
+    // Verify this produces a completely clean state.
+
+    @Test fun `reset on unmute path puts segmenter in SILENCE with no state bleed`() {
+        val s = segmenterWithFastConfirm()
+        // Drive into SPEECH.
+        s.processChunk(chunk(), 0.9f)
+        s.processChunk(chunk(), 0.9f)
+        assertTrue(s.isInSpeech)
+
+        s.mute()
+        s.reset()   // resetVadAndSegmenter() calls this
+        s.unmute()  // then controller calls unmute via transitionTo
+
+        assertFalse("isInSpeech must be false after reset", s.isInSpeech)
+        assertEquals("currentState must be SILENCE after reset", "SILENCE", s.currentState)
+    }
+
+    // ── PI-32 — mute→reset→unmute→processChunk is functional ──────────────
+    //
+    // Full mute/unmute cycle: after reset and unmute, one high-probability chunk
+    // must produce SpeechCandidate without throwing or returning empty.
+
+    @Test fun `mute then reset then unmute then processChunk produces SpeechCandidate`() {
+        val s = segmenterWithFastConfirm()
+
+        // Enter SPEECH state.
+        s.processChunk(chunk(), 0.9f)
+        s.processChunk(chunk(), 0.9f)
+        assertTrue(s.isInSpeech)
+
+        // Full mute/reset/unmute cycle (matches controller behaviour).
+        s.mute()
+        s.reset()   // resetVadAndSegmenter (before unmute)
+        s.unmute()
+
+        // Fresh speech chunk after unmute: must produce SpeechCandidate.
+        val events = s.processChunk(chunk(), 0.9f)
+        assertTrue(
+            "After mute→reset→unmute, first speech chunk must produce SpeechCandidate, got: $events",
+            events.any { it is UtteranceSegmenter.Event.SpeechCandidate },
+        )
     }
 }

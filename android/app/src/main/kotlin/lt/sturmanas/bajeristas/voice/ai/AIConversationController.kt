@@ -401,6 +401,11 @@ class AIConversationController(
         Log.i(TAG, "CONV_NAV_PAUSE previousPhase=$phase depth=$depth id=$utteranceId")
 
         if (depth == 1) {
+            // Safe mute order for navigation TTS (mirrors AI TTS order):
+            // 1. Log intent
+            // 2. transitionTo → pipeline.mute() + increments generationId
+            // 3. resetVadAndSegmenter() — clear Silero/segmenter state
+            Log.i(TAG, "MIC_PIPELINE_MUTED reason=NAVIGATION")
             prePausedPhase = phase
             transitionTo(Phase.PAUSED_BY_NAVIGATION)  // calls pipeline.mute()
             // Reset VAD state at navigation start so any audio captured just
@@ -473,9 +478,12 @@ class AIConversationController(
     fun speak(text: String) {
         if (!isTtsReady || destroyed) return
 
-        // Mute mic and reset VAD before TTS begins.
-        // transitionTo(SPEAKING) below calls pipeline.mute(); resetVadAndSegmenter()
-        // clears any in-flight utterance data so echo cannot contaminate the next listen.
+        // Safe mute order for AI TTS:
+        // 1. Log intent (reason visible in Logcat alongside pipeline's generation log)
+        // 2. transitionTo(SPEAKING) → pipeline.mute() + increments generationId
+        // 3. resetVadAndSegmenter() — clears Silero LSTM and segmenter state
+        // 4. Start TTS playback
+        Log.i(TAG, "MIC_PIPELINE_MUTED reason=AI_TTS")
         transitionTo(Phase.SPEAKING)
         pipeline.resetVadAndSegmenter()
 
@@ -526,6 +534,7 @@ class AIConversationController(
 
         if (reason != "CANCELLED_BY_NAVIGATION") {
             // Wait for speaker echo to decay before unmuting the mic.
+            Log.i(TAG, "MIC_PIPELINE_UNMUTE_SCHEDULED cooldownMs=${PipelineConfig.POST_TTS_COOLDOWN_MS}")
             handler.postDelayed(postTtsCooldownRunnable, PipelineConfig.POST_TTS_COOLDOWN_MS)
         }
         // CANCELLED_BY_NAVIGATION: the nav path re-evaluates phase independently.
