@@ -1,0 +1,243 @@
+Investigate and fix microphone/VAD behaviour during AI TTS and navigation TTS.
+
+CURRENT DEVICE EVIDENCE
+
+The new production pipeline works end-to-end on the Xiaomi device:
+
+AudioRecord
+→ Silero VAD
+→ OpenAI transcription
+→ AIConversationController
+→ KentasChat
+→ AI TTS
+
+A real Lithuanian utterance was transcribed correctly:
+
+"Kiek laiko važiuosim?"
+
+However, the physical-device Logcat shows VAD activity while AI TTS is speaking.
+
+Relevant sequence:
+
+AIController  CONV_STATE from=THINKING to=SPEAKING
+SileroVad     VAD_STATE_RESET
+MicPipeline   MIC_VAD_SEGMENTER_RESET
+AIController  AI_TTS_REQUESTED
+AIController  AI_TTS_ON_START
+
+Then, while TTS is still active:
+
+MicPipeline   VAD_SPEECH_CANDIDATE probability=...
+MicPipeline   VAD_SPEECH_STARTED
+
+GOAL
+
+Determine whether this is:
+
+A. only harmless Silero inference/logging while the segmenter is muted, with no utterance emission and no transcription upload,
+
+or
+
+B. a real mute-gate bug that allows our own TTS/navigation audio to reach segmentation or transcription.
+
+Do not guess. Inspect the actual code path and prove the behaviour.
+
+REQUIRED AUDIT
+
+1. Trace the exact mute flow
+
+Inspect:
+
+- AIConversationController.transitionTo(Phase.SPEAKING)
+- AIConversationController.speak()
+- AI TTS onStart/onDone/onError/onStop
+- pipeline.mute()
+- pipeline.resetVadAndSegmenter()
+- ContinuousMicrophonePipeline.runPipeline()
+- muteRequested handling
+- UtteranceSegmenter.mute()
+- UtteranceSegmenter.process()
+- transcription submission path
+- generation token handling
+
+Explain the exact order and identify where VAD inference and VAD logs occur relative to the mute gate.
+
+2. Verify the safety invariant
+
+While AI TTS or navigation TTS is active, all of the following must be impossible:
+
+- VAD_SPEECH_STARTED being treated as a real utterance start
+- utterance PCM accumulating
+- VAD_SPEECH_ENDED emitting an utterance
+- STT_UPLOAD_STARTED
+- STT_TRANSCRIPT_DELIVERED
+- transcript reaching AIConversationController
+
+AudioRecord may remain alive, but self-audio must never reach transcription.
+
+3. Preferred behaviour
+
+Keep AudioRecord alive continuously.
+
+Do not stop and recreate AudioRecord during TTS.
+
+When muted:
+
+- continue draining AudioRecord so buffers do not block
+- do not run Silero inference unless there is a strong reason to do so
+- do not produce VAD candidate/start/end logs
+- do not accumulate pre-roll
+- do not accumulate utterance PCM
+- do not submit transcription
+- reset Silero and segmenter state when mute begins
+- invalidate in-flight transcripts using the existing generation token
+
+On unmute:
+
+- reset Silero and segmenter again
+- wait for the configured cooldown to finish
+- then resume VAD processing from a clean state
+
+4. Fix the pipeline loop if needed
+
+The preferred loop structure is conceptually:
+
+read AudioRecord chunk continuously
+
+if muted:
+    discard chunk
+    skip Silero inference
+    skip VAD logs
+    skip segmenter processing
+    continue
+
+else:
+    run Silero inference
+    log useful VAD diagnostics
+    process segmenter result
+    submit completed utterance
+
+Do not busy-loop.
+Do not stop reading AudioRecord while muted.
+
+5. Thread-safety
+
+Ensure mute state visibility across threads is safe.
+
+If muteRequested is currently a plain Boolean accessed from multiple threads, replace it with an appropriate thread-safe mechanism such as AtomicBoolean or another clearly safe design.
+
+Ensure transition into mute takes effect promptly even if the capture loop is already processing a chunk.
+
+6. AI TTS ordering
+
+The exact safe order before speaking must be:
+
+- invalidate previous generation
+- request pipeline mute
+- reset Silero and segmenter
+- start TTS
+
+After TTS terminal callback:
+
+- remain muted
+- wait POST_TTS_COOLDOWN_MS
+- verify no navigation blocker and no SPEAKING/THINKING blocker
+- reset Silero and segmenter again
+- unmute
+
+Confirm that duplicate AI_TTS_ON_START callbacks cannot accidentally alter this flow.
+
+7. Navigation TTS ordering
+
+Apply the same safety invariant to navigation:
+
+on first active navigation utterance:
+- invalidate generation
+- mute
+- reset
+
+while any active navigation utterance remains:
+- stay muted
+
+after the final navigation utterance:
+- wait configured cooldown
+- re-check blockers
+- reset
+- unmute only when safe
+
+Preserve activeNavUtterances logic.
+
+8. Logging improvements
+
+Add clear logs that make physical testing unambiguous:
+
+MIC_PIPELINE_MUTED reason=AI_TTS generation=...
+MIC_PIPELINE_MUTED reason=NAVIGATION generation=...
+MIC_AUDIO_DISCARDED_WHILE_MUTED chunks=...
+MIC_PIPELINE_UNMUTE_SCHEDULED cooldownMs=...
+MIC_PIPELINE_UNMUTED generation=...
+STT_RESULT_DISCARDED_STALE generation=...
+MIC_SELF_AUDIO_BLOCKED
+
+Do not log every discarded chunk. Aggregate or rate-limit muted-chunk logging.
+
+When muted, VAD_SPEECH_CANDIDATE, VAD_SPEECH_STARTED, and VAD_SPEECH_ENDED should not appear.
+
+9. Regression tests
+
+Add tests for:
+
+- muted chunk never enters Silero processing
+- muted chunk never enters segmenter processing
+- muted state never emits utterance
+- muted state never starts transcription
+- AI TTS mute invalidates an in-flight transcript
+- navigation mute invalidates an in-flight transcript
+- cooldown keeps pipeline muted
+- unmute resets VAD/segmenter before processing fresh audio
+- duplicate TTS onStart does not create inconsistent state
+- repeated mute/unmute is safe
+- mute state is visible across capture and controller threads
+
+10. Scope constraints
+
+Do not redesign:
+
+- KentasChat
+- transcript semantic buffering
+- conversation modes
+- navigation engine
+- TTS sentence handling
+
+Do not stop AudioRecord as the normal mute mechanism.
+
+Only fix and verify the self-recognition protection.
+
+11. Build and Git
+
+Run all available tests.
+
+If Android SDK compilation is available, run:
+
+./gradlew :app:compileDebugKotlin
+./gradlew :app:testDebugUnitTest
+
+Then commit and push to origin/main.
+
+Use a clear commit message such as:
+
+Prevent VAD processing during TTS mute
+
+FINAL REPORT
+
+Return:
+
+1. Root cause.
+2. Whether the old logs represented harmless inference or a real safety bug.
+3. Exact files changed.
+4. Exact mute/unmute flow after the fix.
+5. Tests added and results.
+6. Build result.
+7. Commit hash.
+8. Push result.
+9. Exact Logcat sequence expected during the next Xiaomi test.
