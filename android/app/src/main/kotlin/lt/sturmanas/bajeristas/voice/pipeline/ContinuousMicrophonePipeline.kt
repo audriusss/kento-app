@@ -7,6 +7,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
@@ -166,7 +167,7 @@ class ContinuousMicrophonePipeline(
         var lastMuteState = false
 
         try {
-            while (isActive && running.get()) {
+            while (currentCoroutineContext().isActive && running.get()) {
                 // ── Mute gate ─────────────────────────────────────────────
                 val nowMuted = muteRequested
                 if (nowMuted != lastMuteState) {
