@@ -1,0 +1,114 @@
+We want to redesign the voice input system of the Android app "Šturmanas Bajeristas" into a modern always-listening architecture suitable for driving.
+
+Current state:
+
+- Google Navigation SDK is working.
+- Navigation guidance works.
+- AI conversation works.
+- TTS works.
+- Navigation ↔ AI pause/resume logic already works.
+- ConversationEngine already processes final transcript text correctly.
+- The current SpeechRecognizer implementation is unreliable on Xiaomi devices:
+  - many ERROR_NO_MATCH (code 7)
+  - repeated startListening() sessions
+  - audible system beeps
+  - user often has to repeat commands
+
+The goal is NOT to improve SpeechRecognizer.
+
+The goal is to replace it with a modern continuous microphone pipeline.
+
+Target architecture:
+
+AudioRecord
+→ continuous PCM audio
+→ lightweight local Voice Activity Detection (VAD)
+→ detect speech start
+→ detect speech end
+→ create utterance buffer
+→ send only the utterance to Speech-to-Text
+→ inject the final transcript into the existing ConversationEngine
+
+Requirements:
+
+- continuous listening
+- no Android recognition beeps
+- minimal latency
+- excellent Lithuanian recognition
+- suitable while driving
+- microphone pauses automatically while our own TTS or navigation is speaking
+- microphone resumes automatically afterwards
+- assistant must never recognize its own TTS
+- preserve all existing ConversationEngine logic
+- preserve navigation queue logic
+- preserve AI state machine
+- preserve semantic completion logic
+- preserve navigation guidance
+- do not perform unnecessary refactoring
+
+Phase 1 (AUDIT ONLY)
+
+Inspect the current project and explain:
+
+1. Current voice architecture.
+2. Current transcript entry point.
+3. Current SpeechRecognizer lifecycle.
+4. Current TTS lifecycle.
+5. Current navigation speaking lifecycle.
+6. Current audio focus handling.
+7. Current state machine.
+8. Which parts can remain unchanged.
+
+Then compare the following STT approaches specifically for THIS app:
+
+- OpenAI Speech-to-Text API
+- Google Cloud Speech-to-Text
+- Gemini audio transcription
+- Android on-device recognition (if suitable)
+- Whisper (local or server)
+
+Compare:
+
+- Lithuanian quality
+- latency
+- Android implementation complexity
+- cost
+- reliability while driving
+- offline possibilities
+- long-term maintainability
+
+Then recommend ONE solution only.
+
+Next recommend a VAD implementation:
+
+- Android compatible
+- lightweight
+- actively maintained
+- low CPU usage
+- suitable for continuous listening
+- configurable silence timeout
+- configurable speech threshold
+
+Then identify:
+
+- required permissions
+- Gradle dependencies
+- affected Kotlin classes
+- new classes that should be introduced
+- classes that should remain untouched
+
+Finally provide:
+
+1. Recommended architecture diagram.
+2. Migration phases.
+3. Rollback plan.
+4. Estimated implementation complexity.
+5. Expected advantages compared with SpeechRecognizer.
+
+IMPORTANT:
+
+Do NOT implement anything yet.
+
+First perform a full architecture audit and produce a detailed technical plan.
+
+Only after the plan is reviewed will implementation begin.
