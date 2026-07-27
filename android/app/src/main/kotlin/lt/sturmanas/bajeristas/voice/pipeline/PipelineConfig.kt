@@ -65,6 +65,16 @@ object PipelineConfig {
     // ── TTS self-recognition protection ───────────────────────────────────
 
     /**
+     * Milliseconds to wait after the first transcript arrives before giving up
+     * and sending whatever is buffered to the AI.
+     *
+     * Reduced from 2 500 ms — most complete Lithuanian utterances are detected
+     * immediately by semantic rules; this timeout only fires for genuinely
+     * ambiguous fragments.
+     */
+    const val CONTINUATION_TIMEOUT_MS: Long = 1200L
+
+    /**
      * Milliseconds to wait after TTS finishes before unmuting the mic.
      *
      * The cooldown allows speaker echo to decay so the VAD does not trigger

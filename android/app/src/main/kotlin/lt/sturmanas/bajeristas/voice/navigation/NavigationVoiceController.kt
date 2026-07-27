@@ -4,16 +4,29 @@ import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
-import android.os.Build
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
+import lt.sturmanas.bajeristas.navigation.ManeuverType
 import lt.sturmanas.bajeristas.navigation.NavigationPhase
 import lt.sturmanas.bajeristas.navigation.NavigationState
 import java.util.Locale
 
 /**
  * Manages spoken navigation instructions using Android TextToSpeech.
+ *
+ * ## Maneuver deduplication
+ * Each maneuver is announced at most once per [SpeechStage].  Stage tracking is
+ * reset when the maneuver identity changes or a reroute is detected.
+ *
+ * ## STRAIGHT suppression
+ * STRAIGHT maneuvers are not spoken at FAR or MEDIUM stages — they clutter
+ * audio and add no value.  STRAIGHT at IMMEDIATE is a short confirmation spoken
+ * only once per maneuver identity so the driver knows the current leg is straight.
+ *
+ * ## Rerouting
+ * When [NavigationState.isRerouting] is true, "Perskaičiuoju maršrutą." is spoken
+ * once.  Stage tracking is cleared so the new route triggers fresh announcements.
  */
 class NavigationVoiceController(private val context: Context) : TextToSpeech.OnInitListener {
 
@@ -34,13 +47,11 @@ class NavigationVoiceController(private val context: Context) : TextToSpeech.OnI
     private val phraseFormatter = KentasNavigationPhraseFormatter()
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
-    // Audio attributes for navigation guidance
     private val navAudioAttributes = AudioAttributes.Builder()
         .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
         .build()
 
-    // Audio focus request
     private val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
         .setAudioAttributes(navAudioAttributes)
         .setAcceptsDelayedFocusGain(true)
@@ -58,141 +69,238 @@ class NavigationVoiceController(private val context: Context) : TextToSpeech.OnI
         val vol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
         val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
         val isMuted = audioManager.isStreamMute(AudioManager.STREAM_MUSIC)
-        
         Log.i(TAG, "AUDIO_STREAM_CHECK: stream=MUSIC volume=$vol/$maxVol muted=$isMuted")
-        
-        // Force volume up for testing if it's too low
         if (vol < maxVol / 2) {
             Log.i(TAG, "AUDIO_VOLUME_BOOST: increasing volume from $vol to ${maxVol / 2}")
             audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, maxVol / 2, 0)
         }
     }
 
-    private fun requestFocus(): Boolean {
-        val res = audioManager.requestAudioFocus(focusRequest)
-        Log.d(TAG, "AUDIO_FOCUS_REQUEST_RESULT: $res")
-        return res == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
-    }
+    // ── Stage / maneuver tracking ──────────────────────────────────────────
 
-    // Tracking announced maneuvers: key -> Set of stages already spoken
-    private val announcedStages = mutableMapOf<String, MutableSet<KentasNavigationPhraseFormatter.SpeechStage>>()
+    /** Stages already spoken for each maneuver identity (maneuverId → Set<SpeechStage>). */
+    private val announcedStages =
+        mutableMapOf<String, MutableSet<KentasNavigationPhraseFormatter.SpeechStage>>()
+
     private var lastManeuverId = ""
     private var lastVariantIndex = 0
     private var latestDistance = Int.MAX_VALUE
 
+    /** True once the rerouting announcement has been spoken for the current reroute cycle. */
+    private var hasSpokenRerouting = false
+
     fun getLatestDistance(): Int = latestDistance
+
+    // ── Main entry point ──────────────────────────────────────────────────
 
     fun speak(state: NavigationState) {
         latestDistance = state.distanceToNextManeuverMeters
         val maneuver = state.maneuverType
         val dist = state.distanceToNextManeuverMeters
         val phase = state.phase
-        
-        Log.d(TAG, "NAV_REAL_VOICE_RECEIVED: maneuver=$maneuver dist=$dist phase=$phase ready=$isTtsReady nav=${state.isNavigating}")
-        
+
+        Log.d(
+            TAG,
+            "NAV_VOICE_STATE maneuver=$maneuver dist=$dist " +
+            "phase=$phase rerouting=${state.isRerouting} ttsReady=$isTtsReady",
+        )
+
         if (!isTtsReady) {
-            Log.i(TAG, "NAV_VOICE_TTS_NOT_READY: NAV_VOICE_FIRST_MANEUVER_QUEUED")
             pendingState = state
             return
         }
-        
-        if (!state.isNavigating || phase != NavigationPhase.NAVIGATING) {
-            if (phase == NavigationPhase.ARRIVED) {
-                handleArrival(state)
+
+        // ── Handle rerouting ──────────────────────────────────────────────
+        if (state.isRerouting) {
+            if (!hasSpokenRerouting) {
+                Log.i(TAG, "NAV_VOICE_REROUTING")
+                hasSpokenRerouting = true
+                // Clear all tracking so fresh announcements fire after the new route loads.
+                announcedStages.clear()
+                lastManeuverId = ""
+                speakText(
+                    "Perskaičiuoju maršrutą.",
+                    KentasNavigationPhraseFormatter.SpeechStage.IMMEDIATE,
+                )
             }
             return
         }
+        // Route re-established — allow rerouting phrase again next time.
+        if (hasSpokenRerouting) {
+            Log.i(TAG, "NAV_VOICE_REROUTE_COMPLETE")
+            hasSpokenRerouting = false
+        }
 
-        // ── FORCE FIRST SPEECH ───────────────────────────────────────
+        // ── Arrival ───────────────────────────────────────────────────────
+        if (phase == NavigationPhase.ARRIVED || maneuver == ManeuverType.ARRIVE) {
+            handleArrival(state)
+            return
+        }
+
+        // ── Guard: must be actively navigating ───────────────────────────
+        if (!state.isNavigating || phase != NavigationPhase.NAVIGATING) return
+
+        // ── Guard: skip NONE / UNKNOWN maneuvers ─────────────────────────
+        if (maneuver == ManeuverType.NONE || maneuver == ManeuverType.UNKNOWN) return
+
+        // ── Guard: invalid distance ───────────────────────────────────────
+        if (dist == Int.MAX_VALUE) return
+
+        // ── First maneuver of the session ─────────────────────────────────
         if (lastManeuverId.isEmpty()) {
-            Log.i(TAG, "NAV_VOICE_FIRST_MANEUVER_FORCE_START")
-            val maneuverId = "${maneuver}_${state.nextRoadName}"
+            val maneuverId = maneuverKey(state)
             lastManeuverId = maneuverId
-            val phrase = phraseFormatter.format(maneuver, dist, KentasNavigationPhraseFormatter.SpeechStage.IMMEDIATE, lastVariantIndex++)
-            Log.i(TAG, "NAV_VOICE_FORMATTED phrase='$phrase' (forced)")
-            speakText(phrase, KentasNavigationPhraseFormatter.SpeechStage.IMMEDIATE)
-            announcedStages.getOrPut(maneuverId) { mutableSetOf() }.add(KentasNavigationPhraseFormatter.SpeechStage.IMMEDIATE)
+
+            // Skip zero / negative distance and STRAIGHT on first announcement.
+            if (dist <= 0) return
+            if (maneuver == ManeuverType.STRAIGHT) return
+
+            val firstStage = stageForDistance(dist)
+                ?: KentasNavigationPhraseFormatter.SpeechStage.FAR  // default for > 1 000 m
+
+            val phrase = phraseFormatter.format(
+                maneuver     = maneuver,
+                distanceMeters = dist,
+                stage        = firstStage,
+                variantIndex = lastVariantIndex++,
+                exitNumber   = state.exitNumber,
+            )
+            if (phrase.isBlank()) return
+
+            Log.i(TAG, "NAV_VOICE_FIRST_MANEUVER stage=$firstStage phrase='$phrase'")
+            announcedStages.getOrPut(maneuverId) { mutableSetOf() }.add(firstStage)
+            speakText(phrase, firstStage)
             return
         }
 
-        if (dist == Int.MAX_VALUE) {
+        // ── Guard: invalid / zero distance for advance warnings ───────────
+        if (dist <= 0) {
+            Log.d(TAG, "NAV_VOICE_SKIPPED reason=zero_distance maneuver=$maneuver")
             return
         }
 
-        val stage = determineStage(dist)
-        if (stage == null) return
+        val stage = stageForDistance(dist) ?: return  // > 1 000 m: no announcement needed
 
-        val maneuverId = "${maneuver}_${state.nextRoadName}"
+        // ── STRAIGHT suppression ─────────────────────────────────────────
+        // Never announce STRAIGHT at FAR or MEDIUM — it adds noise.
+        // STRAIGHT at IMMEDIATE is allowed once per maneuver identity.
+        if (maneuver == ManeuverType.STRAIGHT &&
+            stage != KentasNavigationPhraseFormatter.SpeechStage.IMMEDIATE
+        ) {
+            Log.v(TAG, "NAV_VOICE_SKIPPED reason=straight_not_immediate stage=$stage")
+            return
+        }
 
-        // Reset tracking if maneuver changed
+        val maneuverId = maneuverKey(state)
+
+        // ── Maneuver change → reset tracking ─────────────────────────────
         if (maneuverId != lastManeuverId) {
-            Log.i(TAG, "NAV_VOICE_ROUTE_RESET previous=$lastManeuverId current=$maneuverId")
+            Log.i(TAG, "NAV_VOICE_MANEUVER_CHANGED old=$lastManeuverId new=$maneuverId")
             lastManeuverId = maneuverId
             announcedStages.clear()
         }
 
+        // ── Deduplication: skip if this stage was already spoken ─────────
         val stages = announcedStages.getOrPut(maneuverId) { mutableSetOf() }
-        if (stage in stages) {
+        if (stage in stages) return
+
+        // ── Format and speak ─────────────────────────────────────────────
+        val phrase = phraseFormatter.format(
+            maneuver     = maneuver,
+            distanceMeters = dist,
+            stage        = stage,
+            variantIndex = lastVariantIndex++,
+            exitNumber   = state.exitNumber,
+        )
+        if (phrase.isBlank()) {
+            Log.d(TAG, "NAV_VOICE_SKIPPED reason=blank_phrase maneuver=$maneuver stage=$stage")
             return
         }
 
-        Log.i(TAG, "NAV_REAL_STAGE_SELECTED: $stage")
-        val phrase = phraseFormatter.format(
-            maneuver = maneuver,
-            distanceMeters = dist,
-            stage = stage,
-            variantIndex = lastVariantIndex++,
-            exitNumber = state.exitNumber
-        )
-        Log.i(TAG, "NAV_VOICE_FORMATTED phrase='$phrase'")
-
+        Log.i(TAG, "NAV_VOICE_ANNOUNCING stage=$stage phrase='$phrase' dist=$dist")
         stages.add(stage)
         speakText(phrase, stage)
     }
+
+    // ── Arrival ───────────────────────────────────────────────────────────
 
     private fun handleArrival(state: NavigationState) {
         val stages = announcedStages.getOrPut("ARRIVAL") { mutableSetOf() }
         if (KentasNavigationPhraseFormatter.SpeechStage.ARRIVED in stages) return
 
-        val phrase = phraseFormatter.format(state.maneuverType, 0, KentasNavigationPhraseFormatter.SpeechStage.ARRIVED, lastVariantIndex++)
-        Log.i(TAG, "NAV_VOICE_STAGE ARRIVED")
+        val phrase = phraseFormatter.format(
+            maneuver     = state.maneuverType,
+            distanceMeters = 0,
+            stage        = KentasNavigationPhraseFormatter.SpeechStage.ARRIVED,
+            variantIndex = lastVariantIndex++,
+        )
+        Log.i(TAG, "NAV_VOICE_ARRIVED phrase='$phrase'")
         stages.add(KentasNavigationPhraseFormatter.SpeechStage.ARRIVED)
         speakText(phrase, KentasNavigationPhraseFormatter.SpeechStage.ARRIVED)
     }
 
-    private fun determineStage(dist: Int): KentasNavigationPhraseFormatter.SpeechStage? {
-        return when {
+    // ── Helpers ───────────────────────────────────────────────────────────
+
+    /**
+     * Returns the [SpeechStage] for a given distance, or null when the distance
+     * is too large for an advance announcement (> 1 000 m).
+     *
+     * Returns null for dist <= 0 to prevent "važiuok tiesiai už nulio metrų".
+     */
+    private fun stageForDistance(dist: Int): KentasNavigationPhraseFormatter.SpeechStage? =
+        when {
+            dist <= 0   -> null
             dist <= 120 -> KentasNavigationPhraseFormatter.SpeechStage.IMMEDIATE
             dist <= 400 -> KentasNavigationPhraseFormatter.SpeechStage.MEDIUM
-            dist <= 1000 -> KentasNavigationPhraseFormatter.SpeechStage.FAR
-            else -> null
+            dist <= 1_000 -> KentasNavigationPhraseFormatter.SpeechStage.FAR
+            else        -> null
         }
+
+    /** Stable key that uniquely identifies the current maneuver leg. */
+    private fun maneuverKey(state: NavigationState): String =
+        "${state.maneuverType}_${state.nextRoadName}"
+
+    private fun requestFocus(): Boolean {
+        val res = audioManager.requestAudioFocus(focusRequest)
+        Log.d(TAG, "AUDIO_FOCUS_REQUESTED result=$res")
+        return res == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
     }
 
-    private fun speakText(text: String, stage: KentasNavigationPhraseFormatter.SpeechStage) {
-        val queueMode = if (stage == KentasNavigationPhraseFormatter.SpeechStage.IMMEDIATE) {
+    private fun speakText(
+        text: String,
+        stage: KentasNavigationPhraseFormatter.SpeechStage,
+    ) {
+        val queueMode = if (stage == KentasNavigationPhraseFormatter.SpeechStage.IMMEDIATE)
             TextToSpeech.QUEUE_FLUSH
-        } else {
+        else
             TextToSpeech.QUEUE_ADD
-        }
 
         requestFocus()
-        
+
         val utteranceId = "nav_${System.currentTimeMillis()}_${(0..999).random()}"
-        Log.i(TAG, "NAV_VOICE_SPEAK_QUEUED phrase='$text' mode=${if (queueMode == TextToSpeech.QUEUE_FLUSH) "FLUSH" else "ADD"} id=$utteranceId")
-        
-        // Notify engine BEFORE queuing to prevent flicker
+        Log.i(
+            TAG,
+            "NAV_VOICE_SPEAK id=$utteranceId mode=${if (queueMode == TextToSpeech.QUEUE_FLUSH) "FLUSH" else "ADD"}",
+        )
+
+        // Notify engine BEFORE queuing so the mic mute gate is up before audio starts.
         listener?.onNavigationSpeechStarted(utteranceId)
-        
+
         val res = tts?.speak(text, queueMode, null, utteranceId)
-        Log.i(TAG, "NAV_REAL_SPEAK_RESULT return=$res id=$utteranceId")
+        if (res != TextToSpeech.SUCCESS) {
+            Log.e(TAG, "NAV_VOICE_SPEAK_FAILED result=$res id=$utteranceId")
+            listener?.onNavigationSpeechFinished(utteranceId)
+        }
     }
+
+    // ── Lifecycle ─────────────────────────────────────────────────────────
 
     fun stop() {
         Log.i(TAG, "NAV_VOICE_STOPPED")
         tts?.stop()
         announcedStages.clear()
         lastManeuverId = ""
+        hasSpokenRerouting = false
     }
 
     fun release() {
@@ -205,15 +313,18 @@ class NavigationVoiceController(private val context: Context) : TextToSpeech.OnI
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
             tts?.setAudioAttributes(navAudioAttributes)
-            
+
             val locale = Locale("lt", "LT")
             val setLangResult = tts?.setLanguage(locale)
 
-            if (setLangResult == TextToSpeech.LANG_MISSING_DATA || setLangResult == TextToSpeech.LANG_NOT_SUPPORTED) {
-                Log.e(TAG, "NAV_VOICE_TTS_UNAVAILABLE: Lithuanian not supported")
+            if (setLangResult == TextToSpeech.LANG_MISSING_DATA ||
+                setLangResult == TextToSpeech.LANG_NOT_SUPPORTED
+            ) {
+                Log.e(TAG, "NAV_VOICE_TTS_LANG_UNAVAILABLE locale=lt_LT")
             } else {
                 isTtsReady = true
-                
+                Log.i(TAG, "NAV_VOICE_TTS_READY")
+
                 pendingState?.let {
                     speak(it)
                     pendingState = null
@@ -221,20 +332,22 @@ class NavigationVoiceController(private val context: Context) : TextToSpeech.OnI
 
                 tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(utteranceId: String?) {
-                        Log.i(TAG, "NAV_REAL_UTTERANCE_START id=$utteranceId")
-                        // Idempotent notify (already queued, but keeps state solid)
+                        Log.i(TAG, "NAV_UTTERANCE_STARTED id=$utteranceId")
                         utteranceId?.let { listener?.onNavigationSpeechStarted(it) }
                     }
+
                     override fun onDone(utteranceId: String?) {
-                        Log.i(TAG, "NAV_REAL_UTTERANCE_DONE id=$utteranceId")
+                        Log.i(TAG, "NAV_UTTERANCE_DONE id=$utteranceId")
                         utteranceId?.let { listener?.onNavigationSpeechFinished(it) }
                     }
+
                     override fun onError(utteranceId: String?) {
-                        Log.e(TAG, "NAV_REAL_UTTERANCE_ERROR id=$utteranceId")
+                        Log.e(TAG, "NAV_UTTERANCE_ERROR id=$utteranceId")
                         utteranceId?.let { listener?.onNavigationSpeechFinished(it) }
                     }
+
                     override fun onStop(utteranceId: String?, interrupted: Boolean) {
-                        Log.i(TAG, "NAV_REAL_UTTERANCE_STOP id=$utteranceId interrupted=$interrupted")
+                        Log.i(TAG, "NAV_UTTERANCE_STOPPED id=$utteranceId interrupted=$interrupted")
                         utteranceId?.let { listener?.onNavigationSpeechFinished(it) }
                     }
                 })

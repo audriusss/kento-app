@@ -292,6 +292,7 @@ class ContinuousMicrophonePipeline(
                     "VAD_SPEECH_ENDED durationMs=${event.durationMs} " +
                     "pcmBytes=${event.pcm.size}",
                 )
+                Log.i(TAG, "USER_SPEECH_ENDED speechDurationMs=${event.durationMs}")
 
                 // Reset VAD LSTM state between utterances.
                 vadProc.reset()

@@ -1,0 +1,422 @@
+We now have a stable production voice pipeline on the Xiaomi device:
+
+AudioRecord
+→ Silero VAD
+→ OpenAI STT
+→ AIConversationController
+→ Kentas
+→ TTS
+
+The microphone now understands quiet speech much better, no shouting is needed, and self-listening during TTS is fixed.
+
+Do not redesign or destabilize the working microphone/VAD/STT architecture.
+
+This task is a focused polish pass with four goals:
+
+1. Reduce perceived response delay.
+2. Restore Kentas as a strong Lithuanian “bachūras” personality.
+3. Improve Lithuanian navigation maneuver phrases.
+4. Keep the screen awake only during active navigation.
+
+--------------------------------------------------
+1. RESPONSE LATENCY
+--------------------------------------------------
+
+CURRENT EVIDENCE
+
+A real log sequence showed:
+
+STT_TRANSCRIPT_DELIVERED at 18:04:17.792
+CONV_SEMANTIC_COMPLETE result=INCOMPLETE_WAITING at 18:04:17.793
+CONV_SEMANTIC_COMPLETE result=COMPLETE reason=timeout at 18:04:20.294
+
+This adds about 2.5 seconds after STT has already delivered the transcript.
+
+The current experience feels too slow.
+
+AUDIT
+
+Inspect:
+
+- semantic completion logic
+- continuation timer
+- sentence completeness detection
+- VAD end-of-speech timing
+- STT latency
+- AI request latency
+- TTS startup latency
+
+Add timing logs for the full path:
+
+USER_SPEECH_ENDED
+STT_UPLOAD_STARTED
+STT_UPLOAD_COMPLETED
+SEMANTIC_WAIT_STARTED
+SEMANTIC_COMPLETE
+AI_REQUEST_STARTED
+AI_RESPONSE_RECEIVED
+AI_TTS_REQUESTED
+AI_TTS_ON_START
+
+Also log elapsed milliseconds between each stage.
+
+DESIRED BEHAVIOUR
+
+For clearly complete utterances such as:
+
+- “Kiek laiko važiuosim?”
+- “Kur čia pavalgyti?”
+- “Koks kitas posūkis?”
+- “Kiek liko kilometrų?”
+- “Papasakok bajerį.”
+
+send to AI immediately or after a very short debounce.
+
+Only wait for continuation when the utterance genuinely appears incomplete, for example:
+
+- “O jeigu mes…”
+- “Palauk, dar norėjau…”
+- “Kiek laiko…”
+- “Ir tada…”
+
+Reduce the continuation timeout from the current ~2500 ms to a conservative initial value around 1000–1200 ms.
+
+Do not reduce it so aggressively that normal Lithuanian sentences get split.
+
+Prefer semantic rules such as:
+
+- question mark or clear question structure → complete
+- sentence-ending punctuation → complete
+- imperative command → complete
+- sufficiently long standalone phrase → usually complete
+- conjunction or unfinished clause ending → wait
+- very short ambiguous fragment → wait
+
+Do not send duplicate AI requests.
+
+Add tests for:
+
+- complete question sends immediately
+- complete command sends immediately
+- incomplete clause waits
+- timeout sends incomplete buffered speech
+- second speech segment cancels and resets the old timer
+- no duplicate send after immediate completion plus timer callback
+
+--------------------------------------------------
+2. RESTORE KENTAS PERSONALITY
+--------------------------------------------------
+
+Kentas has become too neutral and has lost character.
+
+He should feel like a confident Lithuanian road buddy, not a sterile assistant.
+
+PERSONALITY TARGET
+
+Kentas is:
+
+- a Lithuanian “bachūras”
+- confident
+- quick-witted
+- street-smart
+- relaxed
+- slightly cheeky
+- occasionally uses dark humour
+- sounds like a real passenger sitting beside the driver
+- gives short and natural spoken answers
+- can tease the driver lightly
+- never introduces himself as an AI assistant
+- does not sound corporate, formal, therapeutic, or overly polite
+
+He should not become:
+
+- an aggressive idiot
+- a constant swear generator
+- insulting without context
+- vulgar in every sentence
+- excessively long-winded
+- a parody character
+- unsafe while the user is driving
+
+LANGUAGE STYLE
+
+Use natural spoken Lithuanian.
+
+Good tone examples:
+
+- “Nu ką, dar kokios penkios minutės ir būsim.”
+- “Važiuojam gerai, tik nepradėk dabar filosofuot prieš žiedą.”
+- “Ten pavalgyt galima, bet stebuklų nesitikėk.”
+- “Ramiai, maršrutas vietoj. Aš čia, nepabėgau.”
+- “Už dviejų kilometrų suksim dešinėn, tai dar gali kvėpuot.”
+- “Geras klausimas. Trumpai tariant…”
+
+Avoid artificial phrases like:
+
+- “Žinoma, mielai jums padėsiu.”
+- “Kaip dirbtinis intelektas…”
+- “Pateikiu išsamią informaciją.”
+- “Ar dar kuo nors galiu padėti?”
+
+RESPONSE LENGTH
+
+Default spoken response:
+
+- 1–3 short sentences
+- ideally under 35 words
+- longer only when the user clearly asks for an explanation
+
+For navigation-related questions, answer very briefly.
+
+SAFETY AND DRIVING CONTEXT
+
+Kentas must prioritise driving safety.
+
+During an upcoming maneuver:
+
+- avoid long answers
+- pause or shorten conversation
+- do not distract the driver
+- let navigation instruction take priority
+
+Do not change the current stop/resume voice architecture.
+
+Inspect the current system prompt and simplify conflicting rules that may be making the personality neutral.
+
+Keep one clear personality definition instead of many overlapping instructions.
+
+--------------------------------------------------
+3. IMPROVE NAVIGATION PHRASES
+--------------------------------------------------
+
+Current maneuver speech needs to sound more natural in Lithuanian.
+
+Audit the maneuver mapping and all generated navigation strings.
+
+Use conversational Lithuanian instead of literal SDK wording.
+
+PREFERRED PHRASES
+
+STRAIGHT:
+- “Važiuojam tiesiai.”
+- “Laikykis tiesiai.”
+- Do not announce STRAIGHT repeatedly every second.
+- Never speak meaningless “važiuok tiesiai už nulio metrų”.
+
+RIGHT TURN:
+Advance:
+- “Už 300 metrų suksim dešinėn.”
+Near:
+- “Tuoj suksim dešinėn.”
+Now:
+- “Dabar sukam dešinėn.”
+
+LEFT TURN:
+Advance:
+- “Už 300 metrų suksim kairėn.”
+Near:
+- “Tuoj suksim kairėn.”
+Now:
+- “Dabar sukam kairėn.”
+
+SLIGHT RIGHT:
+- “Laikykis dešiniau.”
+- “Švelniai dešinėn.”
+
+SLIGHT LEFT:
+- “Laikykis kairiau.”
+- “Švelniai kairėn.”
+
+U-TURN:
+- “Kai bus galima, apsisuk.”
+- “Dabar apsisuk.”
+
+ROUNDABOUT:
+- “Žiede imk pirmą išvažiavimą.”
+- “Žiede imk antrą išvažiavimą.”
+- “Žiede imk trečią išvažiavimą.”
+- Support natural ordinal forms.
+
+ARRIVAL:
+- “Atvažiavom. Tikslas dešinėje.”
+- “Atvažiavom. Tikslas kairėje.”
+- “Atvažiavom, tikslas priekyje.”
+
+REROUTING:
+- “Perskaičiuoju maršrutą.”
+- Do not repeat this continuously.
+- After reroute succeeds, return to normal instructions.
+
+DISTANCE FORMATTING
+
+Use natural Lithuanian formatting:
+
+- 50 m → “už penkiasdešimt metrų”
+- 100 m → “už šimto metrų”
+- 200 m → “už dviejų šimtų metrų”
+- 500 m → “už penkių šimtų metrų”
+- 1 km → “už kilometro”
+- 2 km → “už dviejų kilometrų”
+
+Avoid awkward raw numeric TTS where practical.
+
+MANEUVER TIMING
+
+Separate instruction stages:
+
+- advance warning
+- near warning
+- immediate maneuver
+
+Do not repeat the same stage for the same maneuver.
+
+Track the current maneuver identity and last spoken stage.
+
+Reset spoken-stage tracking when:
+
+- maneuver changes
+- reroute occurs
+- navigation restarts
+
+Ignore invalid values such as:
+
+- distance <= 0 for advance announcements
+- unknown maneuver
+- repeated STRAIGHT with no meaningful change
+
+NAVIGATION PRIORITY
+
+When a navigation instruction is due:
+
+- navigation TTS interrupts or pauses Kentas
+- microphone remains protected from self-audio
+- after navigation TTS and cooldown, conversation resumes safely
+
+Do not break the existing activeNavUtterances and mute logic.
+
+Add tests for:
+
+- no repeated identical maneuver speech
+- correct advance/near/now stages
+- zero-distance STRAIGHT is ignored
+- maneuver change resets stage state
+- roundabout ordinal text
+- arrival phrase
+- reroute phrase throttling
+- Kentas TTS yields to navigation TTS
+
+--------------------------------------------------
+4. KEEP SCREEN ON DURING NAVIGATION
+--------------------------------------------------
+
+The screen currently locks while navigation is active.
+
+Implement screen-awake behaviour using the simplest reliable Android approach.
+
+REQUIRED BEHAVIOUR
+
+Keep the screen on while active navigation is running.
+
+For example, when navigation phase becomes NAVIGATING:
+
+window.addFlags(
+    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+)
+
+When navigation ends, is cancelled, arrives, or returns to idle:
+
+window.clearFlags(
+    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+)
+
+Do not keep the screen awake permanently when the user is only on the home screen.
+
+Handle:
+
+- normal route start
+- route cancellation
+- arrival
+- Activity recreation
+- app foreground/background
+- navigation state restored after recreation
+
+Prefer a lifecycle-aware observer based on the real navigation state.
+
+Do not add wake locks unless FLAG_KEEP_SCREEN_ON is demonstrably insufficient.
+
+Add logs:
+
+SCREEN_KEEP_ON enabled reason=NAVIGATING
+SCREEN_KEEP_ON disabled reason=IDLE
+SCREEN_KEEP_ON disabled reason=ARRIVED
+SCREEN_KEEP_ON disabled reason=CANCELLED
+
+Avoid repeatedly applying the same flag every location update.
+
+--------------------------------------------------
+SCOPE CONSTRAINTS
+--------------------------------------------------
+
+Do not modify the core behaviour of:
+
+- AudioRecordSource
+- SileroVadProcessor
+- ContinuousMicrophonePipeline mute gate
+- OpenAI transcription upload
+- generation token stale-result protection
+- TTS self-audio protection
+
+Do not replace the working voice architecture.
+
+Do not perform a broad refactor.
+
+Make small, isolated changes.
+
+Recommended implementation order:
+
+1. Keep screen on.
+2. Reduce semantic continuation delay.
+3. Improve navigation phrase mapper and deduplication.
+4. Restore Kentas prompt/personality.
+
+Run tests after each section.
+
+--------------------------------------------------
+BUILD AND TEST
+--------------------------------------------------
+
+Run all available tests.
+
+If Android SDK is available:
+
+./gradlew :app:compileDebugKotlin
+./gradlew :app:testDebugUnitTest
+
+If Android SDK is unavailable, run all pure-JVM tests and clearly state what still requires Android Studio/device verification.
+
+Commit and push to origin/main.
+
+Suggested commit message:
+
+Polish Kentas latency navigation speech and screen wake
+
+--------------------------------------------------
+FINAL REPORT
+--------------------------------------------------
+
+Return:
+
+1. Exact root cause of the slow response.
+2. Old and new continuation timeout.
+3. Exact semantic rules used for immediate send versus waiting.
+4. The final Kentas system prompt or exact prompt section changed.
+5. Exact navigation phrase mapping and deduplication logic.
+6. Where FLAG_KEEP_SCREEN_ON is enabled and cleared.
+7. Files changed.
+8. Tests added and results.
+9. Build result.
+10. Commit hash.
+11. Push result.
+12. A short physical-device test checklist.
+
+Do not only describe proposed changes. Implement, test, commit, and push them.

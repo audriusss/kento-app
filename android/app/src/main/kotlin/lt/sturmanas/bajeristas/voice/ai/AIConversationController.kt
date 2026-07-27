@@ -97,6 +97,12 @@ class AIConversationController(
     private var aiTtsTerminalHandled = false
     private val watchdogRunnable = Runnable { handleTtsWatchdog() }
 
+    // ── End-to-end latency tracking ───────────────────────────────────────
+    /** Epoch ms when the latest user transcript arrived from the pipeline. */
+    private var transcriptReceivedAtMs = 0L
+    /** Epoch ms when the AI HTTP request was dispatched. */
+    private var aiRequestStartedAtMs = 0L
+
     private val activeNavUtterances = mutableSetOf<String>()
 
     private val navResumeWatchdogRunnable = Runnable {
@@ -124,7 +130,7 @@ class AIConversationController(
 
     private val strongWakeWords = setOf("kente", "kentai", "kentas", "kenta", "kentu", "kentui", "kentei")
     private val exactWakePhrases = setOf("kente", "kentai", "ei kente", "ei kentai", "klausyk kente", "klausyk kentai")
-    private val questionWords = setOf("kur", "kada", "kodel", "kaip", "kas", "ar", "kiek", "koks", "kokia")
+    // questionWords and semantic helpers live in SemanticCompletionDetector (pure Kotlin, testable).
 
     private val muteCommands = setOf("uzsiciaup", "tylek", "baik", "ramiai", "issijunk")
     private val unmuteCommands = setOf("kalbek", "grizk", "bazarinam", "isijunk", "gali kalbeti")
@@ -219,6 +225,7 @@ class AIConversationController(
      * Must only be called on the main thread (the pipeline posts here via handler).
      */
     fun onTranscriptReceived(text: String) {
+        transcriptReceivedAtMs = System.currentTimeMillis()
         // Defensive guard: pipeline may deliver stale callbacks after mute if a
         // transcription was in-flight at the moment mute was requested.
         if (phase == Phase.MUTED) {
@@ -309,6 +316,12 @@ class AIConversationController(
         if (currentText.isBlank()) return
 
         val norm = normalizeText(currentText)
+        val elapsedSinceStt = if (transcriptReceivedAtMs > 0)
+            System.currentTimeMillis() - transcriptReceivedAtMs
+        else -1L
+
+        Log.d(TAG, "SEMANTIC_WAIT_STARTED isTimeout=$isTimeout elapsedMs=$elapsedSinceStt text='$currentText'")
+
         var shouldSend = false
         var reason = ""
 
@@ -324,6 +337,7 @@ class AIConversationController(
                 return
             }
         } else {
+            // Wake-word-only: acknowledge and open session without calling AI.
             if (mode == ConversationMode.IDLE && isWakeWordOnly(norm)) {
                 Log.i(TAG, "CONV_SEMANTIC_COMPLETE result=WAKE_ONLY")
                 clearUtteranceBuffer("wake_only")
@@ -331,29 +345,57 @@ class AIConversationController(
                 speak("Klausau.")
                 return
             }
-            val isQuestion = tokensContainQuestion(norm) || currentText.endsWith("?")
-            if (isQuestion && norm.split(" ").size >= 2) {
+
+            val tokens = norm.split(Regex("\\s+")).filter { it.isNotBlank() }
+
+            // Rule 1: question detected (word or punctuation) → immediate send.
+            val isQuestion = SemanticCompletionDetector.tokensContainQuestion(norm) ||
+                currentText.endsWith("?")
+            if (isQuestion && tokens.size >= 2) {
                 shouldSend = true
                 reason = "question_detected"
+            }
+            // Rule 2: sentence-end punctuation → immediate send.
+            else if (currentText.endsWith(".") || currentText.endsWith("!")) {
+                shouldSend = true
+                reason = "sentence_end_punct"
+            }
+            // Rule 3: imperative verb form → immediate send.
+            else if (SemanticCompletionDetector.looksLikeImperative(norm)) {
+                shouldSend = true
+                reason = "imperative_detected"
+            }
+            // Rule 4: ≥4 tokens in ACTIVE mode and not an incomplete clause fragment.
+            else if (tokens.size >= 4 &&
+                mode == ConversationMode.ACTIVE &&
+                !SemanticCompletionDetector.startsWithIncompleteClause(norm)
+            ) {
+                shouldSend = true
+                reason = "active_long_phrase"
             }
         }
 
         if (shouldSend) {
-            Log.i(TAG, "CONV_SEMANTIC_COMPLETE result=COMPLETE reason=$reason")
+            Log.i(TAG, "SEMANTIC_COMPLETE reason=$reason elapsedMs=$elapsedSinceStt text='$currentText'")
             sendToAi(currentText)
         } else {
-            Log.i(TAG, "CONV_SEMANTIC_COMPLETE result=INCOMPLETE_WAITING")
+            Log.i(TAG, "SEMANTIC_INCOMPLETE waiting elapsedMs=$elapsedSinceStt")
             transitionTo(Phase.COLLECTING)
             resetContinuationTimer()
         }
     }
 
     private fun sendToAi(text: String) {
-        Log.i(TAG, "CONV_SENT_TO_AI text='$text'")
+        aiRequestStartedAtMs = System.currentTimeMillis()
+        val elapsedSinceStt = if (transcriptReceivedAtMs > 0)
+            aiRequestStartedAtMs - transcriptReceivedAtMs
+        else -1L
+        Log.i(TAG, "AI_REQUEST_STARTED elapsedSinceSttMs=$elapsedSinceStt text='$text'")
         clearUtteranceBuffer("sent_to_ai")
         transitionTo(Phase.THINKING)
         KentasChat.askKentas(text) { reply ->
-            Log.i(TAG, "CONV_EVENT type=AI_RESPONSE_RECEIVED")
+            val elapsedFromRequest = System.currentTimeMillis() - aiRequestStartedAtMs
+            Log.i(TAG, "AI_RESPONSE_RECEIVED elapsedFromRequestMs=$elapsedFromRequest replyLength=${reply.length}")
             handler.post {
                 if (phase == Phase.THINKING) {
                     speak(reply)
@@ -364,7 +406,7 @@ class AIConversationController(
 
     private fun resetContinuationTimer() {
         handler.removeCallbacks(continuationRunnable)
-        handler.postDelayed(continuationRunnable, 2500)
+        handler.postDelayed(continuationRunnable, PipelineConfig.CONTINUATION_TIMEOUT_MS)
         Log.d(TAG, "CONV_CONTINUATION_TIMER_RESET")
     }
 
@@ -384,8 +426,7 @@ class AIConversationController(
         return tokens.all { strongWakeWords.contains(it) || it.startsWith("kent") || it == "ei" || it == "klausyk" }
     }
 
-    private fun tokensContainQuestion(norm: String): Boolean =
-        norm.split(Regex("\\s+")).filter { it.isNotBlank() }.any { questionWords.contains(it) }
+    // Semantic detection delegated to SemanticCompletionDetector (testable without Android).
 
     // ─── EXTERNAL CONTROL ────────────────────────────────────────────────
 
@@ -493,7 +534,10 @@ class AIConversationController(
         currentIndex = 0
         isInterrupted = false
 
-        Log.i(TAG, "AI_TTS_REQUESTED utteranceId=$currentAiUtteranceId textLength=${text.length}")
+        val elapsedSinceStt = if (transcriptReceivedAtMs > 0)
+            System.currentTimeMillis() - transcriptReceivedAtMs
+        else -1L
+        Log.i(TAG, "AI_TTS_REQUESTED utteranceId=$currentAiUtteranceId textLength=${text.length} elapsedSinceSttMs=$elapsedSinceStt")
         armWatchdog(text.length)
         playNextAiSentence()
     }

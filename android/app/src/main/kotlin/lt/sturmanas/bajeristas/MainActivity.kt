@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.util.Log
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -15,11 +16,16 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.launch
 import lt.sturmanas.bajeristas.navigation.GoogleNavigationEngine
 import lt.sturmanas.bajeristas.navigation.LocationPermissionHelper
 import lt.sturmanas.bajeristas.navigation.MockNavigationEngine
 import lt.sturmanas.bajeristas.navigation.NavigationController
+import lt.sturmanas.bajeristas.navigation.NavigationPhase
 import lt.sturmanas.bajeristas.ui.NavigationScreen
 import lt.sturmanas.bajeristas.ui.StartScreen
 import lt.sturmanas.bajeristas.ui.theme.SturmanasTheme
@@ -93,6 +99,33 @@ class MainActivity : ComponentActivity() {
                     navigationController = navigationController,
                     viewModel            = viewModel,
                 )
+            }
+        }
+
+        // Keep the screen on while actively navigating; clear the flag as soon
+        // as navigation stops, arrives, or is cancelled.
+        // Uses repeatOnLifecycle so the flag is managed correctly across
+        // onStop/onStart cycles (e.g. app backgrounded mid-route).
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                var screenOnActive = false
+                navigationController.state.collect { state ->
+                    val shouldKeepOn = state.phase == NavigationPhase.NAVIGATING
+                    if (shouldKeepOn == screenOnActive) return@collect   // no change
+                    if (shouldKeepOn) {
+                        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                        Log.i(FLOW_TAG, "SCREEN_KEEP_ON enabled reason=NAVIGATING")
+                    } else {
+                        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                        val reason = when (state.phase) {
+                            NavigationPhase.ARRIVED  -> "ARRIVED"
+                            NavigationPhase.IDLE     -> "IDLE"
+                            else                     -> "CANCELLED"
+                        }
+                        Log.i(FLOW_TAG, "SCREEN_KEEP_ON disabled reason=$reason")
+                    }
+                    screenOnActive = shouldKeepOn
+                }
             }
         }
     }

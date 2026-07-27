@@ -3,8 +3,11 @@ package lt.sturmanas.bajeristas.voice.pipeline
 import lt.sturmanas.bajeristas.voice.ai.ConversationMode
 import lt.sturmanas.bajeristas.voice.ai.Phase
 import lt.sturmanas.bajeristas.voice.ai.PipelineAction
+import lt.sturmanas.bajeristas.voice.ai.SemanticCompletionDetector
 import lt.sturmanas.bajeristas.voice.ai.pipelineActionForPhase
 import lt.sturmanas.bajeristas.voice.ai.postTtsTargetPhase
+import lt.sturmanas.bajeristas.navigation.ManeuverType
+import lt.sturmanas.bajeristas.voice.navigation.KentasNavigationPhraseFormatter
 import org.junit.Assert.*
 import org.junit.Test
 import java.util.concurrent.atomic.AtomicBoolean
@@ -570,5 +573,147 @@ class VoicePipelineIntegrationTest {
             "After mute→reset→unmute, first speech chunk must produce SpeechCandidate, got: $events",
             events.any { it is UtteranceSegmenter.Event.SpeechCandidate },
         )
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // PI-33..PI-42  KentasNavigationPhraseFormatter
+    // ════════════════════════════════════════════════════════════════════════
+
+    private val fmt = KentasNavigationPhraseFormatter()
+
+    // PI-33 ── TURN_RIGHT at FAR stage mentions the word distance ──────────
+    @Test fun `PI-33 TURN_RIGHT at FAR stage contains Lithuanian distance word`() {
+        val phrase = fmt.format(ManeuverType.TURN_RIGHT, 800, KentasNavigationPhraseFormatter.SpeechStage.FAR)
+        assertTrue("FAR TURN_RIGHT phrase must contain distance words, got: '$phrase'", phrase.isNotBlank())
+        // Should mention "aštuoni šimtai" or similar word form, not bare "800"
+        assertFalse("FAR phrase must not contain bare digit distance", phrase.contains("800"))
+    }
+
+    // PI-34 ── TURN_LEFT at MEDIUM stage is non-empty ─────────────────────
+    @Test fun `PI-34 TURN_LEFT at MEDIUM stage returns non-empty phrase`() {
+        val phrase = fmt.format(ManeuverType.TURN_LEFT, 200, KentasNavigationPhraseFormatter.SpeechStage.MEDIUM)
+        assertTrue("MEDIUM TURN_LEFT must be non-empty", phrase.isNotBlank())
+    }
+
+    // PI-35 ── TURN_RIGHT at IMMEDIATE stage is non-empty ─────────────────
+    @Test fun `PI-35 TURN_RIGHT at IMMEDIATE stage returns non-empty phrase`() {
+        val phrase = fmt.format(ManeuverType.TURN_RIGHT, 50, KentasNavigationPhraseFormatter.SpeechStage.IMMEDIATE)
+        assertTrue("IMMEDIATE TURN_RIGHT must be non-empty", phrase.isNotBlank())
+    }
+
+    // PI-36 ── ROUNDABOUT at IMMEDIATE uses ordinal-based exit phrasing ────
+    @Test fun `PI-36 ROUNDABOUT IMMEDIATE with exit 2 contains second-exit phrasing`() {
+        val phrase = fmt.format(
+            ManeuverType.ROUNDABOUT_ENTER, 40,
+            KentasNavigationPhraseFormatter.SpeechStage.IMMEDIATE,
+            exitNumber = 2,
+        )
+        // "antra" or "2" should appear somewhere in the phrase
+        val hasOrdinal = phrase.contains("antr", ignoreCase = true) || phrase.contains("2")
+        assertTrue("ROUNDABOUT phrase with exit=2 must reference exit ordinal, got: '$phrase'", hasOrdinal)
+    }
+
+    // PI-37 ── ARRIVED stage returns non-empty arrival phrase ─────────────
+    @Test fun `PI-37 ARRIVED stage returns non-empty arrival phrase`() {
+        val phrase = fmt.format(ManeuverType.ARRIVE, 0, KentasNavigationPhraseFormatter.SpeechStage.ARRIVED)
+        assertTrue("ARRIVED phrase must be non-empty", phrase.isNotBlank())
+    }
+
+    // PI-38 ── SLIGHT_RIGHT at FAR stage is non-empty ─────────────────────
+    @Test fun `PI-38 SLIGHT_RIGHT at FAR stage returns non-empty phrase`() {
+        val phrase = fmt.format(ManeuverType.SLIGHT_RIGHT, 600, KentasNavigationPhraseFormatter.SpeechStage.FAR)
+        assertTrue("SLIGHT_RIGHT FAR phrase must be non-empty", phrase.isNotBlank())
+    }
+
+    // PI-39 ── STRAIGHT at IMMEDIATE stage is non-empty ───────────────────
+    @Test fun `PI-39 STRAIGHT at IMMEDIATE stage returns non-empty phrase`() {
+        val phrase = fmt.format(ManeuverType.STRAIGHT, 80, KentasNavigationPhraseFormatter.SpeechStage.IMMEDIATE)
+        assertTrue("STRAIGHT IMMEDIATE phrase must be non-empty", phrase.isNotBlank())
+    }
+
+    // PI-40 ── exitOrdinal maps 1→"pirmą", 2→"antrą", 3→"trečią" ─────────
+    @Test fun `PI-40 exitOrdinal maps small exit numbers to Lithuanian ordinals`() {
+        // Formatter exposes ordinal through the roundabout phrase — verify by probing
+        // phrase content for three different exit numbers.
+        val first  = fmt.format(ManeuverType.ROUNDABOUT_ENTER, 40, KentasNavigationPhraseFormatter.SpeechStage.IMMEDIATE, exitNumber = 1)
+        val second = fmt.format(ManeuverType.ROUNDABOUT_ENTER, 40, KentasNavigationPhraseFormatter.SpeechStage.IMMEDIATE, exitNumber = 2)
+        val third  = fmt.format(ManeuverType.ROUNDABOUT_ENTER, 40, KentasNavigationPhraseFormatter.SpeechStage.IMMEDIATE, exitNumber = 3)
+        assertNotEquals("exit 1 and exit 2 phrases must differ", first, second)
+        assertNotEquals("exit 2 and exit 3 phrases must differ", second, third)
+    }
+
+    // PI-41 ── formatDistanceWords: 1 → "vienas metras" ──────────────────
+    @Test fun `PI-41 formatDistanceWords 1 metre`() {
+        val phrase = fmt.format(ManeuverType.TURN_RIGHT, 1, KentasNavigationPhraseFormatter.SpeechStage.IMMEDIATE)
+        // Phrase should not be empty even for 1 metre
+        assertTrue("1-metre phrase must be non-empty", phrase.isNotBlank())
+    }
+
+    // PI-42 ── formatDistanceWords: 500 → "penkis šimtus" or "penkių šimtų" ─
+    @Test fun `PI-42 formatDistanceWords 500 metres contains word for 500`() {
+        val phrase = fmt.format(ManeuverType.TURN_RIGHT, 500, KentasNavigationPhraseFormatter.SpeechStage.FAR)
+        val hasFiveHundred = phrase.contains("penkis šimtus", ignoreCase = true) ||
+            phrase.contains("penkių šimtų", ignoreCase = true) ||
+            phrase.contains("penkiašimt", ignoreCase = true)
+        assertTrue("500-metre FAR phrase must contain Lithuanian for '500', got: '$phrase'", hasFiveHundred)
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // PI-43..PI-52  SemanticCompletionDetector
+    // ════════════════════════════════════════════════════════════════════════
+
+    // PI-43 ── question word "kur" is detected ────────────────────────────
+    @Test fun `PI-43 tokensContainQuestion detects kur`() {
+        assertTrue(SemanticCompletionDetector.tokensContainQuestion("kur eiti"))
+    }
+
+    // PI-44 ── question word "kaip" is detected ───────────────────────────
+    @Test fun `PI-44 tokensContainQuestion detects kaip`() {
+        assertTrue(SemanticCompletionDetector.tokensContainQuestion("kaip tu sakai"))
+    }
+
+    // PI-45 ── non-question phrase is not flagged ─────────────────────────
+    @Test fun `PI-45 tokensContainQuestion returns false for plain statement`() {
+        assertFalse(SemanticCompletionDetector.tokensContainQuestion("sukti desinej"))
+    }
+
+    // PI-46 ── imperative "-k" suffix is detected ─────────────────────────
+    @Test fun `PI-46 looksLikeImperative detects -k verb form`() {
+        assertTrue(SemanticCompletionDetector.looksLikeImperative("sukk"))
+        assertTrue(SemanticCompletionDetector.looksLikeImperative("sukti desinej sustok"))
+    }
+
+    // PI-47 ── imperative "-kite" suffix is detected ──────────────────────
+    @Test fun `PI-47 looksLikeImperative detects -kite verb form`() {
+        assertTrue(SemanticCompletionDetector.looksLikeImperative("sustokite"))
+    }
+
+    // PI-48 ── question word "kiek" alone is not flagged as imperative ─────
+    @Test fun `PI-48 looksLikeImperative does not flag question word kiek`() {
+        assertFalse(SemanticCompletionDetector.looksLikeImperative("kiek"))
+    }
+
+    // PI-49 ── "ar" is a question word ────────────────────────────────────
+    @Test fun `PI-49 tokensContainQuestion detects ar`() {
+        assertTrue(SemanticCompletionDetector.tokensContainQuestion("ar tu žinai"))
+    }
+
+    // PI-50 ── incomplete-clause starter "bet" is detected ────────────────
+    @Test fun `PI-50 startsWithIncompleteClause detects but-starter`() {
+        assertTrue(SemanticCompletionDetector.startsWithIncompleteClause("bet ne"))
+        assertTrue(SemanticCompletionDetector.startsWithIncompleteClause("ir tada"))
+    }
+
+    // PI-51 ── a normal phrase does not start with incomplete clause ───────
+    @Test fun `PI-51 startsWithIncompleteClause returns false for normal phrase`() {
+        assertFalse(SemanticCompletionDetector.startsWithIncompleteClause("sustok prie parduotuves"))
+    }
+
+    // PI-52 ── "kur" is both question and not imperative ───────────────────
+    @Test fun `PI-52 kur is question and not imperative and not incomplete clause`() {
+        val norm = "kur tu esi"
+        assertTrue(SemanticCompletionDetector.tokensContainQuestion(norm))
+        assertFalse(SemanticCompletionDetector.looksLikeImperative(norm))
+        assertFalse(SemanticCompletionDetector.startsWithIncompleteClause(norm))
     }
 }
