@@ -1,0 +1,314 @@
+Proceed with Phase 3 integration now.
+
+Decision:
+
+Remove the old Android SpeechRecognizer implementation completely.
+
+Do not keep a feature flag.
+Do not keep dual voice-input systems.
+Do not preserve fallback code for SpeechRecognizer.
+The old implementation is unreliable and will not be used again.
+
+GOAL
+
+Integrate the new microphone pipeline directly into the production voice flow:
+
+AudioRecord
+→ Silero VAD
+→ TranscriptionClient
+→ OpenAI transcription
+→ AIConversationController
+→ existing transcript processing
+→ KentasChat
+→ existing AI TTS
+
+REQUIRED ACTIONS
+
+1. Fully remove SpeechRecognizer
+
+Delete all code related to:
+
+- android.speech.SpeechRecognizer
+- RecognitionListener
+- RecognizerIntent
+- recognizerIntent
+- prepareRecognizer()
+- startSttSession()
+- stopSttSession()
+- scheduleSttRestart()
+- restartScheduled
+- isListeningSessionActive
+- recognition generation counters
+- ERROR_NO_MATCH handling
+- ERROR_SERVER_DISCONNECTED handling
+- all SpeechRecognizer restart runnables and tokens
+- MODE_IN_COMMUNICATION workaround
+- audio mode restoration related only to SpeechRecognizer
+
+Remove unused imports, fields, handlers, constants, and diagnostic logs.
+
+2. Integrate ContinuousMicrophonePipeline
+
+The production controller must use the new pipeline as the only microphone input source.
+
+Flow:
+
+ContinuousMicrophonePipeline
+→ final transcript
+→ AIConversationController.onTranscriptReceived(text)
+→ existing processPacket(text, isFinal = true)
+
+Do not bypass the existing transcript processing logic.
+
+Preserve:
+
+- utterance buffering
+- duplicate text handling
+- semantic completion
+- wake-word handling
+- ConversationMode
+- Phase state machine
+- KentasChat
+- AI response handling
+- AI TTS
+- navigation pause/resume behaviour
+
+3. Pipeline lifecycle
+
+Create and own the production microphone pipeline in the most appropriate lifecycle owner.
+
+Requirements:
+
+- start when voice listening should become active
+- stop and release on controller/ViewModel destruction
+- never leak Activity or Context
+- never run multiple AudioRecord instances
+- repeated start calls must be safe
+- repeated stop calls must be safe
+
+4. Replace old state side effects
+
+Where the old state machine called:
+
+- startSttSession()
+- stopSttSession()
+
+replace those effects with the new pipeline controls.
+
+Expected behaviour:
+
+LISTENING / COLLECTING / IDLE when listening is allowed:
+- pipeline.unmute()
+- pipeline.start() if not already running
+
+THINKING:
+- pipeline.mute()
+- discard active utterance buffer
+
+SPEAKING:
+- pipeline.mute()
+- discard active utterance buffer
+
+PAUSED_BY_NAVIGATION:
+- pipeline.mute()
+- discard active utterance buffer
+
+MUTED:
+- pipeline.mute()
+
+Do not repeatedly stop and recreate AudioRecord during normal phase transitions.
+
+AudioRecord should remain alive while the voice system is enabled.
+Use mute/unmute as the normal control mechanism.
+
+5. Prevent self-recognition
+
+Before AI TTS begins:
+
+- mute pipeline
+- clear pre-roll
+- clear current utterance
+- reset VAD/segmenter state
+
+After AI TTS finishes:
+
+- wait a short configurable cooldown
+- reset segmenter state again
+- unmute pipeline
+- resume listening
+
+Apply equivalent behaviour for navigation TTS through the existing ConversationCoordinator callbacks.
+
+The microphone must never transcribe:
+
+- Kentas AI speech
+- navigation instructions
+- residual speaker echo immediately after TTS ends
+
+6. Navigation integration
+
+Keep NavigationVoiceController and ConversationCoordinator architecture intact.
+
+Existing callbacks:
+
+onNavigationStarted(id)
+onNavigationFinished(id)
+
+must now control pipeline mute/unmute rather than SpeechRecognizer cancellation/restart.
+
+Preserve activeNavUtterances tracking.
+
+Only unmute after:
+
+- all navigation utterances have completed
+- AI TTS is not active
+- controller is not in MUTED mode
+- cooldown has elapsed
+
+7. Configuration cleanup
+
+Create one central configuration file:
+
+voice/pipeline/PipelineConfig.kt
+
+Move all relevant constants there:
+
+- sample rate
+- chunk size
+- speech threshold
+- minimum speech duration
+- trailing silence
+- pre-roll
+- max utterance duration
+- post-TTS cooldown
+- max concurrent transcriptions
+- transcription model name
+
+Do not duplicate these values across classes.
+
+8. Remove temporary PoC UI
+
+Delete the temporary debug overlay and any PoC start/stop button from MainActivity.
+
+Remove:
+
+- PocDebugOverlay.kt
+- PocDebugOverlay() call
+- temporary PoC-only wiring
+
+The production pipeline should start through the real voice lifecycle, not through a debug button.
+
+Keep useful diagnostic Logcat messages.
+
+9. Keep provider abstraction
+
+ContinuousMicrophonePipeline must depend only on:
+
+TranscriptionClient
+
+It must not directly know about:
+
+OpenAiTranscriptionClient
+OpenAI model names
+HTTP endpoints
+API keys
+
+Construct and inject OpenAiTranscriptionClient outside the pipeline.
+
+10. Error handling
+
+Production behaviour must survive:
+
+- AudioRecord initialisation failure
+- microphone permission failure
+- ONNX model loading failure
+- transcription timeout
+- network loss
+- HTTP errors
+- empty transcript
+- transcription queue full
+
+On transcription failure:
+
+- log the reason
+- return to listening
+- do not crash
+- do not permanently mute the microphone
+
+11. Tests
+
+Update or add tests for:
+
+- transcript reaching processPacket()
+- pipeline muted during AI TTS
+- pipeline muted during navigation TTS
+- pipeline resumes after TTS cooldown
+- pipeline does not resume while another nav utterance remains active
+- MUTED mode keeps pipeline muted
+- THINKING and SPEAKING clear active utterances
+- repeated start/stop safety
+- transcription failure returns system to listening
+- old SpeechRecognizer symbols no longer exist in the project
+
+12. Search cleanup verification
+
+Run a project-wide search and confirm zero production references to:
+
+SpeechRecognizer
+RecognitionListener
+RecognizerIntent
+startSttSession
+stopSttSession
+scheduleSttRestart
+MODE_IN_COMMUNICATION
+ERROR_NO_MATCH
+
+Test file references are also unnecessary and should be removed unless explicitly testing migration cleanup.
+
+13. Build verification
+
+Run:
+
+./gradlew :app:compileDebugKotlin
+./gradlew :app:testDebugUnitTest
+
+Fix all errors caused by the integration.
+
+Do not claim success if Android SDK compilation was not actually run.
+
+If Replit cannot compile because Android SDK is unavailable:
+
+- perform all possible static checks
+- commit the changes
+- provide the exact commands to run in Android Studio
+- clearly state which Android-dependent classes remain unverified
+
+14. Git
+
+Commit the completed migration with a clear commit message such as:
+
+Replace SpeechRecognizer with AudioRecord VAD pipeline
+
+FINAL REPORT
+
+Provide:
+
+1. Files added, modified, and deleted.
+2. Exact old SpeechRecognizer code removed.
+3. New production lifecycle flow.
+4. AI TTS mute/resume flow.
+5. Navigation TTS mute/resume flow.
+6. PipelineConfig values.
+7. Test results.
+8. Build results.
+9. Remaining physical-device checks.
+10. Git commit hash.
+
+IMPORTANT
+
+Do not redesign navigation.
+Do not redesign KentasChat.
+Do not rewrite the conversation state machine unnecessarily.
+Do not retain dead fallback code.
+Do not leave both microphone systems active.
+Delete the old SpeechRecognizer architecture completely.
