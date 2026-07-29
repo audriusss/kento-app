@@ -211,6 +211,7 @@ private fun SturmanasApp(
             onStopNavigation     = {
                 navigationController.stopNavigation()
                 viewModel.stopNavigationVoice()
+                viewModel.stopKentasSpeech()
                 isNavigating = false
             },
             onRerouteNavigation  = { destination ->
