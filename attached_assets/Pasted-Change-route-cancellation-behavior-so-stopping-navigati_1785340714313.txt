@@ -1,0 +1,75 @@
+Change route cancellation behavior so stopping navigation does not automatically return to StartScreen.
+
+IMPORTANT:
+- Do NOT refactor the project.
+- Preserve all working navigation, Places search, floating search, STT, TTS and AI behavior.
+- Change only the minimum required files.
+- Do not remove the floating destination search.
+
+Current problem:
+When the user says "nutrauk maršrutą" or stops the route, navigation guidance stops correctly, but navState.phase becomes IDLE and MainActivity immediately switches back to StartScreen.
+
+Desired behavior:
+Stopping the current route should keep the user inside NavigationScreen with the map still visible.
+
+The user must then be able to:
+- use the floating search field to enter a new destination
+- say a new voice destination command
+- start another route without returning to StartScreen
+
+Required changes:
+
+1. Separate these two actions:
+   A. Stop current route/guidance
+   B. Exit NavigationScreen
+
+2. Voice commands such as:
+   - "nutrauk maršrutą"
+   - "atšauk maršrutą"
+   - "sustabdyk navigaciją"
+
+must:
+   - stop guidance
+   - clear the current route
+   - stop navigation speech
+   - keep NavigationScreen visible
+   - keep the map visible
+   - keep the floating search available
+   - say: "Gerai, maršrutą nutraukiau. Kur važiuojam toliau?"
+
+3. The existing manual "Baigti navigaciją" button should have clearly defined behavior:
+   - if it is intended to exit navigation mode, it may return to StartScreen
+   - route cancellation by voice must not use the same UI-exit path
+
+4. MainActivity must no longer assume:
+   NavigationPhase.IDLE == always show StartScreen
+
+Instead introduce minimal UI state separation, for example:
+   - isNavigationScreenVisible
+   - or navigationSessionActive
+
+Expected behavior:
+- Starting a route sets NavigationScreen visible.
+- Cancelling only the route keeps NavigationScreen visible.
+- Pressing the explicit exit/back/start-screen action hides NavigationScreen.
+- Starting a new route from the floating search keeps NavigationScreen visible.
+
+5. Do not duplicate navigation state.
+Use the smallest possible additional UI/session flag.
+
+6. When the route is cancelled:
+   - clear old maneuver/distance/time route UI if necessary
+   - show a neutral state such as:
+     "Maršrutas nepasirinktas"
+   - floating search remains usable
+
+7. Voice destination search must work while NavigationScreen is visible but no route is active.
+
+8. Add logs:
+   VOICE_ROUTE_CANCEL_KEEP_MAP
+   NAV_SCREEN_KEPT_VISIBLE
+   NAV_SCREEN_EXIT_REQUESTED
+
+9. Run compileDebugKotlin if possible.
+10. Report exactly which files changed.
+11. Commit only this fix.
