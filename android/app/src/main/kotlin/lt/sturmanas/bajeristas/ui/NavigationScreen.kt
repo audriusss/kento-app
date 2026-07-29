@@ -363,7 +363,7 @@ fun NavigationScreen(
                         Column(horizontalAlignment = Alignment.End) {
                             val dist = navigationState.distanceToNextManeuverMeters
                             Text(
-                                text       = if (dist == Int.MAX_VALUE) "—" else "$dist m",
+                                text       = formatDistanceUi(dist),
                                 style      = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.SemiBold,
                             )
@@ -395,6 +395,20 @@ fun NavigationScreen(
             }
         }
     }
+}
+
+/**
+ * Formats a distance in metres for on-screen display.
+ *
+ * Rules:
+ *   - [Int.MAX_VALUE]       → "—"   (sentinel: no value yet)
+ *   - below 1 000 m         → "850 m"
+ *   - 1 000 m and above     → "1.0 km" / "2.5 km" (one decimal place)
+ */
+private fun formatDistanceUi(meters: Int): String = when {
+    meters == Int.MAX_VALUE -> "—"
+    meters >= 1_000         -> "${"%.1f".format(meters / 1_000.0)} km"
+    else                    -> "$meters m"
 }
 
 private fun maneuverLabel(type: ManeuverType): String = when (type) {
