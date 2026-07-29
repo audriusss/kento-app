@@ -1,0 +1,123 @@
+Implement AI answer pause-and-resume when navigation guidance interrupts Kentas.
+
+IMPORTANT:
+- Do NOT refactor the project.
+- Preserve the current architecture.
+- Preserve all working navigation, Places search, floating search, STT, TTS and conversation behavior.
+- Change only the minimum required files.
+- Implement only this feature.
+- Commit only this feature.
+
+Current problem:
+Kentas may be speaking a longer AI response when a navigation maneuver instruction needs to be announced.
+
+The navigation instruction correctly interrupts Kentas, but the interrupted AI response is then lost and never continues.
+
+Desired behavior:
+1. Kentas starts speaking an AI response.
+2. A navigation instruction becomes urgent.
+3. Kentas speech pauses or stops immediately.
+4. The navigation instruction is spoken.
+5. After the navigation instruction finishes, Kentas continues the interrupted AI response from a sensible point.
+6. Kentas must not restart the whole response from the beginning.
+7. Kentas must not speak over navigation guidance.
+
+Example:
+Kentas:
+"Klaipėdos pilis buvo pastatyta..."
+
+Navigation:
+"Po 300 metrų sukite į dešinę."
+
+Kentas resumes:
+"...ir vėliau kelis kartus perstatyta."
+
+Required implementation:
+
+1. Inspect the existing AIConversationController, TTS handling and navigation speech flow before changing anything.
+
+2. Add minimal interrupted-response state, for example:
+   - full response text
+   - currently spoken segment index
+   - remaining text
+   - whether resume is pending
+
+3. Prefer splitting AI text into natural sentence-sized chunks before speaking.
+Do not attempt to resume from an exact character or exact audio position if Android TextToSpeech does not expose reliable progress.
+
+Suggested behavior:
+- Split the AI response into sentences or small natural chunks.
+- Speak one chunk at a time.
+- Keep track of the last fully completed chunk.
+- If navigation interrupts during a chunk, resume from that interrupted chunk or the next sensible sentence after navigation finishes.
+- Never repeat more than one short interrupted sentence.
+
+4. Navigation speech must always have priority.
+
+When a navigation instruction arrives:
+- mark Kentas speech as interrupted by navigation
+- stop only the current Kentas TTS utterance
+- keep the remaining AI response queued
+- cancel any Kentas speech watchdog as needed
+- do not clear the pending AI response
+
+5. When navigation speech finishes:
+- wait a short natural pause, approximately 500–900 ms
+- resume the pending Kentas response
+- use the existing TTS voice and audio focus logic
+- do not resume if a newer user request has replaced the old response
+
+6. Do not resume the old response when:
+- the user says "Kentai užsičiaupk"
+- the user cancels speaking
+- the user asks a new question
+- navigation ends and the conversation controller was explicitly stopped
+- a new AI answer replaces the interrupted one
+- the app leaves the relevant active session
+
+7. If multiple navigation instructions arrive close together:
+- keep the AI response paused
+- do not repeatedly restart Kentas between instructions
+- resume only after navigation guidance has been quiet for the configured short delay
+
+8. Preserve microphone behavior:
+- Kentas must not start listening while navigation speech is playing
+- normal post-TTS microphone unmute cooldown must still work
+- resuming an answer must not create duplicate STT sessions
+
+9. Add clear logs:
+   AI_RESPONSE_CHUNK_STARTED
+   AI_RESPONSE_INTERRUPTED_BY_NAV
+   AI_RESPONSE_RESUME_PENDING
+   NAV_SPEECH_FINISHED
+   AI_RESPONSE_RESUMED
+   AI_RESPONSE_RESUME_CANCELLED
+   AI_RESPONSE_COMPLETED
+
+10. Avoid duplicate speech queues.
+There must be only one authoritative pending AI response at a time.
+
+11. Handle TextToSpeech callbacks safely:
+- use unique utterance IDs
+- distinguish Kentas AI utterances from navigation utterances
+- ignore stale completion callbacks from stopped utterances
+
+12. Test these scenarios:
+A. AI response finishes normally without navigation interruption.
+B. AI response is interrupted once and resumes.
+C. Two navigation instructions happen before the AI response resumes.
+D. User says "užsičiaupk" while resume is pending.
+E. User asks a new question while resume is pending.
+F. Route is cancelled while resume is pending.
+G. Kentas is manually stopped using the existing stop() method.
+
+13. Run compileDebugKotlin if possible.
+
+14. Report:
+- exact files changed
+- how response chunking works
+- how navigation completion triggers resume
+- how stale or cancelled responses are prevented from resuming
+- any limitations caused by Android TextToSpeech
+
+15. Commit only this fix with a clear commit message.
