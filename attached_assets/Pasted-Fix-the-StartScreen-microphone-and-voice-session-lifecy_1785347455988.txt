@@ -1,0 +1,112 @@
+Fix the StartScreen microphone and voice-session lifecycle.
+
+IMPORTANT:
+- Do not redesign anything.
+- Keep the new StartScreen visuals exactly as they are.
+- Do not refactor.
+- Reuse the existing STT, TTS, navigation and Kentas architecture.
+- Make only the minimum required changes.
+- Commit separately.
+- Do not git push.
+
+Required behavior:
+
+1. StartScreen voice mode
+- StartScreen must not listen automatically.
+- The microphone button must start the existing destination voice-input flow.
+- This microphone is only for saying a destination.
+- Do not start Kentas conversation mode on StartScreen.
+- Recognized speech must be placed into the existing destination search field and use the same Places/autocomplete flow as typed text.
+- Do not create a second SpeechRecognizer.
+
+2. StartScreen status
+Idle:
+"Paspausk mikrofoną ir pasakyk, kur važiuojam"
+
+Only while destination STT is actually active:
+"KENTAS KLAUSOSI..."
+
+Pulse the microphone only while listening.
+When recognition finishes, fails or is cancelled, return to idle.
+
+3. NavigationScreen voice mode
+When navigation starts:
+- stop any StartScreen destination STT session
+- switch to the existing Kentas navigation conversation mode
+- preserve all current navigation voice behavior
+- Kentas may listen for "Kentai", commands and conversation only on NavigationScreen
+- preserve maneuver speech priority
+- preserve interrupted AI answer resume
+
+4. Navigation exit cleanup
+When navigation is:
+- manually finished
+- cancelled by voice
+- ARRIVED
+- exited back to StartScreen
+
+Then:
+- stop Kentas speech
+- stop Kentas conversation listening
+- stop any active STT session
+- cancel pending voice callbacks/watchdogs
+- clear listening state
+- do not automatically restart listening on StartScreen
+
+5. Mode separation
+There must be two clear modes:
+
+START SCREEN:
+mic click -> destination speech input only
+
+NAVIGATION SCREEN:
+Kentas conversation + commands + navigation speech
+
+These modes must never overlap.
+
+6. Preserve:
+- hero image
+- KENTAS plate
+- KUR VAROM title
+- address field design
+- VAŽIUOJAM button
+- Places autocomplete
+- typed destination
+- navigation start
+- STT/TTS architecture
+- NavigationScreen UI
+
+7. Inspect first:
+git status
+git diff
+git grep -n "DestinationSearchField"
+git grep -n "startListening"
+git grep -n "stopListening"
+git grep -n "stopKentasSpeech"
+git grep -n "onStopNavigation"
+git grep -n "isListening"
+git grep -n "LaunchedEffect" -- app/src/main
+
+Find and reuse the existing destination voice callback.
+
+8. Add logs:
+STARTSCREEN_VOICE_REQUESTED
+STARTSCREEN_VOICE_LISTENING_STARTED
+STARTSCREEN_VOICE_RESULT
+STARTSCREEN_VOICE_ENDED
+STARTSCREEN_VOICE_ERROR
+NAVIGATION_VOICE_MODE_STARTED
+NAVIGATION_EXIT_VOICE_CLEANUP
+
+9. Verify before commit:
+- StartScreen does not listen on composition
+- mic click starts real destination STT
+- recognized text reaches the search field
+- listening text reflects real state
+- navigation start switches to Kentas mode
+- navigation exit stops all Kentas/STT activity
+- returning to StartScreen is silent
+- no unrelated files changed
+
+Commit message:
+Fix StartScreen voice mode and navigation voice cleanup
