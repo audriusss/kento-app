@@ -6,12 +6,16 @@ import com.google.android.gms.maps.model.LatLng
 import com.google.android.gms.tasks.Task
 import com.google.android.libraries.places.api.Places
 import com.google.android.libraries.places.api.model.AutocompletePrediction
+import com.google.android.libraries.places.api.model.CircularBounds
 import com.google.android.libraries.places.api.model.Place
 import com.google.android.libraries.places.api.model.RectangularBounds
 import com.google.android.libraries.places.api.net.FetchPlaceRequest
 import com.google.android.libraries.places.api.net.FindAutocompletePredictionsRequest
+import com.google.android.libraries.places.api.net.SearchByTextRequest
+import com.google.android.libraries.places.api.net.SearchNearbyRequest
 import kotlinx.coroutines.suspendCancellableCoroutine
 import lt.sturmanas.bajeristas.BuildConfig
+import lt.sturmanas.bajeristas.voice.ai.VoiceDestinationChoice
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -22,24 +26,38 @@ import kotlin.coroutines.resumeWithException
  * 1. Enable "Places API (New)" in your Google Cloud Console project.
  * 2. The same `GOOGLE_MAPS_API_KEY` in `local.properties` is used — no extra key required.
  *
- * ## Call flow
+ * ## Call flow (typed path — unchanged)
  * ```
  * StartScreen types → getSuggestions() → List<AutocompletePrediction>
  * User taps row   → resolveCoordinates(placeId) → Pair<Double, Double>
  * onStartNavigation("$lat,$lng") → existing GoogleNavigationEngine coordinate path
  * ```
  *
+ * ## Call flow (voice path)
+ * ```
+ * Kentas hears command → handleVoiceNavigation()
+ *   category query  → searchNearbyByType()     → List<VoiceDestinationChoice>
+ *   chain name      → searchByTextNearby()     → List<VoiceDestinationChoice>
+ *   free-text query → getSuggestionsAsVoiceChoices() → List<VoiceDestinationChoice>
+ * User selects     → resolveCoordinates(placeId) → Pair<Double,Double> → navigate
+ * ```
+ *
  * If the key is absent (CI / MockNavigationEngine builds) every call returns an empty
- * list / null, which is safe — the existing Geocoder fallback in
- * [GoogleNavigationEngine.startNavigation] handles typed text as before.
+ * list / null, which is safe — the existing Geocoder fallback handles typed text.
  */
 object PlacesAutocompleteClient {
 
     private const val TAG = "PlacesAutoClient"
     private const val MAX_SUGGESTIONS = 5
 
-    /** Radius (metres) used for location-bias rectangular half-width/height. ~55 km. */
+    /** Rectangular bias half-size in degrees (~55 km lat, ~35 km lng in Lithuania). */
     private const val BIAS_DELTA_DEG = 0.5
+
+    /** Nearby Search radius in metres (10 km). */
+    private const val NEARBY_RADIUS_M = 10_000.0
+
+    /** Text Search bias radius in metres (50 km). */
+    private const val TEXT_BIAS_RADIUS_M = 50_000.0
 
     // ── Initialisation ────────────────────────────────────────────────────────
 
@@ -58,24 +76,15 @@ object PlacesAutocompleteClient {
         return true
     }
 
-    // ── Public API ────────────────────────────────────────────────────────────
+    // ── Typed autocomplete (existing — unchanged public signature) ────────────
 
     /**
      * Returns up to [maxResults] autocomplete predictions for [query].
+     * Used by the typed StartScreen flow and as the voice free-text fallback.
      *
-     * Supports:
-     * - Partial addresses ("Taikos pr")
-     * - Business names ("Maxima Vilniuje")
-     * - POIs ("Gedimino pilies bokštas")
-     * - Categories ("vaistinė", "degalinė", "restoranas")
-     *
-     * Results are restricted to Lithuania (`LT`).
      * When [latitude]/[longitude] are provided, results near the user are ranked
-     * first via `setOrigin` + `setLocationBias` (rectangular box of ±[BIAS_DELTA_DEG]°
-     * around the user — roughly ±55 km latitude, ±35 km longitude in Lithuania).
-     * Falls back to unbiased countrywide search when location is absent.
-     *
-     * Returns an empty list on any error — the caller always degrades gracefully.
+     * first via `setOrigin` + `setLocationBias` (rectangular box ±[BIAS_DELTA_DEG]°).
+     * Falls back to unbiased countrywide LT search when location is absent.
      */
     suspend fun getSuggestions(
         context: Context,
@@ -95,10 +104,7 @@ object PlacesAutocompleteClient {
 
             if (latitude != null && longitude != null) {
                 val origin = LatLng(latitude, longitude)
-                // setOrigin lets the SDK compute distances and rank nearby results first.
                 builder.setOrigin(origin)
-                // setLocationBias nudges the ranking — does NOT restrict to the box,
-                // so Lithuania-wide results are still returned when nothing is nearby.
                 val sw = LatLng(latitude - BIAS_DELTA_DEG, longitude - BIAS_DELTA_DEG)
                 val ne = LatLng(latitude + BIAS_DELTA_DEG, longitude + BIAS_DELTA_DEG)
                 builder.setLocationBias(RectangularBounds.newInstance(sw, ne))
@@ -113,11 +119,105 @@ object PlacesAutocompleteClient {
         }
     }
 
+    // ── Voice search — returns VoiceDestinationChoice ────────────────────────
+
+    /**
+     * Wraps [getSuggestions] and converts results to [VoiceDestinationChoice].
+     * Used by the voice free-text path so AIConversationController does not need to
+     * depend on [AutocompletePrediction].
+     */
+    suspend fun getSuggestionsAsVoiceChoices(
+        context: Context,
+        query: String,
+        latitude: Double? = null,
+        longitude: Double? = null,
+        maxResults: Int = 3,
+    ): List<VoiceDestinationChoice> =
+        getSuggestions(context, query, latitude, longitude, maxResults)
+            .map { it.toVoiceDestinationChoice() }
+
+    /**
+     * Searches for nearby places of [placeType] (Google Place type string, e.g.
+     * "pharmacy", "gas_station", "restaurant") around the given coordinates using
+     * the Places SDK (New) Nearby Search.  Returns up to [maxResults] results
+     * sorted by distance, or an empty list on any error.
+     *
+     * Requires location — if coordinates are null, returns empty list immediately.
+     */
+    @Suppress("DEPRECATION")
+    suspend fun searchNearbyByType(
+        context: Context,
+        latitude: Double,
+        longitude: Double,
+        placeType: String,
+        maxResults: Int = 3,
+    ): List<VoiceDestinationChoice> {
+        if (!initialize(context)) return emptyList()
+
+        return try {
+            val client = Places.createClient(context)
+            val center = LatLng(latitude, longitude)
+            val bounds = CircularBounds.newInstance(center, NEARBY_RADIUS_M)
+            val fields = listOf(Place.Field.ID, Place.Field.NAME, Place.Field.ADDRESS)
+
+            val request = SearchNearbyRequest.builder(bounds, fields)
+                .setIncludedTypes(listOf(placeType))
+                .setMaxResultCount(maxResults)
+                .build()
+
+            val response = client.searchNearby(request).awaitResult()
+            Log.d(TAG, "searchNearbyByType type='$placeType' count=${response.places.size}")
+            response.places.take(maxResults).map { it.toVoiceDestinationChoice() }
+        } catch (e: Exception) {
+            Log.w(TAG, "searchNearbyByType failed type='$placeType': ${e.message}")
+            emptyList()
+        }
+    }
+
+    /**
+     * Searches for a named chain (e.g. "Maxima", "Lidl") near the user using
+     * the Places SDK (New) Text Search with a [CircularBounds] location bias.
+     * Falls back to unbiased text search when coordinates are absent.
+     *
+     * Returns up to [maxResults] results or an empty list on any error.
+     */
+    @Suppress("DEPRECATION")
+    suspend fun searchByTextNearby(
+        context: Context,
+        textQuery: String,
+        latitude: Double? = null,
+        longitude: Double? = null,
+        maxResults: Int = 3,
+    ): List<VoiceDestinationChoice> {
+        if (!initialize(context)) return emptyList()
+
+        return try {
+            val client = Places.createClient(context)
+            val fields = listOf(Place.Field.ID, Place.Field.NAME, Place.Field.ADDRESS)
+
+            val builder = SearchByTextRequest.builder(textQuery, fields)
+                .setMaxResultCount(maxResults)
+
+            if (latitude != null && longitude != null) {
+                val center = LatLng(latitude, longitude)
+                builder.setLocationBias(CircularBounds.newInstance(center, TEXT_BIAS_RADIUS_M))
+                Log.d(TAG, "searchByTextNearby query='$textQuery' lat=$latitude lng=$longitude")
+            }
+
+            val response = client.searchByText(builder.build()).awaitResult()
+            Log.d(TAG, "searchByTextNearby query='$textQuery' count=${response.places.size}")
+            response.places.take(maxResults).map { it.toVoiceDestinationChoice() }
+        } catch (e: Exception) {
+            Log.w(TAG, "searchByTextNearby failed query='$textQuery': ${e.message}")
+            emptyList()
+        }
+    }
+
+    // ── Coordinates ───────────────────────────────────────────────────────────
+
     /**
      * Resolves a [placeId] to latitude/longitude using the Places SDK.
-     *
-     * Returns `null` if the fetch fails, allowing the caller to fall back to
-     * the existing typed-text geocoder path in [GoogleNavigationEngine].
+     * Returns `null` if the fetch fails.
      */
     suspend fun resolveCoordinates(
         context: Context,
@@ -126,7 +226,7 @@ object PlacesAutocompleteClient {
         if (!initialize(context)) return null
         return try {
             val client = Places.createClient(context)
-            @Suppress("DEPRECATION")   // LAT_LNG is the v3 field name; LOCATION is v4+
+            @Suppress("DEPRECATION")
             val fields = listOf(Place.Field.LAT_LNG)
             val request = FetchPlaceRequest.newInstance(placeId, fields)
             val response = client.fetchPlace(request).awaitResult()
@@ -139,12 +239,30 @@ object PlacesAutocompleteClient {
         }
     }
 
-    // ── Internal helpers ──────────────────────────────────────────────────────
+    // ── Private helpers ───────────────────────────────────────────────────────
+
+    private val COUNTRY_SUFFIX_REGEX = Regex(",?\\s*(Lietuva|Lithuania)\\s*$")
+
+    @Suppress("DEPRECATION")
+    private fun AutocompletePrediction.toVoiceDestinationChoice() = VoiceDestinationChoice(
+        placeId = this.placeId,
+        name = this.getPrimaryText(null).toString(),
+        shortAddress = this.getSecondaryText(null).toString()
+            .replace(COUNTRY_SUFFIX_REGEX, "")
+            .trim(),
+    )
+
+    @Suppress("DEPRECATION")
+    private fun Place.toVoiceDestinationChoice() = VoiceDestinationChoice(
+        placeId = this.id ?: "",
+        name = this.name ?: "Nežinoma vieta",
+        shortAddress = (this.address ?: "")
+            .replace(COUNTRY_SUFFIX_REGEX, "")
+            .trim(),
+    )
 
     /**
      * Converts a Google Play Services [Task] to a suspending call.
-     * Cancellation is propagated: if the coroutine is cancelled the task is
-     * not cancelled (the SDK owns it), but the continuation is simply not resumed.
      */
     private suspend fun <T> Task<T>.awaitResult(): T = suspendCancellableCoroutine { cont ->
         addOnSuccessListener { result ->

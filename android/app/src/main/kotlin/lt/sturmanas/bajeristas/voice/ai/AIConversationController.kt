@@ -9,7 +9,6 @@ import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
-import com.google.android.libraries.places.api.model.AutocompletePrediction
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -129,7 +128,7 @@ class AIConversationController(
      * Up to 3 suggestions Kentas just read aloud, awaiting the user's selection.
      * Non-null while in selection/confirmation mode; cleared on confirm or cancel.
      */
-    private var pendingVoiceChoices: List<AutocompletePrediction>? = null
+    private var pendingVoiceChoices: List<VoiceDestinationChoice>? = null
 
     /**
      * True when [pendingVoiceChoices] contains exactly one result and Kentas asked
@@ -420,55 +419,86 @@ class AIConversationController(
     /**
      * Handles a voice transcript identified as a navigation/destination command.
      *
-     * Flow:
-     * 1. Extract destination query (diacritics preserved).
-     * 2. Read current GPS location from [LocationProvider] (zero-copy — StateFlow.value).
-     * 3. Fetch up to 3 nearby suggestions via [PlacesAutocompleteClient.getSuggestions]
-     *    with location bias so results near the user are ranked first.
-     * 4. Present results to the user via TTS and store them as [pendingVoiceChoices].
-     *    Navigation does NOT start here — the user must confirm or select first.
+     * Search path selection (all return [VoiceDestinationChoice]):
+     * - Generic category ("vaistinė", "degalinė") + location known → Nearby Search by type
+     * - Known chain name ("Maxima", "Lidl") → Text Search with location bias
+     * - Everything else (named place, address, partial name) → Autocomplete with location bias
+     *
+     * Navigation does NOT start here — the user must confirm or select from the list first.
      *
      * Cases:
      * - 0 results → "Neradau tokios vietos."
-     * - 1 result  → "Radau X. Važiuojam?" (confirmation required)
+     * - 1 result  → "Radau X adresu. Važiuojam?" (confirmation required)
      * - 2-3 results → numbered list, "Kurią renkamės?"
      */
     private fun handleVoiceNavigation(text: String, @Suppress("UNUSED_PARAMETER") norm: String) {
-        val query = VoiceDestinationDetector.extractQuery(text)
-        Log.i(TAG, "VOICE_NAV_COMMAND query='$query'")
+        val query     = VoiceDestinationDetector.extractQuery(text)
+        val normQuery = normalizeText(query)
+        Log.i(TAG, "VOICE_NAV_COMMAND query='$query' normQuery='$normQuery'")
         clearUtteranceBuffer("voice_nav")
         transitionTo(Phase.THINKING)
 
         voiceNavScope.launch {
             val loc = LocationProvider.locationFlow.value
-            val suggestions = PlacesAutocompleteClient.getSuggestions(
-                context    = context,
-                query      = query,
-                latitude   = loc?.latitude,
-                longitude  = loc?.longitude,
-                maxResults = 3,
-            )
-            Log.i(TAG, "VOICE_NAV_SUGGESTIONS count=${suggestions.size} biased=${loc != null}")
+
+            val choices: List<VoiceDestinationChoice> = when {
+                // Category search: nearby places of a known type (pharmacy, gas_station, …).
+                // Requires location — without it falls through to autocomplete.
+                loc != null &&
+                VoiceDestinationDetector.detectCategoryType(normQuery) != null -> {
+                    val type = VoiceDestinationDetector.detectCategoryType(normQuery)!!
+                    Log.i(TAG, "VOICE_NAV_CATEGORY type='$type' lat=${loc.latitude} lng=${loc.longitude}")
+                    PlacesAutocompleteClient.searchNearbyByType(
+                        context    = context,
+                        latitude   = loc.latitude,
+                        longitude  = loc.longitude,
+                        placeType  = type,
+                        maxResults = 3,
+                    )
+                }
+
+                // Chain name search: text search for a known brand near the user.
+                VoiceDestinationDetector.normalizeChainName(normQuery) != null -> {
+                    val chainName = VoiceDestinationDetector.normalizeChainName(normQuery)!!
+                    Log.i(TAG, "VOICE_NAV_CHAIN name='$chainName' biased=${loc != null}")
+                    PlacesAutocompleteClient.searchByTextNearby(
+                        context    = context,
+                        textQuery  = chainName,
+                        latitude   = loc?.latitude,
+                        longitude  = loc?.longitude,
+                        maxResults = 3,
+                    )
+                }
+
+                // Free-text / named place / address: existing autocomplete with location bias.
+                else -> {
+                    Log.i(TAG, "VOICE_NAV_AUTOCOMPLETE query='$query' biased=${loc != null}")
+                    PlacesAutocompleteClient.getSuggestionsAsVoiceChoices(
+                        context    = context,
+                        query      = query,
+                        latitude   = loc?.latitude,
+                        longitude  = loc?.longitude,
+                        maxResults = 3,
+                    )
+                }
+            }
+
+            Log.i(TAG, "VOICE_NAV_SUGGESTIONS count=${choices.size} biased=${loc != null}")
 
             when {
-                suggestions.isEmpty() -> {
+                choices.isEmpty() -> {
                     Log.i(TAG, "VOICE_NAV_NO_RESULTS query='$query'")
                     handler.post { if (!destroyed) speak("Neradau tokios vietos.") }
                 }
 
-                suggestions.size == 1 -> {
-                    val p = suggestions[0]
-                    val name = p.getPrimaryText(null).toString()
-                    val sec  = p.getSecondaryText(null).toString()
-                        .replace(Regex(",?\\s*Lietuva\\s*$"), "")
-                        .replace(Regex(",?\\s*Lithuania\\s*$"), "")
-                        .trim()
-                    val addressPart = if (sec.isNotBlank()) " $sec" else ""
-                    val prompt = "Radau $name$addressPart. Važiuojam?"
-                    Log.i(TAG, "VOICE_NAV_ONE_RESULT name='$name'")
+                choices.size == 1 -> {
+                    val c = choices[0]
+                    val addressPart = if (c.shortAddress.isNotBlank()) " ${c.shortAddress}" else ""
+                    val prompt = "Radau ${c.name}$addressPart. Važiuojam?"
+                    Log.i(TAG, "VOICE_NAV_ONE_RESULT name='${c.name}'")
                     handler.post {
                         if (!destroyed) {
-                            pendingVoiceChoices = suggestions
+                            pendingVoiceChoices = choices
                             pendingVoiceChoicesOneResult = true
                             speak(prompt)
                         }
@@ -476,25 +506,20 @@ class AIConversationController(
                 }
 
                 else -> {
-                    val ordinals = listOf("pirmas", "antras", "trečias")
-                    val countWord = if (suggestions.size == 2) "du variantus" else "tris variantus"
+                    val ordinals  = listOf("pirmas", "antras", "trečias")
+                    val countWord = if (choices.size == 2) "du variantus" else "tris variantus"
                     val sb = StringBuilder("Radau $countWord: ")
-                    suggestions.forEachIndexed { idx, p ->
-                        val name = p.getPrimaryText(null).toString()
-                        val sec  = p.getSecondaryText(null).toString()
-                            .replace(Regex(",?\\s*Lietuva\\s*$"), "")
-                            .replace(Regex(",?\\s*Lithuania\\s*$"), "")
-                            .trim()
-                        sb.append("${ordinals[idx]} $name")
-                        if (sec.isNotBlank()) sb.append(" $sec")
-                        if (idx < suggestions.lastIndex) sb.append(", ")
+                    choices.forEachIndexed { idx, c ->
+                        sb.append("${ordinals[idx]} ${c.name}")
+                        if (c.shortAddress.isNotBlank()) sb.append(" ${c.shortAddress}")
+                        if (idx < choices.lastIndex) sb.append(", ")
                     }
                     sb.append(". Kurią renkamės?")
                     val prompt = sb.toString()
-                    Log.i(TAG, "VOICE_NAV_MULTI_RESULTS count=${suggestions.size}")
+                    Log.i(TAG, "VOICE_NAV_MULTI_RESULTS count=${choices.size}")
                     handler.post {
                         if (!destroyed) {
-                            pendingVoiceChoices = suggestions
+                            pendingVoiceChoices = choices
                             pendingVoiceChoicesOneResult = false
                             speak(prompt)
                         }
@@ -505,20 +530,20 @@ class AIConversationController(
     }
 
     /**
-     * Resolves coordinates for [prediction] and starts navigation.
+     * Resolves coordinates for [choice] and starts navigation.
      * Called after the user selects from pending choices or confirms the single result.
      * Clears [pendingVoiceChoices] before the async call so stale state cannot leak.
      */
-    private fun handleVoiceConfirm(prediction: AutocompletePrediction) {
+    private fun handleVoiceConfirm(choice: VoiceDestinationChoice) {
         pendingVoiceChoices = null
         pendingVoiceChoicesOneResult = false
-        Log.i(TAG, "VOICE_NAV_CONFIRM placeId='${prediction.placeId}'")
+        Log.i(TAG, "VOICE_NAV_CONFIRM placeId='${choice.placeId}' name='${choice.name}'")
         transitionTo(Phase.THINKING)
 
         voiceNavScope.launch {
-            val coords = PlacesAutocompleteClient.resolveCoordinates(context, prediction.placeId)
+            val coords = PlacesAutocompleteClient.resolveCoordinates(context, choice.placeId)
             if (coords == null) {
-                Log.w(TAG, "VOICE_NAV_COORDS_FAIL placeId='${prediction.placeId}'")
+                Log.w(TAG, "VOICE_NAV_COORDS_FAIL placeId='${choice.placeId}'")
                 handler.post { if (!destroyed) speak("Neradau tokios vietos.") }
                 return@launch
             }
@@ -535,11 +560,13 @@ class AIConversationController(
 
     /**
      * Cancels pending voice destination selection and returns to normal conversation.
+     * Must be called before any other gate so cancellation is always honoured.
      */
     private fun handleVoiceCancellation() {
+        Log.i(TAG, "VOICE_PLACE_CANCEL_RECEIVED")
         pendingVoiceChoices = null
         pendingVoiceChoicesOneResult = false
-        Log.i(TAG, "VOICE_NAV_CANCELLED")
+        Log.i(TAG, "VOICE_PLACE_CHOICES_CLEARED")
         clearUtteranceBuffer("voice_nav_cancel")
         handler.post { if (!destroyed) speak("Gerai, atšaukiau.") }
     }
@@ -553,10 +580,12 @@ class AIConversationController(
         val pending = pendingVoiceChoices
         if (pending != null) {
             clearUtteranceBuffer("voice_selection")
+            // Cancellation is checked FIRST — before any other gate.
+            if (VoiceDestinationDetector.isCancellationCommand(norm)) {
+                handleVoiceCancellation()
+                return
+            }
             when {
-                VoiceDestinationDetector.isCancellationCommand(norm) -> {
-                    handleVoiceCancellation()
-                }
                 pendingVoiceChoicesOneResult &&
                     VoiceDestinationDetector.isConfirmationCommand(norm) -> {
                     handleVoiceConfirm(pending[0])
@@ -565,7 +594,7 @@ class AIConversationController(
                     val idx = VoiceDestinationDetector.extractSelectionIndex(norm)
                         ?: VoiceDestinationDetector.matchesNameIndex(
                             norm,
-                            pending.map { normalizeText(it.getPrimaryText(null).toString()) },
+                            pending.map { normalizeText(it.name) },
                         )
                     if (idx != null && idx < pending.size) {
                         handleVoiceConfirm(pending[idx])
@@ -578,9 +607,8 @@ class AIConversationController(
                 }
                 else -> {
                     // Single-result mode but not confirmation or cancellation — re-prompt.
-                    val name = pending[0].getPrimaryText(null).toString()
                     handler.post {
-                        if (!destroyed) speak("Radau $name. Sakykite 'taip' arba 'atšauk'.")
+                        if (!destroyed) speak("Radau ${pending[0].name}. Sakykite 'taip' arba 'atšauk'.")
                     }
                 }
             }

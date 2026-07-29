@@ -1,0 +1,108 @@
+Fix the existing voice destination search with minimal changes only.
+
+IMPORTANT:
+- Do NOT refactor the project.
+- Preserve typed Places Autocomplete exactly as it works now.
+- Preserve existing navigation, microphone, STT and AI conversation.
+- Do not immediately start navigation.
+- Change only files directly related to voice destination search.
+
+PROBLEM 1 — cancellation does not work
+
+While pendingVoiceChoices is active, cancellation must be checked before every other command or AI path.
+
+Recognize Lithuanian variants after normalization:
+- "atšauk"
+- "atsauk"
+- "atšaukti"
+- "atsaukti"
+- "atšauk paiešką"
+- "atšauk pasirinkimą"
+- "atšauk maršrutą"
+- "nebereikia"
+- "nieko nereikia"
+- "palik"
+- "stop"
+
+When detected:
+1. Clear pendingVoiceChoices.
+2. Clear pendingVoiceChoicesOneResult.
+3. Cancel any active voice place-search coroutine if applicable.
+4. Say: "Gerai, atšaukiau."
+5. Return immediately.
+6. Do not send this utterance to KentasChat.
+7. Do not start navigation.
+
+Add diagnostic logs:
+VOICE_PLACE_CANCEL_RECEIVED
+VOICE_PLACE_CHOICES_CLEARED
+
+PROBLEM 2 — category and business searches fail
+
+The current Autocomplete-only approach is insufficient for generic nearby categories.
+
+Keep Autocomplete for:
+- addresses
+- specific named places
+- incomplete place names
+
+Add a minimal nearby/category search path using the already enabled Places API (New).
+
+Map normalized Lithuanian category phrases to Google place types:
+
+- "vaistinė", "vaistinės", "vaistine", "vaistiniu" -> pharmacy
+- "degalinė", "degalinės", "degaline", "degaliniu", "kuro kolonėlė" -> gas_station
+- "parduotuvė", "parduotuvės", "parduotuve", "maisto parduotuvė" -> supermarket
+- "restoranas", "restoranai" -> restaurant
+- "kavinė", "kavine" -> cafe
+- "ligoninė", "ligonine" -> hospital
+
+For these category commands:
+1. Use the current GPS latitude/longitude.
+2. Perform Nearby Search (New) around the user.
+3. Start with a reasonable radius such as 10 km.
+4. Return up to 3 nearest suitable open/available results where supported.
+5. Store them as pending choices.
+6. Read the choices and wait for:
+   - "pirmą"
+   - "antrą"
+   - "trečią"
+   - spoken business name
+   - cancellation
+
+For named chains such as:
+- "Maxima"
+- "Maximos"
+- "Senukai"
+- "Lidl"
+- "Rimi"
+
+normalize Lithuanian inflections:
+- "maximos" -> "Maxima"
+- "senukų", "senukus" -> "Senukai"
+
+Use Text Search (New) or the existing autocomplete with current-location bias, whichever requires fewer changes and returns nearby branches reliably.
+
+Do not use Lithuania-wide first-result selection.
+
+Expected examples:
+
+User: "Kentai, surask degalinę"
+Kentas: "Radau tris netoliese: pirmas Circle K..., antras Viada..., trečias Neste.... Kurią renkamės?"
+
+User: "Kentai, surask Maximą"
+Kentas: lists nearby Maxima stores in the current city.
+
+User: "Atšauk"
+Kentas: "Gerai, atšaukiau."
+Pending choices are cleared and no navigation starts.
+
+If Nearby Search or Text Search is not available in the currently installed Places SDK version:
+- first report the exact compatible SDK version required;
+- update only the Places dependency;
+- preserve the existing Navigation SDK maps exclusion;
+- do not redesign the feature.
+
+Run compileDebugKotlin if possible.
+Report exactly which files changed.
+Do not commit unrelated files.

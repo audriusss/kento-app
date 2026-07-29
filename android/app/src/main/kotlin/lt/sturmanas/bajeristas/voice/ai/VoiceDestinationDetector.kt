@@ -1,77 +1,72 @@
 package lt.sturmanas.bajeristas.voice.ai
 
 /**
- * Detects navigation/destination intent in voice transcripts and extracts
- * the raw destination query for the Places autocomplete API.
+ * Lightweight result type shared by all voice-destination search paths
+ * (Autocomplete, Nearby Search, Text Search).
+ *
+ * Kept in this file so [VoiceDestinationDetector] and [AIConversationController]
+ * can use it without any Android imports — fully testable on a plain JVM.
+ */
+data class VoiceDestinationChoice(
+    val placeId: String,
+    /** Primary display name (pharmacy name, address, POI title, etc.). */
+    val name: String,
+    /** Short address fragment (street + city, Lithuania/Lietuva suffix stripped). */
+    val shortAddress: String,
+)
+
+/**
+ * Detects navigation/destination intent in voice transcripts, extracts the raw
+ * destination query, and classifies it as a generic category, a known chain name,
+ * or a free-text query for Places Autocomplete.
  *
  * ## Separation of concerns
- * - [isNavigationCommand] operates on **normalized** text (diacritics stripped,
- *   lowercase, punctuation removed) produced by `AIConversationController.normalizeText()`.
- * - [extractQuery] operates on the **original** transcript (diacritics preserved)
- *   to give the Places API the best possible query.
+ * - All functions that take *normText* expect text pre-processed by
+ *   `AIConversationController.normalizeText()`: lowercase, diacritics stripped,
+ *   punctuation removed.
+ * - [extractQuery] takes the **original** transcript (diacritics preserved) so the
+ *   Places API receives the highest-quality query string.
  *
- * ## False-positive guard
- * Normal sentences that mention a place without an explicit navigation verb ("nuvesk",
- * "surask", "važiuojam į", etc.) do NOT match.  "Buvau Akropolyje" will not trigger
- * navigation; "Nuvesk į Akropolį" will.
- *
- * ## Ordinal words ('pirma', 'antra', 'trecia') are NOT treated as nav commands.
- * [isNavigationCommand] excludes them, so they are never routed through Places search
- * when the pending-choices gate in AIConversationController handles them first.
+ * ## Ordinal/cancel/confirm words are excluded from nav detection.
+ * [isNavigationCommand] returns false for selection, cancellation, and confirmation
+ * utterances so they are always handled by the pending-choices gate first.
  *
  * No Android imports — fully testable on a plain JVM.
  */
 object VoiceDestinationDetector {
 
-    // ── Detection (normalized text: diacritics stripped, lowercase) ───────────
+    // ── Navigation intent detection ────────────────────────────────────────────
 
-    /**
-     * Single-word nav verbs.  Present in the normalized transcript ⇒ nav intent.
-     */
     private val NAV_KEYWORDS = listOf(
-        "nuvesk",    // "nuvesk į X"
-        "surask",    // "surask [artimiausią] X"
-        "parodyk",   // "parodyk kelią į X"
-        "eime",      // "eime į X"
-        "eikime",    // "eikime į X"
+        "nuvesk",   // "nuvesk į X"
+        "surask",   // "surask [artimiausią] X"
+        "parodyk",  // "parodyk kelią į X"
+        "eime",     // "eime į X"
+        "eikime",   // "eikime į X"
     )
 
-    /**
-     * Multi-word nav phrases (normalized).
-     */
     private val NAV_PHRASES = listOf(
         "vazuojam i ",      // "važiuojam į X"
         "rask artimiausia", // "rask artimiausią X"
         "marsrutas i ",     // "maršrutas į X"
         "navigacija i ",    // "navigacija į X"
-        "eime i ",          // "eime į X"  (phrase version with trailing space)
+        "eime i ",          // "eime į X"
         "eikime i ",        // "eikime į X"
     )
 
     /**
-     * Returns true when [normText] contains a clear navigation/destination intent.
-     * Ordinal words ("pirma", "antra", "trecia") are explicitly excluded so that
-     * a user saying "pirmą" during a pending choice does not trigger a new search.
-     *
-     * @param normText Normalized (diacritics stripped, lowercase, no punct) text.
+     * Returns true when [normText] expresses a navigation/destination intent.
+     * Selection, cancellation, and confirmation utterances are explicitly excluded.
      */
     fun isNavigationCommand(normText: String): Boolean {
-        // Guard: pure ordinal/confirmation/cancellation utterances must never be
-        // treated as a new nav search — they are handled by the pending-choices gate.
         if (isSelectionCommand(normText) || isCancellationCommand(normText) ||
             isConfirmationCommand(normText)) return false
-
         return NAV_KEYWORDS.any { normText.contains(it) } ||
                NAV_PHRASES.any  { normText.contains(it) }
     }
 
-    // ── Extraction (original text, diacritics preserved) ─────────────────────
+    // ── Query extraction ───────────────────────────────────────────────────────
 
-    /**
-     * Patterns applied to `originalText.lowercase()` (diacritics preserved,
-     * only case folded).  Each pattern has exactly **one capture group** for
-     * the destination query.  Listed from most specific to least.
-     */
     private val EXTRACTION_PATTERNS = listOf(
         Regex("""^(?:(?:kentai?|kente)[,\s]+)?(?:nuvesk|nuvek)(?:\s+mus)?\s+[įi]\s+(.+)$"""),
         Regex("""^(?:(?:kentai?|kente)[,\s]+)?(?:važiuojam|vazuojam)\s+[įi]\s+(.+)$"""),
@@ -82,19 +77,7 @@ object VoiceDestinationDetector {
         Regex("""^(?:(?:kentai?|kente)[,\s]+)?(?:eime|eikime)\s+[įi]\s+(.+)$"""),
     )
 
-    /**
-     * Extracts the destination query from [originalText], preserving diacritics.
-     *
-     * Examples (Lithuanian STT output → Places query):
-     * ```
-     * "Kentai, nuvesk į Senukus"     → "Senukus"
-     * "Nuvesk į vaistinę"            → "vaistinę"
-     * "Surask artimiausią degalinę"  → "degalinę"
-     * "Važiuojam į Akropolį"         → "Akropolį"
-     * ```
-     *
-     * Falls back to stripping only the wake-word prefix when no pattern matches.
-     */
+    /** Extracts the destination query from [originalText], preserving diacritics. */
     fun extractQuery(originalText: String): String {
         val lower = originalText.lowercase()
         for (pattern in EXTRACTION_PATTERNS) {
@@ -107,34 +90,157 @@ object VoiceDestinationDetector {
             .trim()
     }
 
-    // ── Pending-choice selection ───────────────────────────────────────────────
+    // ── Category detection (normalized query → Google Place type) ─────────────
 
     /**
-     * Normalized ordinal forms for positions 1, 2, 3 (index 0, 1, 2).
-     * Diacritics are already stripped by normalizeText before these are compared.
+     * Maps normalized Lithuanian category words to Google Places types.
+     * Keys are the exact post-normalization strings that the user would say.
      */
-    private val ORDINALS_BY_INDEX: List<Set<String>> = listOf(
-        // index 0 — first
-        setOf("pirma", "pirmas", "pirmoji", "pirmasis", "pirm", "viena", "vienas"),
-        // index 1 — second
-        setOf("antra", "antras", "antroji", "antrasis", "antr"),
-        // index 2 — third
-        setOf("trecia", "trecias", "trecioji", "treciasis", "trec", "trys"),
+    private val CATEGORY_TOKENS: Map<String, String> = mapOf(
+        // pharmacy
+        "vaistine"          to "pharmacy",
+        "vaistines"         to "pharmacy",
+        "vaistiniu"         to "pharmacy",
+        "vaistinele"        to "pharmacy",
+        "apteka"            to "pharmacy",
+        // gas station
+        "degaline"          to "gas_station",
+        "degalines"         to "gas_station",
+        "degaliniu"         to "gas_station",
+        "kuro kolonele"     to "gas_station",
+        "degaliu stotele"   to "gas_station",
+        "degaliu"           to "gas_station",
+        // supermarket / grocery
+        "parduotuve"        to "supermarket",
+        "parduotuves"       to "supermarket",
+        "maisto parduotuve" to "supermarket",
+        "supermarketas"     to "supermarket",
+        "prekyba"           to "supermarket",
+        // restaurant
+        "restoranas"        to "restaurant",
+        "restoranai"        to "restaurant",
+        "restoranu"         to "restaurant",
+        // cafe
+        "kavine"            to "cafe",
+        "kavines"           to "cafe",
+        "kavinu"            to "cafe",
+        "kavinele"          to "cafe",
+        "kavineles"         to "cafe",
+        "kava"              to "cafe",
+        // hospital
+        "ligonine"          to "hospital",
+        "ligonines"         to "hospital",
+        "ligoniu"           to "hospital",
+        "klinika"           to "hospital",
+        "klinikos"          to "hospital",
+        // ATM
+        "bankomatas"        to "atm",
+        "bankomatai"        to "atm",
+        "grynuju"           to "atm",
     )
 
     /**
-     * Returns true when [normText] is a standalone ordinal selection utterance
-     * ("pirmą", "antras", "trečias", etc.).  Used to guard [isNavigationCommand].
+     * Returns a Google Place type if [normQuery] is a pure category utterance
+     * (e.g. "vaistine", "degaline"), or null for named-place or free-text queries.
+     *
+     * Strips optional "artimiausia/artimiausias" prefix before matching so that
+     * "surask artimiausią degalinę" (normQuery = "artimiausia degaline") still
+     * resolves to "gas_station".
      */
+    fun detectCategoryType(normQuery: String): String? {
+        val stripped = normQuery.trim()
+            .removePrefix("artimiausia ")
+            .removePrefix("artimiausias ")
+            .removePrefix("artimiausia")
+            .trim()
+        // Exact match (handles both single-word and two-word entries like "kuro kolonele")
+        return CATEGORY_TOKENS[stripped]
+    }
+
+    // ── Chain name normalization ───────────────────────────────────────────────
+
+    /**
+     * Maps normalized Lithuanian inflections of known chain brands to their canonical
+     * display name (used as the text query in Text Search).
+     *
+     * Only exact single-token matches are considered (after normalizeText + trim).
+     * "Gintarinė vaistinė" is a multi-token query and will not match here.
+     */
+    private val CHAIN_VARIANTS: Map<String, String> = mapOf(
+        // Maxima
+        "maxima"      to "Maxima",
+        "maximos"     to "Maxima",
+        "maximoje"    to "Maxima",
+        "maximoje"    to "Maxima",
+        // Senukai
+        "senukai"     to "Senukai",
+        "senukus"     to "Senukai",
+        "senuku"      to "Senukai",
+        "senukuose"   to "Senukai",
+        // Lidl
+        "lidl"        to "Lidl",
+        "lidlo"       to "Lidl",
+        "lidluje"     to "Lidl",
+        "lidlui"      to "Lidl",
+        // Rimi
+        "rimi"        to "Rimi",
+        "rimio"       to "Rimi",
+        "rimyje"      to "Rimi",
+        // IKI
+        "iki"         to "IKI",
+        "ikiuke"      to "IKI",
+        "ikiu"        to "IKI",
+        // Norfa
+        "norfa"       to "Norfa",
+        "norfos"      to "Norfa",
+        "norfoje"     to "Norfa",
+        // Barbora / Netto
+        "barbora"     to "Barbora",
+        "netto"       to "Netto",
+        "neto"        to "Netto",
+        // Petrol / Circle K / Virpi / Lukoil
+        "circlek"     to "Circle K",
+        "viada"       to "Viada",
+        "neste"       to "Neste",
+        "lukoil"      to "Lukoil",
+        "lukoilo"     to "Lukoil",
+    )
+
+    /**
+     * Returns the canonical chain name for a single-word normalized query, or null
+     * if [normQuery] does not match any known chain inflection.
+     *
+     * Also strips "artimiausia/artimiausias" prefix for queries like
+     * "surask artimiausią Maximą".
+     */
+    fun normalizeChainName(normQuery: String): String? {
+        val stripped = normQuery.trim()
+            .removePrefix("artimiausia ")
+            .removePrefix("artimiausias ")
+            .trim()
+        // Single-token check (chain names are always one word)
+        val tokens = stripped.split(Regex("\\s+")).filter { it.isNotBlank() }
+        if (tokens.size == 1) return CHAIN_VARIANTS[tokens[0]]
+        // Two-token check for "circle k" style
+        if (tokens.size == 2) return CHAIN_VARIANTS[tokens.joinToString("")]
+        return null
+    }
+
+    // ── Pending-choice selection ───────────────────────────────────────────────
+
+    private val ORDINALS_BY_INDEX: List<Set<String>> = listOf(
+        setOf("pirma", "pirmas", "pirmoji", "pirmasis", "viena", "vienas"),  // 0 = first
+        setOf("antra", "antras", "antroji", "antrasis"),                      // 1 = second
+        setOf("trecia", "trecias", "trecioji", "treciasis", "trys"),          // 2 = third
+    )
+
+    /** Returns true when [normText] is a standalone ordinal selection utterance. */
     fun isSelectionCommand(normText: String): Boolean =
         extractSelectionIndex(normText) != null
 
     /**
      * Returns the 0-based index of the chosen suggestion (0=first, 1=second, 2=third),
      * or null if [normText] contains no recognisable ordinal word.
-     *
-     * Matches whole tokens (split on whitespace) to avoid false positives on words
-     * that merely contain ordinal substrings.
      */
     fun extractSelectionIndex(normText: String): Int? {
         val tokens = normText.split(Regex("\\s+")).filter { it.isNotBlank() }
@@ -146,42 +252,52 @@ object VoiceDestinationDetector {
 
     /**
      * Tries to match [normText] against a spoken place name.
-     * [normalizedPrimaryTexts] contains already-normalized primary text of each suggestion.
-     *
-     * Strategy: a word from the prediction name (≥4 chars) present in [normText] is
-     * treated as a match.  Returns the first matching index, or null.
+     * [normalizedNames] contains already-normalized primary names of each suggestion.
+     * A word from the prediction name (≥4 chars) present in [normText] is treated
+     * as a match. Returns the first matching index, or null.
      */
-    fun matchesNameIndex(normText: String, normalizedPrimaryTexts: List<String>): Int? {
-        for ((idx, predNorm) in normalizedPrimaryTexts.withIndex()) {
+    fun matchesNameIndex(normText: String, normalizedNames: List<String>): Int? {
+        for ((idx, predNorm) in normalizedNames.withIndex()) {
             val words = predNorm.split(Regex("\\s+")).filter { it.length >= 4 }
             if (words.any { normText.contains(it) }) return idx
         }
         return null
     }
 
-    // ── Cancellation & confirmation ───────────────────────────────────────────
+    // ── Cancellation ──────────────────────────────────────────────────────────
 
-    /** Normalized cancellation tokens. */
-    private val CANCEL_TOKENS = setOf(
+    /**
+     * Cancellation tokens (post-normalization).
+     * Checked FIRST when pendingVoiceChoices is non-null — before any other gate.
+     * Covers all forms listed in the spec plus common STT variants.
+     */
+    private val CANCEL_TOKENS: Set<String> = setOf(
         "atsauk",       // atšauk
-        "nieko",        // nieko
+        "atsaukti",     // atšaukti
         "nebereikia",   // nebereikia
+        "nieko",        // nieko (covers "nieko nereikia" via token match)
+        "nereikia",     // nereikia
         "nebenoriu",    // nebenoriu
         "atsisakau",    // atsisakau
-        "ne",           // terse "ne"
+        "palik",        // palik
+        "stop",         // stop
+        "uzbaik",       // užbaik
+        "nutrauk",      // nutrauk
     )
 
     /**
-     * Returns true when [normText] is a cancellation command
-     * ("atšauk", "nieko", "nebereikia", etc.).
+     * Returns true when [normText] contains a cancellation word.
+     * "ne" alone is intentionally excluded (too short; causes false positives on
+     * Lithuanian sentences that start with "ne" as a negation prefix).
      */
     fun isCancellationCommand(normText: String): Boolean {
         val tokens = normText.split(Regex("\\s+")).filter { it.isNotBlank() }
         return tokens.any { CANCEL_TOKENS.contains(it) }
     }
 
-    /** Normalized confirmation tokens for the single-result "Važiuojam?" prompt. */
-    private val CONFIRM_TOKENS = setOf(
+    // ── Confirmation ──────────────────────────────────────────────────────────
+
+    private val CONFIRM_TOKENS: Set<String> = setOf(
         "taip",         // taip
         "vazuojam",     // važiuojam
         "vazuojame",    // važiuojame
@@ -190,12 +306,10 @@ object VoiceDestinationDetector {
         "einam",        // einam
         "eisim",        // eisim
         "puiku",        // puiku
+        "labai",        // "labai gerai" → "labai" alone would match; acceptable
     )
 
-    /**
-     * Returns true when [normText] is a confirmation reply
-     * ("taip", "gerai", "važiuojam", etc.).
-     */
+    /** Returns true when [normText] is a confirmation reply. */
     fun isConfirmationCommand(normText: String): Boolean {
         val tokens = normText.split(Regex("\\s+")).filter { it.isNotBlank() }
         return tokens.any { CONFIRM_TOKENS.contains(it) }
