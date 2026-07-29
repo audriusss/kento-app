@@ -14,7 +14,14 @@ sdk.dir=/path/to/android/sdk
 ## Production:   https://<your-deployment-url>/api-server
 BACKEND_URL=
 
-## Google Maps / Navigation SDK API key
+## Google Maps / Navigation SDK + Places Autocomplete API key
+## Enable in Google Cloud Console:
+##   1. Maps SDK for Android
+##   2. Navigation SDK for Android
+##   3. Places API (New)          ← required for autocomplete suggestions
+## All three use this single key. Autocomplete degrades gracefully (empty results)
+## when the key is absent or the Places API is not yet enabled.
+
 ## Required for Phase 2 real navigation. Without this key the app
 ## automatically uses MockNavigationEngine (green placeholder map).
 ##
