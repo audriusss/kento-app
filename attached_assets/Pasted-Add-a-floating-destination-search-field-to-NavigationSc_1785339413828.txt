@@ -1,0 +1,72 @@
+Add a floating destination search field to NavigationScreen with minimal changes only.
+
+IMPORTANT:
+- Do NOT refactor the project.
+- Do NOT duplicate Places search logic.
+- Reuse the existing typed search UI logic and PlacesAutocompleteClient.
+- Preserve all existing navigation, voice, STT, TTS and AI behaviour.
+- Change only the minimum required files.
+- Do not redesign the whole NavigationScreen.
+
+Goal:
+While navigation is active, show a floating destination search control above the map.
+
+Required behaviour:
+
+1. Add a compact floating search field at the top of NavigationScreen.
+   Example placeholder:
+   "Ieškoti kitos vietos"
+
+2. Reuse the same Places autocomplete behaviour already used on StartScreen:
+   - incomplete addresses
+   - businesses
+   - POIs
+   - categories where currently supported
+   - current-location bias
+
+3. Do not copy/paste the full StartScreen implementation.
+   If necessary, extract only the existing destination input + suggestions UI into a small reusable composable.
+   Do not refactor unrelated code.
+
+4. The floating search should:
+   - stay compact when inactive
+   - expand when tapped
+   - show autocomplete suggestions above the map
+   - have a clear/close button
+   - not cover the maneuver card or important navigation controls
+
+5. When the user selects a new destination while navigation is active:
+   - do NOT start it immediately
+   - show a confirmation:
+     "Keisti maršrutą į [place name]?"
+   - options:
+     "Taip"
+     "Atšaukti"
+
+6. Only after confirmation:
+   - stop/replace the current route using the existing NavigationController flow
+   - start navigation to the selected coordinates
+   - keep the user on NavigationScreen
+   - say:
+     "Gerai, keičiu maršrutą."
+
+7. If the user cancels:
+   - close the confirmation
+   - keep the current route unchanged
+   - clear the temporary selection
+
+8. The floating search state must be local to NavigationScreen and must not interfere with:
+   - voice destination choices
+   - current navigation speech
+   - Kentas conversation
+   - existing StartScreen search
+
+9. Add logs:
+   NAV_FLOATING_SEARCH_OPENED
+   NAV_FLOATING_PLACE_SELECTED
+   NAV_ROUTE_CHANGE_CONFIRMED
+   NAV_ROUTE_CHANGE_CANCELLED
+
+10. Run compileDebugKotlin if possible.
+11. Report exactly which files changed.
+12. Do not commit unrelated files.
