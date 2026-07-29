@@ -11,6 +11,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -166,6 +167,20 @@ private fun SturmanasApp(
 
     var isNavigating by remember { mutableStateOf(false) }
     var startScreenError by remember { mutableStateOf<String?>(null) }
+
+    // When voice navigation starts, Kentas calls onNavigateToDestination directly —
+    // bypassing the StartScreen button and the isNavigating = true assignment below.
+    // This LaunchedEffect observes the engine phase and flips isNavigating as soon as
+    // the engine enters RESOLVING_ADDRESS (immediately on startNavigation call), so the
+    // UI switches to NavigationScreen without requiring a button press.
+    // The typed flow is unaffected: isNavigating = true below still fires first.
+    LaunchedEffect(navState.phase) {
+        if (navState.phase == NavigationPhase.RESOLVING_ADDRESS  ||
+            navState.phase == NavigationPhase.CALCULATING_ROUTE  ||
+            navState.phase == NavigationPhase.NAVIGATING) {
+            isNavigating = true
+        }
+    }
 
     if (!isNavigating) {
         StartScreen(

@@ -105,10 +105,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun startObserving(navigationController: NavigationController) {
         Log.i(TAG, "NAV_VOICE_OBSERVER_ATTACHED")
+
+        // Wire voice-destination navigation: Kentas can now start navigation by voice.
+        // The callback receives a pre-resolved "lat,lng" string from PlacesAutocompleteClient
+        // and forwards it to the existing startNavigation coordinate branch — no engine change.
+        val appContext = getApplication<Application>()
+        aiController?.onNavigateToDestination = { destination ->
+            Log.i(TAG, "VOICE_NAV_START dest='$destination'")
+            navigationController.startNavigation(appContext, destination) { error ->
+                Log.e(TAG, "VOICE_NAV_ERROR: $error")
+                // Speak the error on the main thread — speak() must not be called off-thread.
+                handler.post { aiController?.speak("Nepavyko rasti maršruto.") }
+            }
+        }
+
         viewModelScope.launch {
             navigationController.state.collect { state ->
                 onNavigationStateChanged(state)
-                
+
                 if (state.isNavigating) {
                     aiController?.startListening()
                 }

@@ -9,6 +9,12 @@ import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import lt.sturmanas.bajeristas.navigation.PlacesAutocompleteClient
 import lt.sturmanas.bajeristas.voice.pipeline.ContinuousMicrophonePipeline
 import lt.sturmanas.bajeristas.voice.pipeline.MicrophonePipeline
 import lt.sturmanas.bajeristas.voice.pipeline.PipelineConfig
@@ -104,6 +110,18 @@ class AIConversationController(
     private var aiRequestStartedAtMs = 0L
 
     private val activeNavUtterances = mutableSetOf<String>()
+
+    /**
+     * Optional callback set by [MainViewModel] once a [NavigationController] is available.
+     * When non-null, voice destination commands are intercepted before reaching [KentasChat]
+     * and routed through Places autocomplete instead.
+     * Receives a pre-resolved "lat,lng" coordinate string understood by the existing
+     * [GoogleNavigationEngine.startNavigation] raw-coordinate branch.
+     */
+    var onNavigateToDestination: ((String) -> Unit)? = null
+
+    /** Coroutine scope for async Places API calls. Cancelled in [release]. */
+    private val voiceNavScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     private val navResumeWatchdogRunnable = Runnable {
         if (phase == Phase.PAUSED_BY_NAVIGATION && activeNavUtterances.isEmpty()) {
@@ -385,7 +403,65 @@ class AIConversationController(
         }
     }
 
+    /**
+     * Handles a voice transcript that has been identified as a navigation/destination command.
+     *
+     * Flow:
+     * 1. Extract the destination query from the original transcript.
+     * 2. Call [PlacesAutocompleteClient.getSuggestions] — reuses the existing client.
+     * 3. Resolve coordinates for the top result via [PlacesAutocompleteClient.resolveCoordinates].
+     * 4. Speak a short Lithuanian confirmation and invoke [onNavigateToDestination].
+     * 5. On any failure, speak "Neradau tokios vietos." and stay on start screen.
+     */
+    private fun handleVoiceNavigation(text: String, norm: String) {
+        val query = VoiceDestinationDetector.extractQuery(text)
+        Log.i(TAG, "VOICE_NAV_COMMAND query='$query'")
+        clearUtteranceBuffer("voice_nav")
+        transitionTo(Phase.THINKING)
+
+        voiceNavScope.launch {
+            val suggestions = PlacesAutocompleteClient.getSuggestions(context, query)
+            val prediction  = suggestions.firstOrNull()
+
+            if (prediction == null) {
+                Log.i(TAG, "VOICE_NAV_NO_RESULTS query='$query'")
+                handler.post { if (!destroyed) speak("Neradau tokios vietos.") }
+                return@launch
+            }
+
+            val coords = PlacesAutocompleteClient.resolveCoordinates(context, prediction.placeId)
+            if (coords == null) {
+                Log.i(TAG, "VOICE_NAV_COORDS_FAIL placeId='${prediction.placeId}'")
+                handler.post { if (!destroyed) speak("Neradau tokios vietos.") }
+                return@launch
+            }
+
+            val destination  = "${coords.first},${coords.second}"
+            val confirmation = if (norm.contains("artimiausia") || norm.contains("surask")) {
+                "Radau artimiausią. Pradedu maršrutą."
+            } else {
+                "Radau. Važiuojam."
+            }
+            Log.i(TAG, "VOICE_NAV_RESOLVED dest='$destination' confirmation='$confirmation'")
+
+            handler.post {
+                if (!destroyed) {
+                    speak(confirmation)
+                    onNavigateToDestination?.invoke(destination)
+                }
+            }
+        }
+    }
+
     private fun sendToAi(text: String) {
+        // Intercept navigation/destination commands before routing to AI chat.
+        // Guard: only when a navigation callback is wired (engine is ready).
+        val norm = normalizeText(text)
+        if (onNavigateToDestination != null && VoiceDestinationDetector.isNavigationCommand(norm)) {
+            handleVoiceNavigation(text, norm)
+            return
+        }
+
         aiRequestStartedAtMs = System.currentTimeMillis()
         val elapsedSinceStt = if (transcriptReceivedAtMs > 0)
             aiRequestStartedAtMs - transcriptReceivedAtMs
@@ -634,6 +710,7 @@ class AIConversationController(
 
     fun release() {
         destroyed = true
+        voiceNavScope.cancel()
         pipeline.stop()
         watchdogHandler.removeCallbacksAndMessages(null)
         handler.removeCallbacksAndMessages(null)
