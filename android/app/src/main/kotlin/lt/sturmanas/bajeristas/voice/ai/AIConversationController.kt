@@ -171,12 +171,37 @@ class AIConversationController(
     }
 
     // ── Destination-only input mode ───────────────────────────────────────────
-    // When non-null, the NEXT pipeline transcript is routed here and the pipeline
-    // is immediately muted — bypassing the Kentas conversation engine entirely.
-    // Used by StartScreen mic for destination entry only.
+    // When non-null, incoming transcripts are buffered until a final-silence
+    // grace period elapses, then delivered as a single complete destination
+    // phrase.  The pipeline stays unmuted during the grace window so short
+    // mid-phrase pauses do not terminate the session prematurely.
+    //
     // All access is on the main thread (the pipeline posts via handler.post).
     private var destinationInputCallback: ((String) -> Unit)? = null
     private var destinationInputEndCallback: (() -> Unit)? = null
+
+    /** Accumulated transcript fragments during the current destination session. */
+    private var destBufferedText: String = ""
+
+    /**
+     * Incremented each time a new transcript fragment arrives in destination
+     * mode.  Every grace-period runnable captures its value at scheduling time
+     * and no-ops if the counter has advanced — ensuring only the newest
+     * complete utterance fires [DESTINATION_UTTERANCE_FINALIZED].
+     */
+    private var destFragmentGeneration: Int = 0
+
+    /** Pending grace-period callback; kept so it can be cancelled on new speech. */
+    private var destGraceRunnable: Runnable? = null
+
+    /** Session-level idle timeout callback. */
+    private var destTimeoutRunnable: Runnable? = null
+
+    /** How long (ms) silence must persist after the last fragment before finalising. */
+    private val DESTINATION_GRACE_MS = 1_800L
+
+    /** Abandon the session after this many ms with no useful speech. */
+    private val DESTINATION_TIMEOUT_MS = 10_000L
 
     private val navResumeRunnable = Runnable {
         if (activeNavUtterances.isEmpty()) {
@@ -296,15 +321,37 @@ class AIConversationController(
         // ── Destination-only intercept (StartScreen mic) ──────────────────────
         // Must run before the phase gate so it works even when the conversation
         // engine is in Phase.MUTED (its normal idle state on StartScreen).
-        val destCb = destinationInputCallback
-        if (destCb != null) {
-            Log.i(TAG, "STARTSCREEN_VOICE_RESULT text='$text'")
-            destinationInputCallback = null
-            val endCb = destinationInputEndCallback
-            destinationInputEndCallback = null
-            pipeline.mute()
-            endCb?.invoke()          // clears isDestinationListening in ViewModel
-            destCb(text)             // sets destination in StartScreen
+        //
+        // Each transcript fragment restarts a grace-period timer instead of
+        // finalising immediately.  This prevents a short first fragment (e.g.
+        // "Akropolis") from terminating the session while the user is still
+        // speaking the rest of the destination ("Klaipėda").
+        if (destinationInputCallback != null) {
+            val fragGen = ++destFragmentGeneration
+
+            // Cancel any pending grace timer — new speech has arrived.
+            destGraceRunnable?.let {
+                handler.removeCallbacks(it)
+                Log.i(TAG, "DESTINATION_NEW_SPEECH_CANCELLED_PENDING_FINAL gen=$fragGen")
+            }
+
+            // Merge this fragment into the accumulated buffer.
+            destBufferedText = mergeDestTexts(destBufferedText, text)
+            Log.i(TAG, "DESTINATION_FRAGMENT_BUFFERED gen=$fragGen buffered='$destBufferedText'")
+
+            // Arm the grace timer.  Only the runnable whose fragGen still matches
+            // destFragmentGeneration when it fires will call finalizeDestination().
+            val graceRunnable = Runnable {
+                if (fragGen == destFragmentGeneration && destinationInputCallback != null) {
+                    Log.i(TAG, "DESTINATION_UTTERANCE_FINALIZED text='$destBufferedText'")
+                    finalizeDestination()
+                } else {
+                    Log.i(TAG, "DESTINATION_STALE_TRANSCRIPT_IGNORED gen=$fragGen current=$destFragmentGeneration")
+                }
+            }
+            destGraceRunnable = graceRunnable
+            Log.i(TAG, "DESTINATION_FINAL_GRACE_STARTED gen=$fragGen graceMs=$DESTINATION_GRACE_MS")
+            handler.postDelayed(graceRunnable, DESTINATION_GRACE_MS)
             return
         }
 
@@ -352,8 +399,33 @@ class AIConversationController(
     fun startDestinationInput(onResult: (String) -> Unit, onEnd: () -> Unit) {
         if (destroyed) return
         Log.i(TAG, "STARTSCREEN_VOICE_LISTENING_STARTED")
+        // Reset per-session state.
+        destBufferedText = ""
+        destFragmentGeneration = 0
+        destGraceRunnable?.let { handler.removeCallbacks(it) }
+        destGraceRunnable = null
+        destTimeoutRunnable?.let { handler.removeCallbacks(it) }
+
         destinationInputCallback = onResult
         destinationInputEndCallback = onEnd
+
+        // Session-level idle timeout: if the user never speaks (or only produces
+        // fragments too short to trigger a grace finalization), abandon the session.
+        val timeoutRunnable = Runnable {
+            if (destinationInputCallback != null) {
+                Log.i(TAG, "DESTINATION_SESSION_TIMEOUT buffered='$destBufferedText'")
+                if (destBufferedText.isNotBlank()) {
+                    // Deliver what we have rather than silently dropping it.
+                    Log.i(TAG, "DESTINATION_UTTERANCE_FINALIZED text='$destBufferedText'")
+                    finalizeDestination()
+                } else {
+                    stopDestinationInput()
+                }
+            }
+        }
+        destTimeoutRunnable = timeoutRunnable
+        handler.postDelayed(timeoutRunnable, DESTINATION_TIMEOUT_MS)
+
         pipeline.unmute()
         pipeline.start()
     }
@@ -366,10 +438,55 @@ class AIConversationController(
         val endCb = destinationInputEndCallback
         if (destinationInputCallback == null && endCb == null) return
         Log.i(TAG, "STARTSCREEN_VOICE_ENDED reason=stopped")
+        destGraceRunnable?.let { handler.removeCallbacks(it) }
+        destGraceRunnable = null
+        destTimeoutRunnable?.let { handler.removeCallbacks(it) }
+        destTimeoutRunnable = null
+        destBufferedText = ""
         destinationInputCallback = null
         destinationInputEndCallback = null
         pipeline.mute()
         endCb?.invoke()
+    }
+
+    /**
+     * Delivers the accumulated destination text and tears down the session.
+     * Must only be called on the main thread when [destinationInputCallback] is non-null.
+     */
+    private fun finalizeDestination() {
+        val text = destBufferedText.trim()
+        val cb = destinationInputCallback ?: return
+        val endCb = destinationInputEndCallback
+        Log.i(TAG, "STARTSCREEN_VOICE_RESULT text='$text'")
+        destGraceRunnable?.let { handler.removeCallbacks(it) }
+        destGraceRunnable = null
+        destTimeoutRunnable?.let { handler.removeCallbacks(it) }
+        destTimeoutRunnable = null
+        destBufferedText = ""
+        destinationInputCallback = null
+        destinationInputEndCallback = null
+        pipeline.mute()
+        endCb?.invoke()   // clears isDestinationListening in ViewModel
+        cb(text)          // sets destination text in StartScreen
+    }
+
+    /**
+     * Merges a new transcript fragment into the accumulated destination buffer,
+     * deduplicating any overlapping word sequences between the two.
+     *
+     * This replicates the logic of [appendToBuffer] but operates on plain strings
+     * rather than the shared [utteranceBuffer], keeping destination state isolated.
+     */
+    private fun mergeDestTexts(existing: String, newText: String): String {
+        if (existing.isBlank()) return newText.trim()
+        val existingWords = existing.split(Regex("\\s+")).filter { it.isNotBlank() }
+        val newWords      = newText.split(Regex("\\s+")).filter { it.isNotBlank() }
+        var overlapSize   = 0
+        for (i in 1..existingWords.size.coerceAtMost(newWords.size)) {
+            if (existingWords.takeLast(i) == newWords.take(i)) overlapSize = i
+        }
+        val toAppend = newWords.drop(overlapSize).joinToString(" ")
+        return if (toAppend.isNotBlank()) "${existing.trim()} $toAppend" else existing.trim()
     }
 
     // ─── CONVERSATION LOGIC ───────────────────────────────────────────────
