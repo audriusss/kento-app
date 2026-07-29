@@ -181,7 +181,7 @@ private fun SturmanasApp(
             NavigationPhase.CALCULATING_ROUTE,
             NavigationPhase.NAVIGATING -> isNavigating = true
             NavigationPhase.IDLE       -> {
-                Log.i(FLOW_TAG, "NAV_UI_RETURN_TO_START")
+                Log.i(MainActivity.FLOW_TAG, "NAV_UI_RETURN_TO_START")
                 isNavigating = false
             }
             else -> { /* ARRIVED — keep NavigationScreen visible */ }
@@ -218,7 +218,7 @@ private fun SturmanasApp(
                 // so the announcement plays while address resolution is in progress.
                 viewModel.announceReroute()
                 navigationController.startNavigation(context, destination) { err ->
-                    Log.e(FLOW_TAG, "REROUTE_ERROR: $err")
+                    Log.e(MainActivity.FLOW_TAG, "REROUTE_ERROR: $err")
                 }
             },
             aiStatus = aiStatus
