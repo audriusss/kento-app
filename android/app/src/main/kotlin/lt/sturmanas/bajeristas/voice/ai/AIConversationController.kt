@@ -104,6 +104,19 @@ class AIConversationController(
     private var aiTtsTerminalHandled = false
     private val watchdogRunnable = Runnable { handleTtsWatchdog() }
 
+    // ── Interrupted AI response state ─────────────────────────────────────
+    // When a navigation announcement interrupts an in-progress AI response, the
+    // remaining sentences are saved here so they can be replayed after navigation
+    // finishes.  A generation counter guards against stale resumes: every new
+    // speak() call increments currentResponseGeneration, invalidating any saved
+    // interrupted state from an earlier answer.
+    private var interruptedSentences: List<String> = emptyList()
+    private var interruptedFromIndex: Int = 0
+    private var currentResponseGeneration: Long = 0L
+    private var interruptedResponseGeneration: Long = -1L
+    /** True while a nav-interrupted AI response is waiting to resume. */
+    private var isNavInterruptResumePending: Boolean = false
+
     // ── End-to-end latency tracking ───────────────────────────────────────
     /** Epoch ms when the latest user transcript arrived from the pipeline. */
     private var transcriptReceivedAtMs = 0L
@@ -326,6 +339,7 @@ class AIConversationController(
             Log.i(TAG, "CONV_EVENT type=MUTE_COMMAND")
             mode = ConversationMode.MUTED
             transitionTo(Phase.MUTED)
+            clearInterruptedResponse("mute_command")
             clearUtteranceBuffer("mute_command")
             speak("Gerai kapitone. Patylėsiu. Tik navigacija liks.")
             return
@@ -588,6 +602,7 @@ class AIConversationController(
         // Also clear any pending place selection that may have been left open.
         pendingVoiceChoices = null
         pendingVoiceChoicesOneResult = false
+        clearInterruptedResponse("route_cancelled")
         clearUtteranceBuffer("voice_route_cancel")
         onStopNavigation?.invoke()
         Log.i(TAG, "VOICE_NAV_ROUTE_STOPPED")
@@ -744,6 +759,18 @@ class AIConversationController(
             // before the mute cannot bleed into post-navigation listening.
             pipeline.resetVadAndSegmenter()
             clearUtteranceBuffer("nav_interrupt")
+
+            // Save interrupted AI response BEFORE stopping TTS so we can resume later.
+            // Only save if we were actively speaking a chunked AI response.
+            if (phase == Phase.SPEAKING && sentences.isNotEmpty()) {
+                interruptedSentences = sentences
+                interruptedFromIndex = currentIndex
+                interruptedResponseGeneration = currentResponseGeneration
+                isNavInterruptResumePending = true
+                isInterrupted = true   // stops playNextAiSentence() if onDone fires after this
+                Log.i(TAG, "AI_RESPONSE_INTERRUPTED_BY_NAV fromIdx=$currentIndex remaining=${sentences.size - currentIndex}")
+            }
+
             stopAiSpeech()
         }
 
@@ -783,6 +810,15 @@ class AIConversationController(
         handler.removeCallbacks(navResumeWatchdogRunnable)
         handler.removeCallbacks(navResumeRunnable)
 
+        Log.i(TAG, "NAV_SPEECH_FINISHED")
+
+        if (isNavInterruptResumePending) {
+            // An AI response was interrupted — resume it instead of opening the mic.
+            Log.i(TAG, "AI_RESPONSE_RESUME_PENDING fromIdx=$interruptedFromIndex remaining=${interruptedSentences.size - interruptedFromIndex}")
+            resumeInterruptedAiResponse()
+            return
+        }
+
         val resumePhase = when (prePausedPhase) {
             Phase.SPEAKING, Phase.THINKING -> Phase.LISTENING
             else -> prePausedPhase ?: Phase.IDLE
@@ -795,8 +831,78 @@ class AIConversationController(
         Log.i(TAG, "STT_SESSION_READY_AFTER_NAV")
     }
 
+    /**
+     * Checks that the saved interrupted response is still valid (same generation,
+     * sentences remain) and calls [resumeAiSpeechFrom] to replay from the saved index.
+     * Falls back to the normal listen-resume path if the response was superseded or
+     * cancelled while the nav utterance was in flight.
+     */
+    private fun resumeInterruptedAiResponse() {
+        if (!isNavInterruptResumePending) {
+            Log.d(TAG, "AI_RESPONSE_RESUME_CANCELLED reason=not_pending")
+            pipeline.resetVadAndSegmenter()
+            transitionTo(postTtsTargetPhase(mode))
+            return
+        }
+        if (interruptedResponseGeneration != currentResponseGeneration) {
+            Log.i(TAG, "AI_RESPONSE_RESUME_CANCELLED reason=stale_generation saved=$interruptedResponseGeneration current=$currentResponseGeneration")
+            isNavInterruptResumePending = false
+            pipeline.resetVadAndSegmenter()
+            transitionTo(postTtsTargetPhase(mode))
+            return
+        }
+        val resumeSentences = interruptedSentences
+        val fromIndex = interruptedFromIndex
+        if (resumeSentences.isEmpty() || fromIndex >= resumeSentences.size) {
+            Log.i(TAG, "AI_RESPONSE_RESUME_CANCELLED reason=no_remaining_sentences")
+            isNavInterruptResumePending = false
+            pipeline.resetVadAndSegmenter()
+            transitionTo(postTtsTargetPhase(mode))
+            return
+        }
+        isNavInterruptResumePending = false
+        Log.i(TAG, "AI_RESPONSE_RESUMED fromIdx=$fromIndex remaining=${resumeSentences.size - fromIndex}")
+        resumeAiSpeechFrom(resumeSentences, fromIndex)
+    }
+
+    /**
+     * Restarts chunked TTS playback from [fromIndex] within [resumeSentences].
+     * Mirrors the tail of [speak] without touching generation counters or interrupted state.
+     * Audio focus, mic muting, watchdog, and cooldown all follow the same path as a
+     * normal [speak] call.
+     */
+    private fun resumeAiSpeechFrom(resumeSentences: List<String>, fromIndex: Int) {
+        if (!isTtsReady || destroyed) return
+        Log.i(TAG, "MIC_PIPELINE_MUTED reason=AI_TTS_RESUME")
+        transitionTo(Phase.SPEAKING)
+        pipeline.resetVadAndSegmenter()
+        aiTtsTerminalHandled = false
+        sentences = resumeSentences
+        currentIndex = fromIndex
+        isInterrupted = false
+        val remainingText = resumeSentences.drop(fromIndex).joinToString(" ")
+        armWatchdog(remainingText.length)
+        playNextAiSentence()
+    }
+
+    /**
+     * Discards any saved interrupted-response state.
+     * Must be called whenever a new [speak] replaces the old answer, the user stops
+     * Kentas, the route is cancelled, or the controller is released.
+     */
+    private fun clearInterruptedResponse(reason: String) {
+        if (isNavInterruptResumePending) {
+            Log.i(TAG, "AI_RESPONSE_RESUME_CANCELLED reason=$reason")
+        }
+        isNavInterruptResumePending = false
+        interruptedSentences = emptyList()
+        interruptedFromIndex = 0
+        interruptedResponseGeneration = -1L
+    }
+
     fun stop() {
         Log.i(TAG, "CONV_EVENT type=STOP_REQUESTED")
+        clearInterruptedResponse("user_stop")
         stopAiSpeech()
         onTtsTerminal("CANCELLED_BY_USER")
     }
@@ -819,6 +925,10 @@ class AIConversationController(
         transitionTo(Phase.SPEAKING)
         pipeline.resetVadAndSegmenter()
 
+        // Discard any previously interrupted response — this answer supersedes it.
+        clearInterruptedResponse("new_speak")
+        currentResponseGeneration++
+
         aiTtsTerminalHandled = false
         currentAiUtteranceId = UUID.randomUUID().toString().substring(0, 8)
         sentences = text.split(Regex("(?<=[.!?])\\s+")).filter { it.isNotBlank() }
@@ -837,6 +947,7 @@ class AIConversationController(
         val id = currentAiUtteranceId ?: return
         if (currentIndex < sentences.size && !isInterrupted) {
             val s = sentences[currentIndex]
+            Log.i(TAG, "AI_RESPONSE_CHUNK_STARTED idx=$currentIndex total=${sentences.size}")
             val result = tts?.speak(s, TextToSpeech.QUEUE_FLUSH, null, id)
             if (result != TextToSpeech.SUCCESS) {
                 onTtsTerminal("START_FAILED")
@@ -860,6 +971,7 @@ class AIConversationController(
         if (aiTtsTerminalHandled && reason != "CANCELLED_BY_NAVIGATION") return
         aiTtsTerminalHandled = true
         Log.i(TAG, "AI_TTS_TERMINAL reason=$reason")
+        if (reason == "COMPLETED") Log.i(TAG, "AI_RESPONSE_COMPLETED")
 
         watchdogHandler.removeCallbacks(watchdogRunnable)
         audioManager.abandonAudioFocusRequest(focusRequest)
@@ -925,6 +1037,7 @@ class AIConversationController(
 
     fun release() {
         destroyed = true
+        clearInterruptedResponse("released")
         voiceNavScope.cancel()
         pipeline.stop()
         watchdogHandler.removeCallbacksAndMessages(null)
