@@ -94,7 +94,12 @@ dependencies {
     // Google Places SDK (New API) — autocomplete suggestions for the destination input.
     // Requires "Places API (New)" enabled in Google Cloud Console (same key as Navigation SDK).
     // Safe to include without a key: PlacesAutocompleteClient returns empty results when key absent.
-    implementation("com.google.android.libraries.places:places:3.5.0")
+    //
+    // Exclude play-services-maps: the Navigation SDK already ships it, and having two copies on
+    // the classpath causes "Duplicate class com.google.android.gms.maps.model.*" at compile time.
+    implementation("com.google.android.libraries.places:places:3.5.0") {
+        exclude(group = "com.google.android.gms", module = "play-services-maps")
+    }
 
     // Coroutines (for MockNavigationEngine simulation and suspend functions)
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
