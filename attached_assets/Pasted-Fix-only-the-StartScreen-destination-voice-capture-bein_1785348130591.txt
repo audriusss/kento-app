@@ -1,0 +1,58 @@
+Fix only the StartScreen destination voice capture being finalized too early.
+
+Observed logs:
+- first speech segment ended after only 992 ms
+- STT upload started immediately
+- the user continued speaking and VAD detected a second speech segment
+- first result "Važiuokite." arrived
+- destination mode muted immediately, discarding the rest of the destination
+
+Required behavior:
+- StartScreen destination input must capture one complete destination phrase, not the first short speech fragment.
+- Reuse the existing MicrophonePipeline.
+- Do not change Kentas navigation conversation behavior.
+- Do not redesign UI.
+- Do not create another SpeechRecognizer.
+
+Implementation requirements:
+1. In destination-input mode only, use a longer final-silence grace period before uploading/finalizing:
+   - minimum 1500–2000 ms of silence after speech
+   - short pauses inside a phrase must not finish the request
+
+2. If new speech starts while an STT upload for an earlier fragment is in progress:
+   - do not accept that earlier transcript as the final destination
+   - keep listening
+   - combine/replace the buffered audio appropriately using the existing pipeline design
+   - never mute destination mode while newer speech is active
+
+3. Finalize destination input only when:
+   - speech has ended
+   - the final silence grace period has elapsed
+   - no newer speech generation exists
+
+4. Add generation/session protection:
+   - each destination voice session has an id
+   - ignore stale STT results from an older audio fragment
+   - only the newest complete utterance may call STARTSCREEN_VOICE_RESULT
+
+5. Keep a reasonable timeout:
+   - stop and return to idle after about 10 seconds with no useful speech
+   - errors must reset isDestinationListening
+
+6. Useful logs:
+DESTINATION_FINAL_GRACE_STARTED
+DESTINATION_NEW_SPEECH_CANCELLED_PENDING_FINAL
+DESTINATION_STALE_TRANSCRIPT_IGNORED
+DESTINATION_UTTERANCE_FINALIZED
+DESTINATION_SESSION_TIMEOUT
+
+7. Verify:
+- saying "Akropolis Klaipėda" with a short pause does not return only "Akropolis"
+- saying a full sentence such as "Važiuojam į Klaipėdos Akropolį" produces one complete result
+- StartScreen mutes only after the complete final transcript
+- NavigationScreen voice logic remains unchanged
+
+Make the minimum change and commit separately.
+
+Commit message:
+Prevent early finalization of destination voice input
