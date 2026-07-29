@@ -1,6 +1,14 @@
 package lt.sturmanas.bajeristas.ui
 
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,9 +26,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Navigation
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -34,38 +41,51 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.paint
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.google.android.libraries.places.api.model.AutocompletePrediction
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import lt.sturmanas.bajeristas.R
 import lt.sturmanas.bajeristas.navigation.PlacesAutocompleteClient
-import lt.sturmanas.bajeristas.ui.theme.BackgroundPetrol
-import lt.sturmanas.bajeristas.ui.theme.OnBackgroundLight
+import lt.sturmanas.bajeristas.ui.theme.NearBlack
+import lt.sturmanas.bajeristas.ui.theme.NeonCyan
+import lt.sturmanas.bajeristas.ui.theme.NeonGreen
 import lt.sturmanas.bajeristas.ui.theme.OnSurfaceVariantLight
-import lt.sturmanas.bajeristas.ui.theme.PrimaryMint
-import lt.sturmanas.bajeristas.ui.theme.SurfacePetrol
 import lt.sturmanas.bajeristas.ui.theme.SurfaceVariantPetrol
 
 /**
- * Start / destination-entry screen.
+ * Start / destination-entry screen — dark neon Kentas theme.
  *
- * ## Design intent
- *  - Dark petrol-green background, matching the active navigation overlay colour.
- *  - "Šturmanas Bajeristas" identity at the top.
- *  - Large conversational heading "Kur varom?" — car-friendly, readable at a glance.
- *  - Rounded destination input with clear contrast.
- *  - **Google Places autocomplete dropdown** appears below the input while the user
- *    types; tapping a suggestion resolves its coordinates and starts navigation
- *    immediately without touching [GoogleNavigationEngine]'s existing logic.
- *  - Prominent "Važiuojam" CTA — 56 dp tall, full-width, only enabled when
- *    text is present and the engine is ready.
- *  - All bottom controls sit above the Android system navigation bar via
- *    [safeDrawingPadding] + [imePadding] so nothing is hidden by 3-button or
- *    gesture bars, and the keyboard does not occlude the primary action.
+ * ## Design
+ *  - Near-black background with neon green / cyan accents.
+ *  - Full-bleed hero shot: black sports car on a wet mountain road at night,
+ *    rear licence plate reading "KENTAS", green glowing taillights.
+ *  - Brand row (nav icon + ŠTURMANAS / BAJERISTAS) overlaid on the car image.
+ *  - Small speech bubble near the car: "Aš tavo šturmanas. Tu vairuoji."
+ *  - Large "KUR / VAROM?" title below the hero.
+ *  - Rounded translucent address input (dark card, neon accent).
+ *  - Gradient "VAŽIUOJAM" action button (green → cyan).
+ *  - Pulsing "KENTAS KLAUSOSI…" mic indicator at the bottom.
+ *
+ * ## Functional preservation
+ *  All autocomplete, suggestion-selection, keyboard, voice-destination, and
+ *  navigation-start logic is unchanged.  Only presentation differs from the
+ *  previous version.
  */
 @Composable
 fun StartScreen(
@@ -80,9 +100,7 @@ fun StartScreen(
     val scope    = rememberCoroutineScope()
     val keyboard = LocalSoftwareKeyboardController.current
 
-    // ── Debounced autocomplete (300 ms after last keystroke) ──────────────────
-    // LaunchedEffect cancels the previous job on each keystroke, giving a
-    // natural debounce with zero extra dependencies.
+    // ── Debounced autocomplete — UNCHANGED ───────────────────────────────────
     LaunchedEffect(destination) {
         if (destination.isBlank()) {
             suggestions = emptyList()
@@ -92,13 +110,7 @@ fun StartScreen(
         suggestions = PlacesAutocompleteClient.getSuggestions(context, destination)
     }
 
-    // ── Suggestion selection handler ──────────────────────────────────────────
-    // Fetches lat/lng from the Places SDK, then delegates to onStartNavigation
-    // with a raw-coordinate string (e.g. "54.6872,25.2797").
-    // GoogleNavigationEngine.resolveAddress() already handles "lat,lng" strings
-    // in its first branch — no changes needed there.
-    // Falls back to the typed text on any Places error so the existing Geocoder
-    // path in GoogleNavigationEngine takes over.
+    // ── Suggestion selection handler — UNCHANGED ─────────────────────────────
     fun onSuggestionSelected(prediction: AutocompletePrediction) {
         val displayText = prediction.getPrimaryText(null).toString()
         destination  = displayText
@@ -109,156 +121,349 @@ fun StartScreen(
             if (coords != null) {
                 onStartNavigation("${coords.first},${coords.second}")
             } else {
-                // Places coordinate fetch failed — let the existing Geocoder resolve it.
                 onStartNavigation(displayText)
             }
         }
     }
 
+    // ── Mic pulse animation ───────────────────────────────────────────────────
+    val infiniteTransition = rememberInfiniteTransition(label = "mic_pulse")
+    val pulseAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.4f,
+        targetValue  = 1.0f,
+        animationSpec = infiniteRepeatable(
+            animation  = tween(durationMillis = 1800, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "pulse_alpha",
+    )
+    val pulseScale by infiniteTransition.animateFloat(
+        initialValue = 1.0f,
+        targetValue  = 1.20f,
+        animationSpec = infiniteRepeatable(
+            animation  = tween(durationMillis = 1800, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "pulse_scale",
+    )
+
+    val isActionEnabled = destination.isNotBlank() && engineReady
+
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(BackgroundPetrol)
-            // safeDrawingPadding handles status bar + navigation bar + display cutout.
+            .background(NearBlack)
             .safeDrawingPadding()
-            // imePadding lifts the content above the software keyboard.
             .imePadding(),
     ) {
         Column(
             modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 24.dp),
-            verticalArrangement = Arrangement.SpaceBetween,
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState()),
         ) {
-            // ── Top identity block ────────────────────────────────────────
-            Column(
-                modifier = Modifier.padding(top = 48.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
+
+            // ═══════════════════════════════════════════════════════════════════
+            // 1.  HERO IMAGE  ─  brand row and speech bubble overlaid on car art
+            // ═══════════════════════════════════════════════════════════════════
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(240.dp)
+                    .paint(
+                        painter      = painterResource(id = R.drawable.hero_kentas_car),
+                        contentScale = ContentScale.Crop,
+                    ),
             ) {
-                // App icon accent row
+                // Gradient scrim: darkens top (brand legibility) and fades
+                // seamlessly into NearBlack at the bottom.
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.verticalGradient(
+                                0.00f to Color(0xBB000000),
+                                0.35f to Color(0x44000000),
+                                1.00f to NearBlack,
+                            )
+                        ),
+                )
+
+                // ── Brand row (top-start) ─────────────────────────────────────
                 Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(start = 16.dp, top = 14.dp),
+                    verticalAlignment    = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(36.dp)
-                            .background(PrimaryMint, CircleShape),
+                            .size(34.dp)
+                            .background(NeonGreen.copy(alpha = 0.12f), CircleShape)
+                            .border(1.dp, NeonGreen.copy(alpha = 0.65f), CircleShape),
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(
                             imageVector = Icons.Default.Navigation,
                             contentDescription = null,
-                            tint = Color(0xFF001412),
-                            modifier = Modifier.size(20.dp),
+                            tint = NeonGreen,
+                            modifier = Modifier.size(18.dp),
                         )
                     }
-                    Text(
-                        text = "Šturmanas Bajeristas",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = PrimaryMint,
-                        fontWeight = FontWeight.SemiBold,
-                    )
+                    Column {
+                        Text(
+                            text       = "ŠTURMANAS",
+                            color      = Color.White,
+                            fontSize   = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 2.sp,
+                        )
+                        Text(
+                            text       = "BAJERISTAS",
+                            color      = NeonGreen,
+                            fontSize   = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 2.sp,
+                        )
+                    }
                 }
 
-                Spacer(modifier = Modifier.height(24.dp))
+                // ── Speech bubble (bottom-start, near the car) ────────────────
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(start = 16.dp, bottom = 22.dp),
+                    shape = RoundedCornerShape(
+                        topStart    = 2.dp,
+                        topEnd      = 12.dp,
+                        bottomEnd   = 12.dp,
+                        bottomStart = 12.dp,
+                    ),
+                    color = Color(0xCC0D2520),
+                    tonalElevation = 0.dp,
+                ) {
+                    Text(
+                        text     = "Aš tavo šturmanas.\nTu vairuoji.",
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        color    = OnSurfaceVariantLight,
+                        style    = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
 
-                // Main conversational heading
+            // ═══════════════════════════════════════════════════════════════════
+            // 2.  MAIN TITLE  ─  KUR / VAROM?
+            // ═══════════════════════════════════════════════════════════════════
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 28.dp, vertical = 10.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
                 Text(
-                    text = "Kur varom?",
-                    style = MaterialTheme.typography.displaySmall,
-                    color = OnBackgroundLight,
-                    fontWeight = FontWeight.Bold,
+                    text       = "KUR",
+                    color      = Color.White,
+                    fontSize   = 62.sp,
+                    fontWeight = FontWeight.Black,
+                    lineHeight = 62.sp,
+                    textAlign  = TextAlign.Center,
+                    modifier   = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    text       = "VAROM?",
+                    color      = NeonGreen,
+                    fontSize   = 62.sp,
+                    fontWeight = FontWeight.Black,
+                    lineHeight = 62.sp,
+                    textAlign  = TextAlign.Center,
+                    modifier   = Modifier.fillMaxWidth(),
+                    // Subtle neon glow via text shadow
+                    style = TextStyle(
+                        shadow = Shadow(
+                            color      = NeonGreen.copy(alpha = 0.65f),
+                            offset     = Offset.Zero,
+                            blurRadius = 20f,
+                        ),
+                    ),
                 )
             }
 
-            // ── Input + action block ──────────────────────────────────────
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // ═══════════════════════════════════════════════════════════════════
+            // 3.  ADDRESS INPUT  +  BANNERS  +  ACTION BUTTON
+            // ═══════════════════════════════════════════════════════════════════
             Column(
-                modifier = Modifier.padding(top = 40.dp, bottom = 32.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
+                modifier = Modifier.padding(horizontal = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                // Destination input + autocomplete suggestions.
-                // Extracted into DestinationSearchField so the same UI can be
-                // reused by the floating search overlay in NavigationScreen.
-                DestinationSearchField(
-                    query             = destination,
-                    onQueryChange     = { destination = it },
-                    suggestions       = suggestions,
-                    onSuggestionSelected = ::onSuggestionSelected,
-                    onClear           = { destination = ""; suggestions = emptyList() },
-                    placeholder       = "Įvesk adresą arba vietą",
-                    onDone            = {
-                        keyboard?.hide()
-                        if (destination.isNotBlank() && engineReady) {
-                            suggestions = emptyList()
-                            onStartNavigation(destination.trim())
-                        }
-                    },
-                    surfaceColor      = SurfaceVariantPetrol,
-                    contentColor      = OnBackgroundLight,
-                    accentColor       = PrimaryMint,
-                    hintColor         = OnSurfaceVariantLight,
-                    dividerColor      = SurfacePetrol,
-                )
+                // Input field — neon border drawn around the whole search block
+                // (includes suggestions when open, which looks intentional).
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(
+                            width  = 1.5.dp,
+                            color  = NeonGreen.copy(alpha = 0.45f),
+                            shape  = RoundedCornerShape(16.dp),
+                        ),
+                ) {
+                    DestinationSearchField(
+                        query                = destination,
+                        onQueryChange        = { destination = it },
+                        suggestions          = suggestions,
+                        onSuggestionSelected = ::onSuggestionSelected,
+                        onClear              = { destination = ""; suggestions = emptyList() },
+                        placeholder          = "Įvesk adresą arba vietą",
+                        onDone               = {
+                            keyboard?.hide()
+                            if (destination.isNotBlank() && engineReady) {
+                                suggestions = emptyList()
+                                onStartNavigation(destination.trim())
+                            }
+                        },
+                        surfaceColor  = Color(0xEE0D2420),
+                        contentColor  = Color.White,
+                        accentColor   = NeonGreen,
+                        hintColor     = OnSurfaceVariantLight,
+                        dividerColor  = Color(0xFF1E4540),
+                    )
+                }
 
                 // Error banner
                 errorMessage?.let { error ->
                     Surface(
                         modifier = Modifier.fillMaxWidth(),
-                        color = MaterialTheme.colorScheme.errorContainer,
-                        shape = RoundedCornerShape(12.dp),
+                        color    = Color(0xEE4D1A1A),
+                        shape    = RoundedCornerShape(12.dp),
                     ) {
                         Text(
-                            text = error,
+                            text     = error,
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            style    = MaterialTheme.typography.bodySmall,
+                            color    = Color(0xFFFFB3B3),
                         )
                     }
                 }
 
-                // Not-ready banner (engine initialising)
+                // Engine initialising banner
                 if (!engineReady) {
                     Surface(
                         modifier = Modifier.fillMaxWidth(),
-                        color = SurfacePetrol,
-                        shape = RoundedCornerShape(12.dp),
+                        color    = Color(0xEE1A3530),
+                        shape    = RoundedCornerShape(12.dp),
                     ) {
                         Text(
-                            text = "Navigacija inicializuojama…",
+                            text     = "Navigacija inicializuojama…",
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = OnSurfaceVariantLight,
+                            style    = MaterialTheme.typography.bodySmall,
+                            color    = OnSurfaceVariantLight,
                         )
                     }
                 }
 
-                // Primary CTA — "Važiuojam"
-                Button(
-                    onClick = {
-                        keyboard?.hide()
-                        suggestions = emptyList()
-                        onStartNavigation(destination.trim())
-                    },
+                // ── VAŽIUOJAM — gradient action button ────────────────────────
+                // Uses a Box+clickable instead of Material Button so the gradient
+                // background renders without fighting ButtonDefaults colour system.
+                // Disabled state falls back to the muted SurfaceVariantPetrol swatch.
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(56.dp),
-                    enabled = destination.isNotBlank() && engineReady,
-                    shape = RoundedCornerShape(16.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor         = PrimaryMint,
-                        contentColor           = Color(0xFF001412),
-                        disabledContainerColor = SurfacePetrol,
-                        disabledContentColor   = OnSurfaceVariantLight,
-                    ),
+                        .height(60.dp)
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(
+                            brush = if (isActionEnabled)
+                                Brush.horizontalGradient(listOf(NeonGreen, NeonCyan))
+                            else
+                                Brush.horizontalGradient(
+                                    listOf(SurfaceVariantPetrol, SurfaceVariantPetrol)
+                                ),
+                        )
+                        .clickable(enabled = isActionEnabled) {
+                            keyboard?.hide()
+                            suggestions = emptyList()
+                            onStartNavigation(destination.trim())
+                        },
+                    contentAlignment = Alignment.Center,
                 ) {
-                    Text(
-                        text = "Važiuojam",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                    )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment     = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text      = "VAŽIUOJAM",
+                            fontSize  = 17.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            letterSpacing = 2.sp,
+                            color = if (isActionEnabled) NearBlack else OnSurfaceVariantLight,
+                        )
+                        Text(
+                            text  = "→",
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isActionEnabled) NearBlack else OnSurfaceVariantLight,
+                        )
+                    }
                 }
+            }
+
+            Spacer(modifier = Modifier.height(28.dp))
+
+            // ═══════════════════════════════════════════════════════════════════
+            // 4.  KENTAS LISTENING INDICATOR  ─  pulsing mic at the bottom
+            // ═══════════════════════════════════════════════════════════════════
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 28.dp),
+                horizontalAlignment  = Alignment.CenterHorizontally,
+                verticalArrangement  = Arrangement.spacedBy(8.dp),
+            ) {
+                // Pulsing glow ring + mic icon
+                Box(contentAlignment = Alignment.Center) {
+                    // Outer glow ring — scales up and fades with pulse
+                    Box(
+                        modifier = Modifier
+                            .scale(pulseScale)
+                            .size(68.dp)
+                            .background(
+                                NeonGreen.copy(alpha = 0.09f * pulseAlpha),
+                                CircleShape,
+                            ),
+                    )
+                    // Inner mic button
+                    Box(
+                        modifier = Modifier
+                            .size(52.dp)
+                            .background(Color(0xFF0F2820), CircleShape)
+                            .border(
+                                width  = 1.5.dp,
+                                color  = NeonGreen.copy(alpha = pulseAlpha),
+                                shape  = CircleShape,
+                            ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector        = Icons.Default.Mic,
+                            contentDescription = null,
+                            tint               = NeonGreen,
+                            modifier           = Modifier.size(22.dp),
+                        )
+                    }
+                }
+
+                Text(
+                    text  = "Pasakyk, kur važiuojam",
+                    color = OnSurfaceVariantLight,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Text(
+                    text         = "KENTAS KLAUSOSI...",
+                    color        = NeonGreen.copy(alpha = pulseAlpha),
+                    fontSize     = 11.sp,
+                    fontWeight   = FontWeight.SemiBold,
+                    letterSpacing = 1.5.sp,
+                )
             }
         }
     }

@@ -18,6 +18,11 @@ import androidx.compose.ui.graphics.Color
 //  Error        – warm red          (#FF6B6B)
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ── Neon accents (StartScreen dark theme) ────────────────────────────────────
+val NearBlack             = Color(0xFF060E0C)   // near-black StartScreen background
+val NeonGreen             = Color(0xFF00FF88)   // primary neon green
+val NeonCyan              = Color(0xFF00E5FF)   // secondary neon cyan
+
 val BackgroundPetrol      = Color(0xFF0B2520)
 val SurfacePetrol         = Color(0xFF163833)
 val SurfaceVariantPetrol  = Color(0xFF1E4540)
