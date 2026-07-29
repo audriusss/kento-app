@@ -1,0 +1,179 @@
+Redesign the StartScreen of the Android app “Šturmanas Bajeristas” to match the approved dark neon concept.
+
+IMPORTANT:
+- Do NOT refactor the project.
+- Preserve the current architecture.
+- Preserve all working navigation, Places autocomplete, floating search, STT, TTS, Kentas conversation, memory, and route behavior.
+- Change only the minimum required UI files and resources.
+- Implement only the StartScreen redesign.
+- Do not change NavigationScreen in this task.
+- Commit only this redesign.
+
+Approved visual direction:
+- dark premium / cyberpunk navigation style
+- black and very dark blue-green background
+- neon green and cyan accents
+- dramatic mountain night road
+- black sports car viewed from behind
+- wet reflective road
+- car license plate must clearly read:
+  KENTAS
+- no people
+- no human photos
+- no avatar portrait
+- no “Namai”
+- no “Darbas”
+- no “Mėgstamiausi”
+- no “Neseniai”
+- keep the screen visually clean
+
+Screen hierarchy:
+
+1. Top brand area
+- navigation arrow/logo icon on the left
+- text:
+  ŠTURMANAS
+  BAJERISTAS
+- “ŠTURMANAS” in white
+- “BAJERISTAS” in bright neon green
+- optional subtle glow
+- do not use a human avatar
+
+2. Main title
+Large centered text:
+
+KUR
+VAROM?
+
+- “KUR” in white
+- “VAROM?” in neon green
+- strong bold or brush-like appearance
+- large visual impact
+- this should be the main focal point
+
+3. Hero image
+Use the approved visual style:
+- black sports car
+- rear view
+- glowing green rear lights
+- night mountain road
+- wet reflections
+- subtle green light trails
+- license plate:
+  KENTAS
+
+Do not add people or faces.
+
+4. Small speech bubble
+Add a subtle speech bubble near the car:
+
+Aš tavo šturmanas.
+Tu vairuoji.
+
+Keep it small and secondary.
+
+5. Address input card
+Near the bottom:
+- large rounded dark translucent card
+- location pin icon on the left
+- placeholder:
+  Įvesk adresą arba vietą
+- microphone button on the right
+- neon green/cyan outline or glow
+- preserve all existing autocomplete behavior
+- preserve keyboard handling
+- preserve voice destination behavior
+
+6. Main action button
+Below the address field:
+- large rounded button
+- green to cyan neon gradient if possible
+- text:
+  VAŽIUOJAM
+- add a simple arrow icon on the right
+- preserve the current start-navigation action
+- button must remain disabled or inactive when no valid destination is selected, according to current logic
+
+7. Kentas listening area
+At the bottom:
+- circular microphone or waveform indicator
+- text:
+  Pasakyk, kur važiuojam
+- status text:
+  KENTAS KLAUSOSI...
+- animate only subtly:
+  - slow pulse
+  - soft glow
+  - no aggressive flashing
+
+8. Remove unnecessary shortcuts
+Do not include:
+- Namai
+- Darbas
+- Mėgstamiausi
+- Neseniai
+- any extra cards
+- any menu clutter
+
+9. Functional preservation
+Do not break:
+- Places autocomplete suggestions
+- typing destination
+- selecting a place
+- voice destination commands
+- microphone state
+- button action
+- navigation start
+- loading state
+- error state
+- screen responsiveness
+- Android back behavior
+
+10. Layout requirements
+- support common Android phone sizes
+- no clipped text
+- no overlap with status bar or navigation bar
+- use safe insets
+- content should remain usable on smaller screens
+- decorative hero image may crop responsively
+- address field and button must always remain reachable
+
+11. Asset handling
+- create or add only the minimum required drawable/background assets
+- compress large image resources appropriately
+- do not add oversized files unnecessarily
+- prefer WebP for background/hero assets
+- keep the KENTAS license plate visible in the asset
+- no copyrighted brand logos on the car
+
+12. Styling
+Suggested palette:
+- background: near black / deep blue-green
+- primary neon: bright green
+- secondary neon: cyan
+- primary text: white
+- secondary text: soft gray
+- cards: dark translucent surfaces
+
+Use existing theme colors where practical, but update only what is necessary for this screen.
+
+13. Keep logic separate
+Do not place navigation or AI logic inside the composable.
+Only change presentation and reuse existing callbacks/state.
+
+14. Add no new features.
+This is only a visual redesign.
+
+15. Run:
+./gradlew :app:compileDebugKotlin
+
+If the Gradle wrapper or Android SDK is unavailable in Replit, report that clearly and verify types by inspection.
+
+16. Report exactly:
+- files changed
+- assets added
+- how existing StartScreen actions were preserved
+- whether any visual compromises were needed for different screen sizes
+
+17. Commit only this redesign with a clear commit message, for example:
+Redesign StartScreen with Kentas neon driving theme
