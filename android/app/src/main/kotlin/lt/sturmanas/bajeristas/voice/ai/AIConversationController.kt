@@ -121,6 +121,20 @@ class AIConversationController(
      */
     var onNavigateToDestination: ((String) -> Unit)? = null
 
+    /**
+     * Returns true when there is an active navigation route that can be cancelled by voice.
+     * Set by [MainViewModel] once the engine state is observable.
+     */
+    var isNavigationActive: (() -> Boolean)? = null
+
+    /**
+     * Called when the user cancels the active route by voice.
+     * Implementation in [MainViewModel] calls [NavigationController.stopNavigation] and
+     * [NavigationVoiceController.stop]; the UI returns to [StartScreen] via the phase
+     * observer in [MainActivity].
+     */
+    var onStopNavigation: (() -> Unit)? = null
+
     /** Coroutine scope for async Places API calls. Cancelled in [release]. */
     private val voiceNavScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -559,6 +573,26 @@ class AIConversationController(
     }
 
     /**
+     * Stops the active navigation route by voice command.
+     * Clears any pending place choices, delegates engine stop to [onStopNavigation],
+     * then speaks a Lithuanian confirmation.
+     *
+     * The UI returns to [StartScreen] automatically: [MainActivity]'s
+     * LaunchedEffect observing [NavigationPhase] resets isNavigating when the
+     * engine transitions back to [NavigationPhase.IDLE].
+     */
+    private fun handleRouteCancellation() {
+        Log.i(TAG, "VOICE_NAV_ROUTE_CANCEL_RECEIVED")
+        // Also clear any pending place selection that may have been left open.
+        pendingVoiceChoices = null
+        pendingVoiceChoicesOneResult = false
+        clearUtteranceBuffer("voice_route_cancel")
+        onStopNavigation?.invoke()
+        Log.i(TAG, "VOICE_NAV_ROUTE_STOPPED")
+        handler.post { if (!destroyed) speak("Gerai, maršrutą nutraukiau.") }
+    }
+
+    /**
      * Cancels pending voice destination selection and returns to normal conversation.
      * Must be called before any other gate so cancellation is always honoured.
      */
@@ -573,6 +607,23 @@ class AIConversationController(
 
     private fun sendToAi(text: String) {
         val norm = normalizeText(text)
+
+        // ── Active route cancellation ─────────────────────────────────────────
+        // Checked BEFORE pending choices so a route-cancel phrase overrides any
+        // open place-selection dialog.
+        // • Explicit phrase (e.g. "nutrauk maršrutą") → cancel regardless of state.
+        // • Plain cancel token (e.g. bare "atšauk") → cancel only when a route is
+        //   currently active; otherwise fall through to the pending-choices gate.
+        val navActive = isNavigationActive?.invoke() == true
+        if (VoiceDestinationDetector.isRouteCancelCommand(norm) ||
+            (navActive && VoiceDestinationDetector.isCancellationCommand(norm))) {
+            if (navActive) {
+                handleRouteCancellation()
+                return
+            }
+            // Explicit route-cancel phrase but no active route — treat as ordinary
+            // cancellation of pending choices (falls through to pending gate below).
+        }
 
         // ── Pending voice destination selection ───────────────────────────────
         // When Kentas has listed nearby suggestions and is waiting for the user's

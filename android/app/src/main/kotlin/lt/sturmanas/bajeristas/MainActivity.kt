@@ -168,17 +168,23 @@ private fun SturmanasApp(
     var isNavigating by remember { mutableStateOf(false) }
     var startScreenError by remember { mutableStateOf<String?>(null) }
 
-    // When voice navigation starts, Kentas calls onNavigateToDestination directly —
-    // bypassing the StartScreen button and the isNavigating = true assignment below.
-    // This LaunchedEffect observes the engine phase and flips isNavigating as soon as
-    // the engine enters RESOLVING_ADDRESS (immediately on startNavigation call), so the
-    // UI switches to NavigationScreen without requiring a button press.
-    // The typed flow is unaffected: isNavigating = true below still fires first.
+    // This LaunchedEffect is the single source of truth for the isNavigating flag:
+    // • Sets true  when the engine enters any active phase (covers voice-nav path
+    //   that bypasses the StartScreen button).
+    // • Sets false when the engine returns to IDLE — this handles voice route
+    //   cancellation ("nutrauk maršrutą") where onStopNavigation() is called from
+    //   AIConversationController and the engine transitions back to IDLE.
+    // • ARRIVED keeps the NavigationScreen visible until the user dismisses.
     LaunchedEffect(navState.phase) {
-        if (navState.phase == NavigationPhase.RESOLVING_ADDRESS  ||
-            navState.phase == NavigationPhase.CALCULATING_ROUTE  ||
-            navState.phase == NavigationPhase.NAVIGATING) {
-            isNavigating = true
+        when (navState.phase) {
+            NavigationPhase.RESOLVING_ADDRESS,
+            NavigationPhase.CALCULATING_ROUTE,
+            NavigationPhase.NAVIGATING -> isNavigating = true
+            NavigationPhase.IDLE       -> {
+                Log.i(FLOW_TAG, "NAV_UI_RETURN_TO_START")
+                isNavigating = false
+            }
+            else -> { /* ARRIVED — keep NavigationScreen visible */ }
         }
     }
 

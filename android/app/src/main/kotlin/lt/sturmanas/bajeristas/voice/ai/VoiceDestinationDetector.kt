@@ -295,6 +295,54 @@ object VoiceDestinationDetector {
         return tokens.any { CANCEL_TOKENS.contains(it) }
     }
 
+    // ── Route cancellation ────────────────────────────────────────────────────
+
+    /**
+     * Verbs that introduce an active-route cancel phrase (post-normalization).
+     * These must appear together with a route/navigation noun to avoid matching
+     * unrelated utterances that happen to contain "nutrauk" or "sustabdyk".
+     */
+    private val ROUTE_CANCEL_VERBS: Set<String> = setOf(
+        "nutrauk",      // nutrauk
+        "atsauk",       // atšauk
+        "sustabdyk",    // sustabdyk
+        "baigiam",      // baigiam
+        "baikime",      // baikime
+        "uzbaik",       // užbaik
+        "stop",         // stop (when combined with a nav noun)
+    )
+
+    /**
+     * Nouns (all inflections, post-normalization) that identify the target
+     * as the active navigation route — not a pending place selection.
+     */
+    private val ROUTE_CANCEL_NOUNS: Set<String> = setOf(
+        "marsruta",     // maršrutą (acc.)
+        "marsruto",     // maršruto (gen.)
+        "marsrut",      // maršrut (STT truncation)
+        "navigacija",   // navigaciją / navigacija
+        "navigacijos",  // navigacijos (gen.)
+        "navigacij",    // navigacij (STT truncation)
+    )
+
+    /**
+     * Returns true when [normText] is a request to cancel the **active route**
+     * (as opposed to cancelling a pending place-choice list).
+     *
+     * Requires at least one cancel verb AND one route/navigation noun so that
+     * a bare "atšauk" is NOT matched here — the callsite in
+     * [AIConversationController] handles bare cancellation tokens depending on
+     * whether navigation is currently active.
+     */
+    fun isRouteCancelCommand(normText: String): Boolean {
+        val tokens = normText.split(Regex("\\s+")).filter { it.isNotBlank() }
+        val hasVerb = tokens.any { ROUTE_CANCEL_VERBS.contains(it) }
+        if (!hasVerb) return false
+        return tokens.any { tok ->
+            ROUTE_CANCEL_NOUNS.any { noun -> tok.startsWith(noun) }
+        }
+    }
+
     // ── Confirmation ──────────────────────────────────────────────────────────
 
     private val CONFIRM_TOKENS: Set<String> = setOf(

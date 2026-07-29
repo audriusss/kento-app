@@ -8,6 +8,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import lt.sturmanas.bajeristas.navigation.LocationProvider
 import lt.sturmanas.bajeristas.navigation.NavigationController
+import lt.sturmanas.bajeristas.navigation.NavigationPhase
 import lt.sturmanas.bajeristas.navigation.NavigationState
 import lt.sturmanas.bajeristas.voice.ai.AIConversationController
 import lt.sturmanas.bajeristas.voice.coordination.ConversationCoordinator
@@ -117,6 +118,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 // Speak the error on the main thread — speak() must not be called off-thread.
                 handler.post { aiController?.speak("Nepavyko rasti maršruto.") }
             }
+        }
+
+        // Wire active-route query so AIConversationController can distinguish
+        // "cancel pending choices" from "cancel an active route".
+        aiController?.isNavigationActive = {
+            navigationController.state.value.phase != NavigationPhase.IDLE
+        }
+
+        // Wire voice route cancellation: stops guidance and voice; the UI returns to
+        // StartScreen automatically via the LaunchedEffect in MainActivity that resets
+        // isNavigating when the engine phase returns to IDLE.
+        aiController?.onStopNavigation = {
+            Log.i(TAG, "VOICE_NAV_ROUTE_STOPPED")
+            navigationController.stopNavigation()
+            handler.post { stopNavigationVoice() }
         }
 
         viewModelScope.launch {
