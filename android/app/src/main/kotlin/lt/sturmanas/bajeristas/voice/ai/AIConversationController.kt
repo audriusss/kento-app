@@ -9,11 +9,13 @@ import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
+import com.google.android.libraries.places.api.model.AutocompletePrediction
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import lt.sturmanas.bajeristas.navigation.LocationProvider
 import lt.sturmanas.bajeristas.navigation.PlacesAutocompleteClient
 import lt.sturmanas.bajeristas.voice.pipeline.ContinuousMicrophonePipeline
 import lt.sturmanas.bajeristas.voice.pipeline.MicrophonePipeline
@@ -122,6 +124,18 @@ class AIConversationController(
 
     /** Coroutine scope for async Places API calls. Cancelled in [release]. */
     private val voiceNavScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    /**
+     * Up to 3 suggestions Kentas just read aloud, awaiting the user's selection.
+     * Non-null while in selection/confirmation mode; cleared on confirm or cancel.
+     */
+    private var pendingVoiceChoices: List<AutocompletePrediction>? = null
+
+    /**
+     * True when [pendingVoiceChoices] contains exactly one result and Kentas asked
+     * "Važiuojam?" — user must say "taip"/"gerai" rather than an ordinal.
+     */
+    private var pendingVoiceChoicesOneResult: Boolean = false
 
     private val navResumeWatchdogRunnable = Runnable {
         if (phase == Phase.PAUSED_BY_NAVIGATION && activeNavUtterances.isEmpty()) {
@@ -404,59 +418,177 @@ class AIConversationController(
     }
 
     /**
-     * Handles a voice transcript that has been identified as a navigation/destination command.
+     * Handles a voice transcript identified as a navigation/destination command.
      *
      * Flow:
-     * 1. Extract the destination query from the original transcript.
-     * 2. Call [PlacesAutocompleteClient.getSuggestions] — reuses the existing client.
-     * 3. Resolve coordinates for the top result via [PlacesAutocompleteClient.resolveCoordinates].
-     * 4. Speak a short Lithuanian confirmation and invoke [onNavigateToDestination].
-     * 5. On any failure, speak "Neradau tokios vietos." and stay on start screen.
+     * 1. Extract destination query (diacritics preserved).
+     * 2. Read current GPS location from [LocationProvider] (zero-copy — StateFlow.value).
+     * 3. Fetch up to 3 nearby suggestions via [PlacesAutocompleteClient.getSuggestions]
+     *    with location bias so results near the user are ranked first.
+     * 4. Present results to the user via TTS and store them as [pendingVoiceChoices].
+     *    Navigation does NOT start here — the user must confirm or select first.
+     *
+     * Cases:
+     * - 0 results → "Neradau tokios vietos."
+     * - 1 result  → "Radau X. Važiuojam?" (confirmation required)
+     * - 2-3 results → numbered list, "Kurią renkamės?"
      */
-    private fun handleVoiceNavigation(text: String, norm: String) {
+    private fun handleVoiceNavigation(text: String, @Suppress("UNUSED_PARAMETER") norm: String) {
         val query = VoiceDestinationDetector.extractQuery(text)
         Log.i(TAG, "VOICE_NAV_COMMAND query='$query'")
         clearUtteranceBuffer("voice_nav")
         transitionTo(Phase.THINKING)
 
         voiceNavScope.launch {
-            val suggestions = PlacesAutocompleteClient.getSuggestions(context, query)
-            val prediction  = suggestions.firstOrNull()
+            val loc = LocationProvider.locationFlow.value
+            val suggestions = PlacesAutocompleteClient.getSuggestions(
+                context    = context,
+                query      = query,
+                latitude   = loc?.latitude,
+                longitude  = loc?.longitude,
+                maxResults = 3,
+            )
+            Log.i(TAG, "VOICE_NAV_SUGGESTIONS count=${suggestions.size} biased=${loc != null}")
 
-            if (prediction == null) {
-                Log.i(TAG, "VOICE_NAV_NO_RESULTS query='$query'")
-                handler.post { if (!destroyed) speak("Neradau tokios vietos.") }
-                return@launch
+            when {
+                suggestions.isEmpty() -> {
+                    Log.i(TAG, "VOICE_NAV_NO_RESULTS query='$query'")
+                    handler.post { if (!destroyed) speak("Neradau tokios vietos.") }
+                }
+
+                suggestions.size == 1 -> {
+                    val p = suggestions[0]
+                    val name = p.getPrimaryText(null).toString()
+                    val sec  = p.getSecondaryText(null).toString()
+                        .replace(Regex(",?\\s*Lietuva\\s*$"), "")
+                        .replace(Regex(",?\\s*Lithuania\\s*$"), "")
+                        .trim()
+                    val addressPart = if (sec.isNotBlank()) " $sec" else ""
+                    val prompt = "Radau $name$addressPart. Važiuojam?"
+                    Log.i(TAG, "VOICE_NAV_ONE_RESULT name='$name'")
+                    handler.post {
+                        if (!destroyed) {
+                            pendingVoiceChoices = suggestions
+                            pendingVoiceChoicesOneResult = true
+                            speak(prompt)
+                        }
+                    }
+                }
+
+                else -> {
+                    val ordinals = listOf("pirmas", "antras", "trečias")
+                    val countWord = if (suggestions.size == 2) "du variantus" else "tris variantus"
+                    val sb = StringBuilder("Radau $countWord: ")
+                    suggestions.forEachIndexed { idx, p ->
+                        val name = p.getPrimaryText(null).toString()
+                        val sec  = p.getSecondaryText(null).toString()
+                            .replace(Regex(",?\\s*Lietuva\\s*$"), "")
+                            .replace(Regex(",?\\s*Lithuania\\s*$"), "")
+                            .trim()
+                        sb.append("${ordinals[idx]} $name")
+                        if (sec.isNotBlank()) sb.append(" $sec")
+                        if (idx < suggestions.lastIndex) sb.append(", ")
+                    }
+                    sb.append(". Kurią renkamės?")
+                    val prompt = sb.toString()
+                    Log.i(TAG, "VOICE_NAV_MULTI_RESULTS count=${suggestions.size}")
+                    handler.post {
+                        if (!destroyed) {
+                            pendingVoiceChoices = suggestions
+                            pendingVoiceChoicesOneResult = false
+                            speak(prompt)
+                        }
+                    }
+                }
             }
+        }
+    }
 
+    /**
+     * Resolves coordinates for [prediction] and starts navigation.
+     * Called after the user selects from pending choices or confirms the single result.
+     * Clears [pendingVoiceChoices] before the async call so stale state cannot leak.
+     */
+    private fun handleVoiceConfirm(prediction: AutocompletePrediction) {
+        pendingVoiceChoices = null
+        pendingVoiceChoicesOneResult = false
+        Log.i(TAG, "VOICE_NAV_CONFIRM placeId='${prediction.placeId}'")
+        transitionTo(Phase.THINKING)
+
+        voiceNavScope.launch {
             val coords = PlacesAutocompleteClient.resolveCoordinates(context, prediction.placeId)
             if (coords == null) {
-                Log.i(TAG, "VOICE_NAV_COORDS_FAIL placeId='${prediction.placeId}'")
+                Log.w(TAG, "VOICE_NAV_COORDS_FAIL placeId='${prediction.placeId}'")
                 handler.post { if (!destroyed) speak("Neradau tokios vietos.") }
                 return@launch
             }
-
-            val destination  = "${coords.first},${coords.second}"
-            val confirmation = if (norm.contains("artimiausia") || norm.contains("surask")) {
-                "Radau artimiausią. Pradedu maršrutą."
-            } else {
-                "Radau. Važiuojam."
-            }
-            Log.i(TAG, "VOICE_NAV_RESOLVED dest='$destination' confirmation='$confirmation'")
-
+            val destination = "${coords.first},${coords.second}"
+            Log.i(TAG, "VOICE_NAV_RESOLVED dest='$destination'")
             handler.post {
                 if (!destroyed) {
-                    speak(confirmation)
+                    speak("Gerai, pradedu maršrutą.")
                     onNavigateToDestination?.invoke(destination)
                 }
             }
         }
     }
 
+    /**
+     * Cancels pending voice destination selection and returns to normal conversation.
+     */
+    private fun handleVoiceCancellation() {
+        pendingVoiceChoices = null
+        pendingVoiceChoicesOneResult = false
+        Log.i(TAG, "VOICE_NAV_CANCELLED")
+        clearUtteranceBuffer("voice_nav_cancel")
+        handler.post { if (!destroyed) speak("Gerai, atšaukiau.") }
+    }
+
     private fun sendToAi(text: String) {
-        // Intercept navigation/destination commands before routing to AI chat.
-        // Guard: only when a navigation callback is wired (engine is ready).
         val norm = normalizeText(text)
+
+        // ── Pending voice destination selection ───────────────────────────────
+        // When Kentas has listed nearby suggestions and is waiting for the user's
+        // choice, intercept the next transcript here — before nav detection or AI.
+        val pending = pendingVoiceChoices
+        if (pending != null) {
+            clearUtteranceBuffer("voice_selection")
+            when {
+                VoiceDestinationDetector.isCancellationCommand(norm) -> {
+                    handleVoiceCancellation()
+                }
+                pendingVoiceChoicesOneResult &&
+                    VoiceDestinationDetector.isConfirmationCommand(norm) -> {
+                    handleVoiceConfirm(pending[0])
+                }
+                !pendingVoiceChoicesOneResult -> {
+                    val idx = VoiceDestinationDetector.extractSelectionIndex(norm)
+                        ?: VoiceDestinationDetector.matchesNameIndex(
+                            norm,
+                            pending.map { normalizeText(it.getPrimaryText(null).toString()) },
+                        )
+                    if (idx != null && idx < pending.size) {
+                        handleVoiceConfirm(pending[idx])
+                    } else {
+                        // Unrecognised input — re-prompt without clearing choices.
+                        handler.post {
+                            if (!destroyed) speak("Sakykite pirmas, antras ar trečias. Arba atšaukite.")
+                        }
+                    }
+                }
+                else -> {
+                    // Single-result mode but not confirmation or cancellation — re-prompt.
+                    val name = pending[0].getPrimaryText(null).toString()
+                    handler.post {
+                        if (!destroyed) speak("Radau $name. Sakykite 'taip' arba 'atšauk'.")
+                    }
+                }
+            }
+            return
+        }
+
+        // ── Navigation command intercept ──────────────────────────────────────
+        // Guard: only when a navigation callback is wired (engine is ready).
         if (onNavigateToDestination != null && VoiceDestinationDetector.isNavigationCommand(norm)) {
             handleVoiceNavigation(text, norm)
             return

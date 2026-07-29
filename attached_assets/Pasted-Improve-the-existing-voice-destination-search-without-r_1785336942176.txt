@@ -1,0 +1,59 @@
+Improve the existing voice destination search without refactoring the project.
+
+IMPORTANT:
+- Do NOT rewrite existing navigation.
+- Do NOT replace PlacesAutocompleteClient.
+- Do NOT change the existing typed search behavior.
+- Preserve normal AI conversation.
+- Change only the minimum required files.
+- Do not immediately start navigation from the first Places result.
+
+Required changes:
+
+1. Bias voice Places search using the user's current GPS location.
+   - Pass the current latitude and longitude into PlacesAutocompleteClient.
+   - Use location bias and/or origin so results near the user are ranked first.
+   - Example: when the user is in Klaipėda and says "surask vaistinę", Klaipėda results must appear before Vilnius results.
+   - Keep Lithuania as the country restriction.
+
+2. Add a voice destination selection step.
+   - After a voice destination command, fetch up to 3 nearby suggestions.
+   - Do NOT resolve and start navigation immediately.
+   - Store the suggestions as pending voice destination choices.
+   - Kentas should say a short Lithuanian list, for example:
+     "Radau tris variantus: pirmas Gintarinė vaistinė Taikos prospekte, antras Eurovaistinė Akropolyje, trečias Camelia Šilutės plente. Kurią renkamės?"
+
+3. Accept follow-up selection commands:
+   - "pirmą"
+   - "antrą"
+   - "trečią"
+   - "pirmas"
+   - "antras"
+   - "trečias"
+   - the spoken place name
+
+4. Only after the user selects a result:
+   - resolve that Place ID to coordinates
+   - call the existing onNavigateToDestination callback
+   - say:
+     "Gerai, pradedu maršrutą."
+
+5. Support cancellation:
+   - "atšauk"
+   - "nieko"
+   - "nebereikia"
+   Clear the pending choices and return to normal conversation.
+
+6. If only one valid nearby result exists:
+   - ask for confirmation:
+     "Radau Gintarinę vaistinę Taikos prospekte. Važiuojam?"
+   - wait for "taip", "važiuojam", or "gerai"
+   - do not start navigation before confirmation.
+
+7. If no current location is available:
+   - fall back to the current Places search behavior
+   - still ask the user to choose before starting navigation.
+
+8. Do not add new APIs.
+9. Run compileDebugKotlin if possible.
+10. Report exactly which files changed.
