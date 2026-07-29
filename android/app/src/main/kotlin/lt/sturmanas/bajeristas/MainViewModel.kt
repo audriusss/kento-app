@@ -13,6 +13,7 @@ import lt.sturmanas.bajeristas.navigation.NavigationState
 import lt.sturmanas.bajeristas.voice.ai.AIConversationController
 import lt.sturmanas.bajeristas.voice.coordination.ConversationCoordinator
 import lt.sturmanas.bajeristas.voice.navigation.NavigationVoiceController
+import lt.sturmanas.bajeristas.voice.navigation.TrafficEventMonitor
 import lt.sturmanas.bajeristas.voice.ai.KentasChat
 import lt.sturmanas.bajeristas.voice.pipeline.OpenAiTranscriptionClient
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -43,6 +44,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val aiStatus: StateFlow<String> = _aiStatus.asStateFlow()
 
     private val voiceController = NavigationVoiceController(application)
+
+    /**
+     * Monitors [NavigationState] for significant ETA worsening and rerouting events.
+     * Routed through [NavigationVoiceController.speakTrafficComment] so maneuver guidance
+     * retains priority and the AI pause/resume mechanism is not bypassed.
+     */
+    private val trafficMonitor = TrafficEventMonitor { text ->
+        voiceController.speakTrafficComment(text)
+    }
+
     val conversationCoordinator = ConversationCoordinator()
     private var aiController: AIConversationController? = null
 
@@ -148,10 +159,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onNavigationStateChanged(state: NavigationState) {
         voiceController.speak(state)
+        trafficMonitor.onStateUpdate(state)
     }
 
     fun stopNavigationVoice() {
         voiceController.stop()
+        trafficMonitor.onNavigationStopped()
     }
 
     /**
@@ -200,6 +213,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         super.onCleared()
         voiceController.release()
         aiController?.release()
+        trafficMonitor.onNavigationStopped()
         LocationProvider.stopUpdates(getApplication())
     }
 }

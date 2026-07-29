@@ -116,12 +116,10 @@ class NavigationVoiceController(private val context: Context) : TextToSpeech.OnI
                 Log.i(TAG, "NAV_VOICE_REROUTING")
                 hasSpokenRerouting = true
                 // Clear all tracking so fresh announcements fire after the new route loads.
+                // Rerouting speech ("Maršrutas perskaičiuojamas.") is handled by
+                // TrafficEventMonitor so it goes through the correct QUEUE_ADD pipeline.
                 announcedStages.clear()
                 lastManeuverId = ""
-                speakText(
-                    "Perskaičiuoju maršrutą.",
-                    KentasNavigationPhraseFormatter.SpeechStage.IMMEDIATE,
-                )
             }
             return
         }
@@ -294,6 +292,24 @@ class NavigationVoiceController(private val context: Context) : TextToSpeech.OnI
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────
+
+    /**
+     * Speaks a short traffic or situational comment through the same nav-TTS pipeline
+     * used for maneuver guidance.
+     *
+     * Routing through this pipeline (rather than [AIConversationController.speak]) ensures:
+     *  - The [listener] hooks fire → [AIConversationController] correctly pauses and
+     *    resumes any in-progress AI response via the existing interrupt-resume mechanism.
+     *  - The saved interrupted AI response is never discarded by a traffic comment.
+     *  - Audio focus and mic-mute lifecycle are handled identically to nav guidance.
+     *
+     * Uses [TextToSpeech.QUEUE_ADD] so an ongoing maneuver announcement is never
+     * interrupted — navigation guidance retains highest priority.
+     */
+    fun speakTrafficComment(text: String) {
+        if (!isTtsReady || text.isBlank()) return
+        speakText(text, KentasNavigationPhraseFormatter.SpeechStage.FAR)
+    }
 
     fun stop() {
         Log.i(TAG, "NAV_VOICE_STOPPED")
