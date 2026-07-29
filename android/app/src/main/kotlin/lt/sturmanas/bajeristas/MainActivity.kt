@@ -213,6 +213,14 @@ private fun SturmanasApp(
                 viewModel.stopNavigationVoice()
                 isNavigating = false
             },
+            onRerouteNavigation  = { destination ->
+                // Speak confirmation before the engine starts resolving the new route
+                // so the announcement plays while address resolution is in progress.
+                viewModel.announceReroute()
+                navigationController.startNavigation(context, destination) { err ->
+                    Log.e(FLOW_TAG, "REROUTE_ERROR: $err")
+                }
+            },
             aiStatus = aiStatus
         )
     }

@@ -1,7 +1,6 @@
 package lt.sturmanas.bajeristas.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,21 +16,15 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Navigation
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextField
-import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -45,7 +38,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.google.android.libraries.places.api.model.AutocompletePrediction
 import kotlinx.coroutines.delay
@@ -186,117 +178,29 @@ fun StartScreen(
                 modifier = Modifier.padding(top = 40.dp, bottom = 32.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
-                // Destination input card
-                Surface(
-                    shape = RoundedCornerShape(16.dp),
-                    color = SurfaceVariantPetrol,
-                    tonalElevation = 2.dp,
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.LocationOn,
-                            contentDescription = null,
-                            tint = PrimaryMint,
-                            modifier = Modifier
-                                .padding(start = 12.dp)
-                                .size(24.dp),
-                        )
-                        TextField(
-                            value = destination,
-                            onValueChange = { destination = it },
-                            placeholder = {
-                                Text(
-                                    "Įvesk adresą arba vietą",
-                                    color = OnSurfaceVariantLight,
-                                    style = MaterialTheme.typography.bodyLarge,
-                                )
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                            keyboardActions = KeyboardActions(
-                                onDone = {
-                                    keyboard?.hide()
-                                    if (destination.isNotBlank() && engineReady) {
-                                        suggestions = emptyList()
-                                        onStartNavigation(destination.trim())
-                                    }
-                                },
-                            ),
-                            colors = TextFieldDefaults.colors(
-                                focusedContainerColor   = Color.Transparent,
-                                unfocusedContainerColor = Color.Transparent,
-                                focusedIndicatorColor   = Color.Transparent,
-                                unfocusedIndicatorColor = Color.Transparent,
-                                focusedTextColor        = OnBackgroundLight,
-                                unfocusedTextColor      = OnBackgroundLight,
-                                cursorColor             = PrimaryMint,
-                            ),
-                            textStyle = MaterialTheme.typography.bodyLarge,
-                        )
-                    }
-                }
-
-                // ── Autocomplete suggestions dropdown ─────────────────────
-                // Shown only when the Places SDK returns results.
-                // Dismissed automatically when a suggestion is selected or
-                // the field is cleared.
-                if (suggestions.isNotEmpty()) {
-                    Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        color = SurfaceVariantPetrol,
-                        tonalElevation = 2.dp,
-                    ) {
-                        Column(modifier = Modifier.fillMaxWidth()) {
-                            suggestions.forEachIndexed { index, prediction ->
-                                if (index > 0) {
-                                    HorizontalDivider(
-                                        color = SurfacePetrol,
-                                        thickness = 1.dp,
-                                    )
-                                }
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable { onSuggestionSelected(prediction) }
-                                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.LocationOn,
-                                        contentDescription = null,
-                                        tint = PrimaryMint,
-                                        modifier = Modifier.size(18.dp),
-                                    )
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = prediction.getPrimaryText(null).toString(),
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            color = OnBackgroundLight,
-                                            fontWeight = FontWeight.Medium,
-                                            maxLines = 1,
-                                        )
-                                        val secondary = prediction.getSecondaryText(null).toString()
-                                        if (secondary.isNotBlank()) {
-                                            Text(
-                                                text = secondary,
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = OnSurfaceVariantLight,
-                                                maxLines = 1,
-                                            )
-                                        }
-                                    }
-                                }
-                            }
+                // Destination input + autocomplete suggestions.
+                // Extracted into DestinationSearchField so the same UI can be
+                // reused by the floating search overlay in NavigationScreen.
+                DestinationSearchField(
+                    query             = destination,
+                    onQueryChange     = { destination = it },
+                    suggestions       = suggestions,
+                    onSuggestionSelected = ::onSuggestionSelected,
+                    onClear           = { destination = ""; suggestions = emptyList() },
+                    placeholder       = "Įvesk adresą arba vietą",
+                    onDone            = {
+                        keyboard?.hide()
+                        if (destination.isNotBlank() && engineReady) {
+                            suggestions = emptyList()
+                            onStartNavigation(destination.trim())
                         }
-                    }
-                }
+                    },
+                    surfaceColor      = SurfaceVariantPetrol,
+                    contentColor      = OnBackgroundLight,
+                    accentColor       = PrimaryMint,
+                    hintColor         = OnSurfaceVariantLight,
+                    dividerColor      = SurfacePetrol,
+                )
 
                 // Error banner
                 errorMessage?.let { error ->

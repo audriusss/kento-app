@@ -154,6 +154,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         voiceController.stop()
     }
 
+    /**
+     * Speaks the reroute confirmation phrase through [AIConversationController]'s TTS.
+     * Called by [MainActivity] immediately before starting the replacement route so the
+     * announcement plays while the engine resolves the new destination.
+     */
+    fun announceReroute() {
+        handler.post { aiController?.speak("Gerai, keičiu maršrutą.") }
+    }
+
     fun setEngineReady(ready: Boolean) {
         _engineReady.value = ready
     }
