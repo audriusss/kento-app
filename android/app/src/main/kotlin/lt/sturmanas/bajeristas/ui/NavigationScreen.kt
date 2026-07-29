@@ -325,33 +325,51 @@ fun NavigationScreen(
                 modifier  = Modifier.fillMaxWidth(),
                 elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column {
+                if (navigationState.phase == NavigationPhase.IDLE) {
+                    // No active route — show neutral placeholder.
+                    // Reached after voice route-cancel ("nutrauk maršrutą") while
+                    // NavigationScreen stays visible for a new destination.
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                         Text(
-                            text       = maneuverLabel(navigationState.maneuverType),
-                            style      = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                        )
-                        Text(
-                            text  = navigationState.nextRoadName,
-                            style = MaterialTheme.typography.bodySmall,
+                            text  = "Maršrutas nepasirinktas",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    Column(horizontalAlignment = Alignment.End) {
-                        val dist = navigationState.distanceToNextManeuverMeters
-                        Text(
-                            text       = if (dist == Int.MAX_VALUE) "—" else "$dist m",
-                            style      = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        val mins = navigationState.remainingDurationSeconds / 60
-                        Text(text = "~$mins min", style = MaterialTheme.typography.bodySmall)
+                } else {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column {
+                            Text(
+                                text       = maneuverLabel(navigationState.maneuverType),
+                                style      = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                            )
+                            Text(
+                                text  = navigationState.nextRoadName,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        Column(horizontalAlignment = Alignment.End) {
+                            val dist = navigationState.distanceToNextManeuverMeters
+                            Text(
+                                text       = if (dist == Int.MAX_VALUE) "—" else "$dist m",
+                                style      = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            val mins = navigationState.remainingDurationSeconds / 60
+                            Text(text = "~$mins min", style = MaterialTheme.typography.bodySmall)
+                        }
                     }
                 }
             }

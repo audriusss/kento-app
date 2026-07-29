@@ -577,19 +577,23 @@ class AIConversationController(
      * Clears any pending place choices, delegates engine stop to [onStopNavigation],
      * then speaks a Lithuanian confirmation.
      *
-     * The UI returns to [StartScreen] automatically: [MainActivity]'s
-     * LaunchedEffect observing [NavigationPhase] resets isNavigating when the
-     * engine transitions back to [NavigationPhase.IDLE].
+     * NavigationScreen remains visible after this call — [MainActivity] no longer
+     * exits to StartScreen on [NavigationPhase.IDLE]; only the manual "Baigti
+     * navigaciją" button does that. The user can enter a new destination via the
+     * floating search or a new voice command while the map is still on screen.
      */
     private fun handleRouteCancellation() {
         Log.i(TAG, "VOICE_NAV_ROUTE_CANCEL_RECEIVED")
+        Log.i(TAG, "VOICE_ROUTE_CANCEL_KEEP_MAP")
         // Also clear any pending place selection that may have been left open.
         pendingVoiceChoices = null
         pendingVoiceChoicesOneResult = false
         clearUtteranceBuffer("voice_route_cancel")
         onStopNavigation?.invoke()
         Log.i(TAG, "VOICE_NAV_ROUTE_STOPPED")
-        handler.post { if (!destroyed) speak("Gerai, maršrutą nutraukiau.") }
+        handler.post {
+            if (!destroyed) speak("Gerai, maršrutą nutraukiau. Kur važiuojam toliau?")
+        }
     }
 
     /**

@@ -165,40 +165,47 @@ private fun SturmanasApp(
     val engineError by viewModel.engineError.collectAsStateWithLifecycle()
     val aiStatus    by viewModel.aiStatus.collectAsStateWithLifecycle()
 
-    var isNavigating by remember { mutableStateOf(false) }
+    // isNavigationScreenVisible is the sole gate for which screen is shown.
+    // It is NOT the same as "is a route active" — the user may be on NavigationScreen
+    // with no active route (phase == IDLE) while browsing the floating search or
+    // waiting to give a new voice command.
+    //
+    // Transition rules:
+    //   → true  : any active engine phase (covers typed and voice start paths),
+    //             or onStartNavigation on StartScreen.
+    //   → false : only the explicit "Baigti navigaciją" button (onStopNavigation).
+    //             Voice route cancel does NOT exit NavigationScreen.
+    var isNavigationScreenVisible by remember { mutableStateOf(false) }
     var startScreenError by remember { mutableStateOf<String?>(null) }
 
-    // This LaunchedEffect is the single source of truth for the isNavigating flag:
-    // • Sets true  when the engine enters any active phase (covers voice-nav path
-    //   that bypasses the StartScreen button).
-    // • Sets false when the engine returns to IDLE — this handles voice route
-    //   cancellation ("nutrauk maršrutą") where onStopNavigation() is called from
-    //   AIConversationController and the engine transitions back to IDLE.
-    // • ARRIVED keeps the NavigationScreen visible until the user dismisses.
     LaunchedEffect(navState.phase) {
         when (navState.phase) {
             NavigationPhase.RESOLVING_ADDRESS,
             NavigationPhase.CALCULATING_ROUTE,
-            NavigationPhase.NAVIGATING -> isNavigating = true
+            NavigationPhase.NAVIGATING -> isNavigationScreenVisible = true
             NavigationPhase.IDLE       -> {
-                Log.i(MainActivity.FLOW_TAG, "NAV_UI_RETURN_TO_START")
-                isNavigating = false
+                // IDLE after a voice route-cancel: keep NavigationScreen visible so
+                // the user can enter a new destination without going back to StartScreen.
+                // The map stays on screen; NavigationScreen shows "Maršrutas nepasirinktas".
+                if (isNavigationScreenVisible) {
+                    Log.i(MainActivity.FLOW_TAG, "NAV_SCREEN_KEPT_VISIBLE")
+                }
             }
             else -> { /* ARRIVED — keep NavigationScreen visible */ }
         }
     }
 
-    if (!isNavigating) {
+    if (!isNavigationScreenVisible) {
         StartScreen(
             errorMessage      = startScreenError ?: engineError,
             engineReady       = engineReady,
             onStartNavigation = { destination ->
-                isNavigating = true
+                isNavigationScreenVisible = true
                 navigationController.startNavigation(
                     context     = context,
                     destination = destination,
                     onError     = { msg ->
-                        isNavigating = false
+                        isNavigationScreenVisible = false
                         startScreenError = msg
                     },
                 )
@@ -209,10 +216,13 @@ private fun SturmanasApp(
             navigationState      = navState,
             navigationController = navigationController,
             onStopNavigation     = {
+                // Explicit exit — the user tapped "Baigti navigaciją".
+                // This is the ONLY path that returns to StartScreen.
+                Log.i(MainActivity.FLOW_TAG, "NAV_SCREEN_EXIT_REQUESTED")
                 navigationController.stopNavigation()
                 viewModel.stopNavigationVoice()
                 viewModel.stopKentasSpeech()
-                isNavigating = false
+                isNavigationScreenVisible = false
             },
             onRerouteNavigation  = { destination ->
                 // Speak confirmation before the engine starts resolving the new route
