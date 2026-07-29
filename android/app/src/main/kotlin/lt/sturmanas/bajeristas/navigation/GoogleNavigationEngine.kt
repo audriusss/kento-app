@@ -283,7 +283,7 @@ class GoogleNavigationEngine : NavigationEngine {
     private fun syncState(nav: Navigator) {
         val td = nav.currentTimeAndDistance
         val sdkDist = td?.meters?.toInt() ?: Int.MAX_VALUE
-        val dist = if (distanceToManeuverTbt != Int.MAX_VALUE) distanceToManeuverTbt else sdkDist
+        val dist = if (distanceToManeuverTbt > 0) distanceToManeuverTbt else sdkDist
         
         Log.i(TAG, "NAV_REAL_UI_MANEUVER: maneuver=$currentManeuver dist=$dist phase=${_state.value.phase}")
         

@@ -130,7 +130,7 @@ fun NavigationScreen(
         // the Android 3-button or gesture navigation bar.
         Column(
             modifier = Modifier
-                .padding(horizontal = 16.dp, top = 12.dp)
+                .padding(start = 16.dp, top = 12.dp, end = 16.dp)
                 .navigationBarsPadding()
                 .padding(bottom = 8.dp),
         ) {
