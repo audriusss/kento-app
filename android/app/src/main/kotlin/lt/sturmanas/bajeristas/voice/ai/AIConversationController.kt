@@ -363,7 +363,7 @@ class AIConversationController(
 
         // "Pamiršk pokalbį" — explicit memory wipe command.
         // Intercepted early so it never reaches the AI or nav gate.
-        if (norm.contains("pamirsk") && norm.contains("pokalbj")) {
+        if (norm.contains("pamirsk") && norm.contains("pokalbi")) {
             Log.i(TAG, "CONV_EVENT type=MEMORY_CLEAR_COMMAND")
             KentasChat.clearMemory()
             clearUtteranceBuffer("memory_clear")
