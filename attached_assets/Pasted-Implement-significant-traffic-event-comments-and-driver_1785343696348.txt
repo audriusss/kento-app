@@ -1,0 +1,209 @@
+Implement significant traffic event comments and driver-confirmed alternative route switching.
+
+IMPORTANT:
+- Do NOT refactor the project.
+- Preserve the current architecture.
+- Preserve all working navigation, Places search, floating search, STT, TTS, conversation memory and AI response resume behavior.
+- Change only the minimum required files.
+- Implement only this feature.
+- Commit only this feature.
+
+Core philosophy:
+Kentas may suggest.
+The driver decides.
+
+Kentas must never automatically activate a different route without clear driver confirmation, except when the current route becomes impossible and the navigation SDK itself requires recalculation.
+
+Goal:
+Kentas should speak only about new, significant traffic changes that are genuinely useful to the driver.
+
+Do not add fuel-related comments.
+The app does not know the vehicle fuel level.
+
+Required behavior:
+
+1. Traffic comments must be event-driven, not periodic.
+
+Do not add timers that speak every few minutes.
+Do not comment simply because time has passed.
+
+2. Speak only about significant new events, for example:
+- a new major delay appeared
+- an existing major delay became substantially worse
+- a previously reported major delay disappeared
+- the route became impossible because of a closure or blocked road, if the SDK exposes this
+- a meaningfully faster alternative route became available
+- ETA increased or decreased significantly
+
+3. Ignore insignificant changes:
+- ETA changes under 3 minutes
+- small distance changes
+- ordinary route progress
+- “the road is clear”
+- “X kilometres remaining”
+- repeated reports about the same unchanged event
+
+4. Deduplicate traffic comments.
+
+Track the last reported traffic event using the smallest practical in-memory state, for example:
+- event type
+- delay amount
+- route or alternative identifier if available
+- timestamp
+
+The same event must not be spoken again unless it changes significantly.
+
+5. Cooldown:
+After a traffic comment, suppress ordinary traffic comments for at least 5 minutes.
+
+Important or critical changes may bypass the cooldown:
+- route becomes impossible
+- road closure
+- delay increases by at least another 5 minutes
+
+6. Alternative route proposal:
+
+When a faster alternative exists and saves at least 3 minutes, Kentas may say:
+
+"Radau kitą maršrutą, kuris sutaupytų apie 6 minutes. Perjungti?"
+
+Do not switch immediately.
+
+Enter a minimal pending route confirmation state containing:
+- proposed route or route token/reference
+- estimated time saved
+- confirmation expiry time
+
+7. Accept positive confirmation commands:
+- taip
+- gerai
+- perjunk
+- važiuojam
+- pasirink
+- imam
+
+8. Accept rejection commands:
+- ne
+- palik šitą
+- nekeisk
+- važiuojam kaip važiavom
+- atšauk
+
+9. Confirmation timeout:
+If no clear answer is received within approximately 10–15 seconds:
+- keep the current route
+- clear the pending proposal
+- do not switch
+- optionally say a very short phrase such as:
+  "Gerai, liekam prie dabartinio maršruto."
+
+Do not keep asking repeatedly.
+
+10. While route confirmation is pending:
+- treat short yes/no phrases as route confirmation
+- navigation guidance still has priority
+- if a new urgent maneuver interrupts, keep or safely expire the proposal
+- if the user asks a clearly unrelated question, cancel the pending proposal and keep the current route
+- if the user manually exits navigation or cancels the route, clear the proposal
+
+11. Switching route:
+Only after explicit positive confirmation:
+- activate the proposed route using the existing navigation SDK route-selection mechanism
+- speak a short confirmation:
+  "Gerai, perjungiu."
+- log the action
+
+12. Rejection:
+After a negative answer:
+- keep the current route
+- clear the proposal
+- say:
+  "Gerai, liekam prie dabartinio maršruto."
+
+13. Impossible current route:
+If the navigation SDK reports that the current route is no longer usable:
+- automatic SDK recalculation is allowed
+- Kentas should briefly explain:
+  "Dabartinis kelias nebepravažiuojamas. Perskaičiuoju maršrutą."
+- do not present a fake choice when the old route is impossible
+
+14. Do not invent traffic data.
+
+Use only traffic, ETA, route and alternative-route information actually exposed by the current Google Navigation SDK integration.
+
+If the SDK currently does not expose enough information for a requirement:
+- implement only the supported subset
+- clearly report the limitation
+- do not simulate or fabricate events
+
+15. Keep Kentas concise.
+
+Traffic comments should normally be one short sentence.
+Do not send every traffic event through the general AI chat unless needed.
+Prefer deterministic Lithuanian phrases for reliability and speed.
+
+16. Suggested significance thresholds:
+- alternative route saving: at least 3 minutes
+- ETA change: at least 3 minutes
+- major worsening while already reported: at least another 5 minutes
+- normal comment cooldown: 5 minutes
+
+Keep thresholds as named constants so they are easy to tune later.
+
+17. Interaction with existing speech system:
+- navigation maneuver instructions retain highest priority
+- traffic comments must not speak over maneuver guidance
+- if Kentas is answering a user question, use the existing pause-and-resume mechanism
+- traffic speech must not destroy the saved AI response
+- do not create duplicate TTS queues
+- preserve microphone mute/unmute and audio-focus behavior
+
+18. Memory:
+Traffic comments and yes/no confirmation commands must not pollute KentasChat conversation history.
+
+19. Add logs:
+TRAFFIC_EVENT_DETECTED
+TRAFFIC_EVENT_IGNORED
+TRAFFIC_EVENT_DUPLICATE
+TRAFFIC_COMMENT_SPOKEN
+TRAFFIC_COMMENT_COOLDOWN
+ALT_ROUTE_PROPOSED
+ALT_ROUTE_CONFIRMATION_ACCEPTED
+ALT_ROUTE_CONFIRMATION_REJECTED
+ALT_ROUTE_CONFIRMATION_EXPIRED
+ALT_ROUTE_SWITCHED
+ALT_ROUTE_PROPOSAL_CLEARED
+ROUTE_IMPOSSIBLE_RECALCULATION
+
+20. Test or reason through:
+A. Minor ETA change — no comment.
+B. New 8-minute delay — one comment.
+C. Same delay reported again — no duplicate.
+D. Delay grows from 8 to 14 minutes — important update allowed.
+E. Alternative saves 2 minutes — no proposal.
+F. Alternative saves 6 minutes — ask for confirmation.
+G. User says "taip" — switch.
+H. User says "ne" — keep current route.
+I. No answer for 10–15 seconds — keep current route.
+J. Maneuver guidance interrupts the proposal.
+K. User cancels navigation while proposal is pending.
+L. Current route becomes impossible — SDK recalculation allowed.
+
+21. Before changing code:
+- inspect which traffic and alternative-route callbacks/data the currently used Google Navigation SDK version actually exposes
+- reuse the existing navigation state and speech pipeline
+- do not create a parallel navigation engine
+
+22. Run compileDebugKotlin if possible.
+
+23. Report:
+- exact files changed
+- which Google Navigation SDK events/data were used
+- which significant traffic events are actually supported
+- thresholds used
+- how duplicate prevention works
+- how confirmation state works
+- how route switching is performed
+- any SDK limitations
+
+24. Commit only this feature with a clear commit message.

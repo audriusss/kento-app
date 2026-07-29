@@ -1,0 +1,129 @@
+Continue from the interrupted traffic-comments implementation.
+
+IMPORTANT:
+- Do NOT restart the task from scratch.
+- First inspect git status and git diff.
+- Preserve any correct partial edits already made.
+- Do NOT refactor unrelated code.
+- Change only the minimum required files.
+- Do not implement unsupported or fabricated traffic data.
+
+The previous analysis established:
+
+Current Google Navigation SDK integration exposes:
+- remainingDurationSeconds
+- isRerouting
+
+It does NOT currently expose through this integration:
+- traffic incidents
+- road closures
+- alternative route candidates
+- route time savings
+- traffic severity details
+
+Therefore implement only the supported subset.
+
+Step 1 — inspect current partial state:
+Run:
+git status
+git diff --stat
+git diff
+
+Report which files are already modified and whether any partial edits are incomplete or uncompilable.
+
+Step 2 — complete only this supported feature set:
+
+1. ETA significance monitoring
+- Monitor remainingDurationSeconds while navigation is active.
+- Do not comment on normal countdown caused by driving progress.
+- Detect only meaningful upward ETA changes relative to the previous stable baseline.
+- Threshold: at least +3 minutes.
+- If ETA worsens by at least another +5 minutes after already being reported, allow an important update.
+
+2. Cooldown and deduplication
+- Normal traffic-comment cooldown: 5 minutes.
+- Do not repeat the same unchanged ETA event.
+- Keep state in memory only.
+- Clear state when navigation session ends or a new route starts.
+
+3. Deterministic Lithuanian speech
+Examples:
+- ETA increased by 3–7 minutes:
+  "Kelionė pailgėjo maždaug 5 minutėmis."
+- ETA increased substantially:
+  "Priekyje situacija pablogėjo. Kelionė pailgėjo maždaug 12 minučių."
+- Rerouting started:
+  "Maršrutas perskaičiuojamas."
+
+Keep comments short.
+Do not use general AI chat for these phrases.
+
+4. isRerouting handling
+- Detect transition false -> true.
+- Speak only once per rerouting event.
+- Do not claim a road closure, accident, or blocked road because the SDK does not expose that reason.
+- Do not claim that a faster route was found.
+- Use neutral wording only.
+
+5. Speech priority
+- Maneuver guidance has highest priority.
+- Traffic comments must not overlap navigation speech.
+- Reuse the existing Kentas speech interruption/resume pipeline.
+- Do not clear a pending interrupted AI answer.
+- Do not create a second TTS queue.
+
+6. Conversation memory
+- ETA comments and rerouting phrases must not be added to KentasChat history.
+
+7. Alternative-route confirmation
+Because the current SDK integration exposes no alternative route candidate:
+- do NOT trigger any alternative-route proposal
+- do NOT invent route savings
+- do NOT switch routes
+- only add a small pending-confirmation state machine if it was already partially implemented and can remain completely dormant without affecting behavior
+- otherwise leave this for a future task
+
+8. Suggested logs:
+TRAFFIC_ETA_BASELINE_SET
+TRAFFIC_ETA_CHANGE_IGNORED
+TRAFFIC_ETA_CHANGE_DETECTED
+TRAFFIC_EVENT_DUPLICATE
+TRAFFIC_COMMENT_COOLDOWN
+TRAFFIC_COMMENT_SPOKEN
+REROUTING_STARTED
+REROUTING_COMMENT_SPOKEN
+TRAFFIC_STATE_CLEARED
+
+9. Prevent false positives:
+The remaining duration naturally decreases while driving.
+Do not interpret ordinary countdown as traffic improvement.
+Only comment on meaningful increases.
+Use a stable previous baseline and avoid reacting to small second-by-second fluctuations.
+
+10. Lifecycle:
+Reset traffic monitoring when:
+- a new route is started
+- navigation phase becomes IDLE
+- navigation is manually stopped
+- controller/view model is released
+
+11. Before committing:
+- inspect all changed files
+- remove incomplete or dead alternative-route code if it cannot be triggered
+- ensure no unresolved references remain
+- run compileDebugKotlin if available
+- if Gradle wrapper is unavailable, verify all types and imports by inspection
+
+12. Report:
+- exact files changed
+- what partial edits were found
+- what was completed
+- ETA thresholds
+- cooldown logic
+- how false positives are avoided
+- how rerouting is detected
+- SDK limitations
+
+13. Commit only this supported traffic-comments subset with a clear commit message.
+
+Do not perform git push.
