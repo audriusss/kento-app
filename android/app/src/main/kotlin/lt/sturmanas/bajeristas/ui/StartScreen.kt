@@ -91,6 +91,14 @@ import lt.sturmanas.bajeristas.ui.theme.SurfaceVariantPetrol
 fun StartScreen(
     errorMessage: String? = null,
     engineReady: Boolean = true,
+    /** True while the destination STT session is actively recording. */
+    isDestinationListening: Boolean = false,
+    /**
+     * Called when the user taps the mic button.
+     * The caller must call [onVoiceResult] when a transcript arrives so the
+     * text lands in the search field and triggers the autocomplete flow.
+     */
+    onMicClick: (onVoiceResult: (String) -> Unit) -> Unit = {},
     onStartNavigation: (destination: String) -> Unit,
 ) {
     var destination by remember { mutableStateOf("") }
@@ -419,50 +427,63 @@ fun StartScreen(
                 horizontalAlignment  = Alignment.CenterHorizontally,
                 verticalArrangement  = Arrangement.spacedBy(8.dp),
             ) {
-                // Pulsing glow ring + mic icon
+                // Mic button — pulsing outer ring + tappable inner circle
                 Box(contentAlignment = Alignment.Center) {
-                    // Outer glow ring — scales up and fades with pulse
-                    Box(
-                        modifier = Modifier
-                            .scale(pulseScale)
-                            .size(68.dp)
-                            .background(
-                                NeonGreen.copy(alpha = 0.09f * pulseAlpha),
-                                CircleShape,
-                            ),
-                    )
-                    // Inner mic button
+                    // Outer glow ring — only rendered while STT is active
+                    if (isDestinationListening) {
+                        Box(
+                            modifier = Modifier
+                                .scale(pulseScale)
+                                .size(68.dp)
+                                .background(
+                                    NeonGreen.copy(alpha = 0.09f * pulseAlpha),
+                                    CircleShape,
+                                ),
+                        )
+                    }
+                    // Inner mic button — tappable; border animates only while listening
                     Box(
                         modifier = Modifier
                             .size(52.dp)
                             .background(Color(0xFF0F2820), CircleShape)
                             .border(
                                 width  = 1.5.dp,
-                                color  = NeonGreen.copy(alpha = pulseAlpha),
+                                color  = if (isDestinationListening)
+                                    NeonGreen.copy(alpha = pulseAlpha)
+                                else
+                                    NeonGreen.copy(alpha = 0.40f),
                                 shape  = CircleShape,
-                            ),
+                            )
+                            .clickable { onMicClick { text -> destination = text } },
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(
                             imageVector        = Icons.Default.Mic,
-                            contentDescription = null,
+                            contentDescription = if (isDestinationListening)
+                                "Sustabdyti klausymą" else "Pradėti klausymą",
                             tint               = NeonGreen,
                             modifier           = Modifier.size(22.dp),
                         )
                     }
                 }
 
+                // Status label — idle hint OR active listening label
                 Text(
-                    text  = "Pasakyk, kur važiuojam",
-                    color = OnSurfaceVariantLight,
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                Text(
-                    text         = "KENTAS KLAUSOSI...",
-                    color        = NeonGreen.copy(alpha = pulseAlpha),
-                    fontSize     = 11.sp,
-                    fontWeight   = FontWeight.SemiBold,
-                    letterSpacing = 1.5.sp,
+                    text      = if (isDestinationListening)
+                        "KENTAS KLAUSOSI..."
+                    else
+                        "Paspausk mikrofoną ir pasakyk, kur važiuojam",
+                    color     = if (isDestinationListening)
+                        NeonGreen.copy(alpha = pulseAlpha)
+                    else
+                        OnSurfaceVariantLight,
+                    fontSize  = if (isDestinationListening) 11.sp
+                                else MaterialTheme.typography.bodyMedium.fontSize,
+                    fontWeight = if (isDestinationListening) FontWeight.SemiBold
+                                 else FontWeight.Normal,
+                    letterSpacing = if (isDestinationListening) 1.5.sp else 0.sp,
+                    textAlign = TextAlign.Center,
+                    modifier  = Modifier.padding(horizontal = 32.dp),
                 )
             }
         }

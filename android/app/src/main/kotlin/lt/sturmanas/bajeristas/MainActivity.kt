@@ -160,10 +160,11 @@ private fun SturmanasApp(
     viewModel: MainViewModel,
 ) {
     val context = LocalContext.current
-    val navState    by navigationController.state.collectAsStateWithLifecycle()
-    val engineReady by viewModel.engineReady.collectAsStateWithLifecycle()
-    val engineError by viewModel.engineError.collectAsStateWithLifecycle()
-    val aiStatus    by viewModel.aiStatus.collectAsStateWithLifecycle()
+    val navState                by navigationController.state.collectAsStateWithLifecycle()
+    val engineReady             by viewModel.engineReady.collectAsStateWithLifecycle()
+    val engineError             by viewModel.engineError.collectAsStateWithLifecycle()
+    val aiStatus                by viewModel.aiStatus.collectAsStateWithLifecycle()
+    val isDestinationListening  by viewModel.isDestinationListening.collectAsStateWithLifecycle()
 
     // isNavigationScreenVisible is the sole gate for which screen is shown.
     // It is NOT the same as "is a route active" — the user may be on NavigationScreen
@@ -197,10 +198,18 @@ private fun SturmanasApp(
 
     if (!isNavigationScreenVisible) {
         StartScreen(
-            errorMessage      = startScreenError ?: engineError,
-            engineReady       = engineReady,
+            errorMessage           = startScreenError ?: engineError,
+            engineReady            = engineReady,
+            isDestinationListening = isDestinationListening,
+            onMicClick             = { onVoiceResult ->
+                viewModel.startDestinationVoiceInput(onVoiceResult)
+            },
             onStartNavigation = { destination ->
+                // Stop any active destination STT before switching to Kentas nav mode.
+                viewModel.stopDestinationVoiceInput()
+                Log.i(MainActivity.FLOW_TAG, "NAVIGATION_VOICE_MODE_STARTED")
                 isNavigationScreenVisible = true
+                startScreenError = null
                 navigationController.startNavigation(
                     context     = context,
                     destination = destination,
@@ -219,6 +228,7 @@ private fun SturmanasApp(
                 // Explicit exit — the user tapped "Baigti navigaciją".
                 // This is the ONLY path that returns to StartScreen.
                 Log.i(MainActivity.FLOW_TAG, "NAV_SCREEN_EXIT_REQUESTED")
+                Log.i(MainActivity.FLOW_TAG, "NAVIGATION_EXIT_VOICE_CLEANUP")
                 navigationController.stopNavigation()
                 viewModel.stopNavigationVoice()
                 viewModel.stopKentasSpeech()

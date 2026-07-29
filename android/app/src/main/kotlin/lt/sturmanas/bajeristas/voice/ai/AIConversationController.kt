@@ -170,6 +170,14 @@ class AIConversationController(
         }
     }
 
+    // ── Destination-only input mode ───────────────────────────────────────────
+    // When non-null, the NEXT pipeline transcript is routed here and the pipeline
+    // is immediately muted — bypassing the Kentas conversation engine entirely.
+    // Used by StartScreen mic for destination entry only.
+    // All access is on the main thread (the pipeline posts via handler.post).
+    private var destinationInputCallback: ((String) -> Unit)? = null
+    private var destinationInputEndCallback: (() -> Unit)? = null
+
     private val navResumeRunnable = Runnable {
         if (activeNavUtterances.isEmpty()) {
             resumeAfterNavigation()
@@ -284,6 +292,22 @@ class AIConversationController(
      */
     fun onTranscriptReceived(text: String) {
         transcriptReceivedAtMs = System.currentTimeMillis()
+
+        // ── Destination-only intercept (StartScreen mic) ──────────────────────
+        // Must run before the phase gate so it works even when the conversation
+        // engine is in Phase.MUTED (its normal idle state on StartScreen).
+        val destCb = destinationInputCallback
+        if (destCb != null) {
+            Log.i(TAG, "STARTSCREEN_VOICE_RESULT text='$text'")
+            destinationInputCallback = null
+            val endCb = destinationInputEndCallback
+            destinationInputEndCallback = null
+            pipeline.mute()
+            endCb?.invoke()          // clears isDestinationListening in ViewModel
+            destCb(text)             // sets destination in StartScreen
+            return
+        }
+
         // Defensive guard: pipeline may deliver stale callbacks after mute if a
         // transcription was in-flight at the moment mute was requested.
         if (phase == Phase.MUTED) {
@@ -313,6 +337,39 @@ class AIConversationController(
         if (phase == Phase.MUTED) return
         pipeline.unmute()
         pipeline.start()
+    }
+
+    /**
+     * One-shot destination voice input for StartScreen.
+     *
+     * Routes the **next** transcript to [onResult] then immediately mutes the pipeline.
+     * Does NOT activate the Kentas conversation engine (no wake-word, no AI call).
+     * Safe to call while the engine is idle, muted, or in any non-navigation phase.
+     *
+     * [onEnd] is called when the session ends for any reason (result received or
+     * [stopDestinationInput] called), so callers can clear their listening-state flag.
+     */
+    fun startDestinationInput(onResult: (String) -> Unit, onEnd: () -> Unit) {
+        if (destroyed) return
+        Log.i(TAG, "STARTSCREEN_VOICE_LISTENING_STARTED")
+        destinationInputCallback = onResult
+        destinationInputEndCallback = onEnd
+        pipeline.unmute()
+        pipeline.start()
+    }
+
+    /**
+     * Cancels an active [startDestinationInput] session. No-op if none is active.
+     * Called when navigation starts or the user taps the mic button a second time.
+     */
+    fun stopDestinationInput() {
+        val endCb = destinationInputEndCallback
+        if (destinationInputCallback == null && endCb == null) return
+        Log.i(TAG, "STARTSCREEN_VOICE_ENDED reason=stopped")
+        destinationInputCallback = null
+        destinationInputEndCallback = null
+        pipeline.mute()
+        endCb?.invoke()
     }
 
     // ─── CONVERSATION LOGIC ───────────────────────────────────────────────

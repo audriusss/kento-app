@@ -39,6 +39,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _engineError = MutableStateFlow<String?>(null)
     val engineError: StateFlow<String?> = _engineError.asStateFlow()
 
+    /** True while StartScreen destination STT is active. Observed by [SturmanasApp]. */
+    private val _isDestinationListening = MutableStateFlow(false)
+    val isDestinationListening: StateFlow<Boolean> = _isDestinationListening.asStateFlow()
+
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
     private val _aiStatus = MutableStateFlow("IDLE")
     val aiStatus: StateFlow<String> = _aiStatus.asStateFlow()
@@ -190,6 +194,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun announceReroute() {
         handler.post { aiController?.speak("Gerai, keičiu maršrutą.") }
+    }
+
+    /**
+     * Starts a one-shot destination voice input session for StartScreen.
+     * Routes the first transcript to [onVoiceResult] via [AIConversationController.startDestinationInput].
+     * Second tap while active cancels the session (toggle behaviour).
+     * No-op if [aiController] is not yet initialised.
+     */
+    fun startDestinationVoiceInput(onVoiceResult: (String) -> Unit) {
+        Log.i(TAG, "STARTSCREEN_VOICE_REQUESTED")
+        val ctrl = aiController
+        if (ctrl == null) {
+            Log.w(TAG, "STARTSCREEN_VOICE_ERROR reason=aiController_null")
+            return
+        }
+        if (_isDestinationListening.value) {
+            // Second tap = toggle off (cancel)
+            stopDestinationVoiceInput()
+            return
+        }
+        _isDestinationListening.value = true
+        handler.post {
+            ctrl.startDestinationInput(
+                onResult = { text ->
+                    Log.i(TAG, "STARTSCREEN_VOICE_RESULT text='$text'")
+                    _isDestinationListening.value = false
+                    onVoiceResult(text)
+                },
+                onEnd = {
+                    Log.i(TAG, "STARTSCREEN_VOICE_ENDED")
+                    _isDestinationListening.value = false
+                },
+            )
+        }
+    }
+
+    /**
+     * Stops any active destination voice input session.
+     * Called when navigation starts so STT is cleanly terminated before
+     * the Kentas navigation conversation mode takes over.
+     */
+    fun stopDestinationVoiceInput() {
+        if (!_isDestinationListening.value) return
+        Log.i(TAG, "STARTSCREEN_VOICE_ENDED reason=stopped_externally")
+        _isDestinationListening.value = false
+        handler.post { aiController?.stopDestinationInput() }
     }
 
     fun setEngineReady(ready: Boolean) {
