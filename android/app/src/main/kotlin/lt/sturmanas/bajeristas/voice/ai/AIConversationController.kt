@@ -361,6 +361,16 @@ class AIConversationController(
             return
         }
 
+        // "Pamiršk pokalbį" — explicit memory wipe command.
+        // Intercepted early so it never reaches the AI or nav gate.
+        if (norm.contains("pamirsk") && norm.contains("pokalbj")) {
+            Log.i(TAG, "CONV_EVENT type=MEMORY_CLEAR_COMMAND")
+            KentasChat.clearMemory()
+            clearUtteranceBuffer("memory_clear")
+            speak("Gerai, pamiršau viską. Pradedame iš naujo.")
+            return
+        }
+
         // 2. Buffer interaction
         if (isFinal) {
             appendToBuffer(text)
@@ -699,7 +709,19 @@ class AIConversationController(
         Log.i(TAG, "AI_REQUEST_STARTED elapsedSinceSttMs=$elapsedSinceStt text='$text'")
         clearUtteranceBuffer("sent_to_ai")
         transitionTo(Phase.THINKING)
-        KentasChat.askKentas(text) { reply ->
+
+        // Build a short navigation context string so the model knows the driving
+        // situation when composing its reply.  This is passed as a transient system
+        // message by KentasChat and is NOT stored in conversation history.
+        val navContext: String? = getNextManeuverDist().let { dist ->
+            when {
+                dist == Int.MAX_VALUE || dist <= 0 -> null
+                dist >= 1_000 -> "${"%.1f".format(dist / 1_000.0)} km iki kito posūkio"
+                else          -> "$dist m iki kito posūkio"
+            }
+        }
+
+        KentasChat.askKentas(text, navContext) { reply ->
             val elapsedFromRequest = System.currentTimeMillis() - aiRequestStartedAtMs
             Log.i(TAG, "AI_RESPONSE_RECEIVED elapsedFromRequestMs=$elapsedFromRequest replyLength=${reply.length}")
             handler.post {

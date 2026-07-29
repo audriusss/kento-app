@@ -20,22 +20,40 @@ import java.util.concurrent.TimeUnit
  * [X-Session-Id], which the backend uses only for structured usage logging
  * (one-way hashed, never stored in plaintext).
  *
- * ## Conversation history
- * History is maintained client-side (bounded to [MAX_HISTORY] turns) and sent
- * in full with every request.  The backend is stateless — no conversation
+ * ## Conversation memory
+ * History is maintained client-side (bounded to [MAX_HISTORY] user+assistant pairs)
+ * and sent in full with every request.  The backend is stateless — no conversation
  * context is stored server-side.
+ *
+ * Navigation commands ("nutrauk maršrutą", "važiuojam į X", "atšauk") are
+ * intercepted by [AIConversationController] before [askKentas] is called, so they
+ * never appear in conversation history.
+ *
+ * Navigation context (distance to next maneuver) is injected as a *transient*
+ * system message per request and is NOT stored in [history], keeping the rolling
+ * buffer clean and containing only real user↔Kentas turns.
  *
  * Call [init] once with the backend URL before [askKentas].
  */
 object KentasChat {
+
+    private const val TAG = "KentasChat"
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(35, TimeUnit.SECONDS)
         .build()
 
+    /**
+     * Rolling buffer: system prompt (index 0) + up to [MAX_HISTORY] user/assistant
+     * pairs = at most (MAX_HISTORY * 2) + 1 entries.
+     *
+     * 10 pairs ≈ 5–10 minutes of typical conversation at normal speaking pace.
+     * Older turns are dropped from index 1 (preserving the system prompt at [0])
+     * when the buffer exceeds capacity.
+     */
     private val history = mutableListOf<JSONObject>()
-    private const val MAX_HISTORY = 3
+    private const val MAX_HISTORY = 10
 
     /** Set once at app start from BuildConfig.BACKEND_URL. */
     private var backendUrl: String = ""
@@ -43,7 +61,7 @@ object KentasChat {
     /** Per-session UUID — used as X-Session-Id header for server-side logging. */
     private var sessionId: String = UUID.randomUUID().toString()
 
-private const val SYSTEM_PROMPT = """
+    private const val SYSTEM_PROMPT = """
 Tu esi Kentas — naglas, kandus ir greito proto lietuviškas vairuotojo pakeleivis. Kalbi kaip senas draugas automobilyje, o ne kaip robotas ar oficialus asistentas.
 
 CHARAKTERIS:
@@ -58,7 +76,7 @@ KALBĖJIMAS:
 - Dažniausiai atsakyk 1–3 trumpais sakiniais, maždaug 5–25 žodžiais.
 - Ilgiau kalbėk tik aiškiai paprašytas paaiškinti.
 - Nekartok klausimo, nenaudok sąrašų, antraščių, markdown ar emoji.
-- Nesakyk „Žinoma“, „Puikus klausimas“, „Ar dar kuo nors galiu padėti“ ar kitų robotiškų frazių.
+- Nesakyk „Žinoma", „Puikus klausimas", „Ar dar kuo nors galiu padėti" ar kitų robotiškų frazių.
 - Ne kiekvienas atsakymas turi būti bajeris. Natūralumas svarbiau už humorą.
 
 ATMINTIS:
@@ -66,20 +84,22 @@ ATMINTIS:
 - Neklausk to paties dar kartą.
 - Natūraliai prisimink paminėtus vardus, augintinius, darbus, planus, vietas ir ankstesnius bajerius.
 - Nekišk prisiminimų į kiekvieną atsakymą.
+- Įvardžiai „ten", „jis", „tas", „anas" nurodo paskutinį pokalbio temą.
 
 ELGESYS:
-- Jei STT tekstas atrodo nesąmonė, trumpai klausk: „Ką sakei?“
+- Jei STT tekstas atrodo nesąmonė, trumpai klausk: „Ką sakei?"
 - Jei žmogus kalba rimtai ar jam bloga, sumažink humorą.
 - Navigacijos nurodymai visada svarbesni už pokalbį.
 - Neskatink pavojingų veiksmų vairuojant.
 - Jei tiesiai paklausia, ar esi AI, nemeluok, bet atsakyk Kento stiliumi.
 
 VIDINĖ TAISYKLĖ:
-Prieš atsakydamas tyliai paklausk savęs: „Kaip čia natūraliai atsakytų naglas draugas automobilyje?“
+Prieš atsakydamas tyliai paklausk savęs: „Kaip čia natūraliai atsakytų naglas draugas automobilyje?"
 Jei atsakymas skamba kaip robotas ar dirbtinis bajeris, perrašyk jį.
 
 Būk Kentas.
 """
+
     /**
      * Initialise with the backend base URL (e.g. "https://your-backend.replit.app/api-server").
      * Must be called before [askKentas].  Safe to call multiple times; only the first
@@ -88,39 +108,69 @@ Būk Kentas.
     fun init(url: String) {
         if (backendUrl.isBlank() && url.isNotBlank()) {
             backendUrl = url.trimEnd('/')
-            Log.i("KentasChat", "BACKEND_URL configured (length=${backendUrl.length})")
+            Log.i(TAG, "BACKEND_URL configured (length=${backendUrl.length})")
         }
     }
 
-    fun askKentas(query: String, callback: (String) -> Unit) {
+    /**
+     * Send [query] to the AI and return the response via [callback].
+     *
+     * @param query       The user's utterance (navigation commands must be filtered
+     *                    by the caller before reaching this method).
+     * @param navContext  Optional short Lithuanian string describing the current
+     *                    navigation state (e.g. "350 m iki kito posūkio").  When
+     *                    non-null it is injected as a transient `system` message
+     *                    immediately before the user message in the request payload,
+     *                    but is NOT stored in [history].
+     * @param callback    Invoked on the OkHttp callback thread with the reply text.
+     */
+    fun askKentas(query: String, navContext: String? = null, callback: (String) -> Unit) {
         if (backendUrl.isBlank()) {
-            Log.w("KentasChat", "BACKEND_URL not configured")
+            Log.w(TAG, "BACKEND_URL not configured")
             callback("Susitvarkyk savo backend URL, tada plepėsim.")
             return
         }
 
+        // Lazily add the system prompt on the first real turn.
         if (history.isEmpty()) {
-            history.add(JSONObject().put("role", "system").put("content", SYSTEM_PROMPT))
+            history.add(JSONObject().put("role", "system").put("content", SYSTEM_PROMPT.trim()))
         }
 
+        // Add the user turn and log it.
         history.add(JSONObject().put("role", "user").put("content", query))
-        // Bound history: keep system + MAX_HISTORY pairs (user+assistant each)
+        val pairsInMemory = (history.size - 1) / 2  // exclude system prompt
+        Log.i(TAG, "MEMORY_ADD role=user turns=$pairsInMemory query='${query.take(60)}'")
+
+        // Trim to MAX_HISTORY user+assistant pairs.  Always keep history[0] (system prompt).
         val maxEntries = (MAX_HISTORY * 2) + 1
+        var trimCount = 0
         while (history.size > maxEntries) {
-            // Always keep history[0] (system prompt)
-            if (history.size > 1 && history[1].getString("role") != "system") {
+            if (history.size > 1) {
                 history.removeAt(1)
+                trimCount++
             } else {
                 break
             }
         }
+        if (trimCount > 0) {
+            Log.i(TAG, "MEMORY_TRIM removed=$trimCount remaining=${history.size} maxPairs=$MAX_HISTORY")
+        }
 
-        // Build idempotency key from session + query hash (prevents duplicate
-        // server calls if Android retries the same request on network error).
+        // Build the messages array for this request.  Nav context (if any) is injected
+        // as a transient system message immediately before the last user message so the
+        // model sees the driving situation when composing its reply — but it is not
+        // persisted in history so it never crowds out real conversation turns.
+        val messages = buildMessagesForRequest(navContext)
+        Log.i(
+            TAG,
+            "MEMORY_BUILD_PROMPT messages=${messages.length()} " +
+            "turns=${(history.size - 1) / 2} navContext=${navContext != null}",
+        )
+
         val idempotencyKey = "$sessionId-${query.hashCode()}"
 
         val requestBody = JSONObject()
-            .put("messages", JSONArray(history))
+            .put("messages", messages)
             .put("sessionId", sessionId)
             .toString()
             .toRequestBody("application/json".toMediaType())
@@ -134,7 +184,7 @@ Būk Kentas.
 
         client.newCall(request).enqueue(object : okhttp3.Callback {
             override fun onFailure(call: okhttp3.Call, e: IOException) {
-                Log.e("KentasChat", "Chat backend error", e)
+                Log.e(TAG, "Chat backend error", e)
                 callback("Internetas nulūžo. Pabandom vėliau.")
             }
 
@@ -144,19 +194,77 @@ Būk Kentas.
                     val json = JSONObject(bodyString)
                     val reply = json.optString("reply", "").trim()
                     if (reply.isNotBlank()) {
-                        history.add(JSONObject().put("role", "assistant").put("content", reply))
+                        history.add(
+                            JSONObject().put("role", "assistant").put("content", reply),
+                        )
+                        Log.i(TAG, "MEMORY_ADD role=assistant turns=${(history.size - 1) / 2}")
                         callback(reply)
                     } else {
-                        Log.e("KentasChat", "Empty reply from backend")
+                        Log.e(TAG, "Empty reply from backend")
                         callback("Kažkas negerai. Pabandom dar kartą.")
                     }
                 } else {
-                    Log.e("KentasChat", "Chat HTTP ${response.code}: $bodyString")
+                    Log.e(TAG, "Chat HTTP ${response.code}: $bodyString")
                     callback("Kažkas negerai. Pabandom dar kartą.")
                 }
             }
         })
     }
+
+    /**
+     * Builds the messages array sent to the backend for a single request.
+     *
+     * Layout (in order):
+     * 1. System prompt (history[0])
+     * 2. Past user/assistant turns (history[1..n-1])
+     * 3. [optional] Transient nav-context system message — NOT in history
+     * 4. Current user message (history[n], just appended)
+     *
+     * The transient nav message is inserted between the last history turn and
+     * the current user message so the model sees the driving situation freshly
+     * for each reply without the context accumulating across turns.
+     */
+    private fun buildMessagesForRequest(navContext: String?): JSONArray {
+        val messages = JSONArray()
+
+        if (navContext == null || history.size < 2) {
+            // No nav context or only the system prompt — copy history as-is.
+            for (entry in history) messages.put(entry)
+            return messages
+        }
+
+        // Copy system prompt + all turns except the last user message.
+        for (i in 0 until history.size - 1) messages.put(history[i])
+
+        // Inject transient nav context right before the current user message.
+        messages.put(
+            JSONObject()
+                .put("role", "system")
+                .put("content", "[Navigacija: $navContext]"),
+        )
+
+        // Append the current user message last.
+        messages.put(history[history.size - 1])
+
+        return messages
+    }
+
+    /**
+     * Clears all conversation history.
+     *
+     * Called on:
+     * - explicit "pamiršk pokalbį" voice command
+     * - app restart (via [resetHistory])
+     * - future long-term memory replacement
+     */
+    fun clearMemory() {
+        val turns = (history.size - 1).coerceAtLeast(0)
+        history.clear()
+        Log.i(TAG, "MEMORY_CLEAR turns_discarded=$turns")
+    }
+
+    /** Alias kept for call sites that used the old name. Delegates to [clearMemory]. */
+    fun resetHistory() = clearMemory()
 
     fun getOpener(): String {
         val openers = listOf(
@@ -167,10 +275,5 @@ Būk Kentas.
             "Kelias lygus, laikas yra — klausk ko nori.",
         )
         return openers.random()
-    }
-
-    /** Reset history (e.g. on session restart). */
-    fun resetHistory() {
-        history.clear()
     }
 }
