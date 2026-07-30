@@ -99,15 +99,32 @@ class ContinuousMicrophonePipeline(
     /**
      * Generation counter — incremented every time the pipeline is muted or
      * stopped.  Each transcription coroutine captures its generation at launch
-     * and discards its result if the counter has advanced by the time the HTTP
-     * response arrives, preventing stale transcripts from reaching the
-     * controller after a mute or release.
+     * and the delivery queue discards results whose generation no longer
+     * matches, preventing stale transcripts from reaching the controller after
+     * a mute or release.
      *
      * Written only on the main thread (in [mute] and [stop]); read on IO
      * threads from transcription coroutines.  @Volatile is sufficient because
      * there is a single writer.
      */
     @Volatile private var generationId = 0
+
+    /**
+     * Per-utterance sequence counter.  Incremented at [UtteranceSegmenter.Event.UtteranceReady]
+     * and captured so each transcription coroutine knows its position in the
+     * utterance stream.  The [deliveryQueue] uses this ID to re-order results
+     * that arrive out of sequence from the STT backend.
+     *
+     * Reset to 0 in [start] before any capture coroutines are launched.
+     */
+    private val utteranceSeq = AtomicInteger(0)
+
+    /**
+     * Serialises transcript delivery in utterance order.  When two uploads are
+     * in-flight and the later one completes first, the queue buffers it until
+     * its predecessor arrives, then drains both in order.
+     */
+    private val deliveryQueue = SttDeliveryQueue(onTranscriptReady)
 
     // ── MicrophonePipeline ─────────────────────────────────────────────────
 
@@ -117,6 +134,10 @@ class ContinuousMicrophonePipeline(
      */
     override fun start() {
         if (!running.compareAndSet(false, true)) return   // already running — no-op
+        // Reset utterance sequencing so IDs start from 0 for each new session.
+        // Safe here because no capture coroutines are active yet (running was false).
+        utteranceSeq.set(0)
+        deliveryQueue.reset()
         Log.i(TAG, "MIC_PIPELINE_STARTED")
         captureJob = scope.launch { runPipeline() }
     }
@@ -299,23 +320,32 @@ class ContinuousMicrophonePipeline(
 
                 val pcmSnapshot = event.pcm
                 val durationMs = event.durationMs
-                // Capture the generation at utterance completion.  If the pipeline
-                // is muted or stopped before the HTTP response arrives, generationId
-                // will have advanced and the transcript will be silently dropped.
+                // Capture generation and utterance ID atomically at utterance completion.
+                // generationId guards against mute/stop invalidation; utteranceId
+                // preserves delivery order when two uploads complete out of sequence.
                 val capturedGeneration = generationId
+                val utteranceId = utteranceSeq.getAndIncrement()
 
                 // Bounded fire-and-forget transcription.
                 if (activeTranscriptions.incrementAndGet() <= PipelineConfig.MAX_CONCURRENT_TRANSCRIPTIONS) {
                     scope.launch {
                         try {
-                            transcribeAndDeliver(pcmSnapshot, durationMs, capturedGeneration)
+                            transcribeAndDeliver(pcmSnapshot, durationMs, capturedGeneration, utteranceId)
                         } finally {
                             activeTranscriptions.decrementAndGet()
                         }
                     }
                 } else {
                     activeTranscriptions.decrementAndGet()
-                    Log.w(TAG, "VAD_UTTERANCE_DISCARDED reason=transcription_queue_full")
+                    Log.w(
+                        TAG,
+                        "VAD_UTTERANCE_DISCARDED reason=transcription_queue_full " +
+                        "generation=$capturedGeneration utteranceId=$utteranceId",
+                    )
+                    // Advance the delivery queue so subsequent utterances are not blocked.
+                    scope.launch {
+                        deliveryQueue.skip(utteranceId) { generationId }
+                    }
                 }
             }
 
@@ -325,36 +355,40 @@ class ContinuousMicrophonePipeline(
         }
     }
 
-    private suspend fun transcribeAndDeliver(pcm: ByteArray, durationMs: Long, generation: Int) {
+    private suspend fun transcribeAndDeliver(
+        pcm: ByteArray,
+        durationMs: Long,
+        generation: Int,
+        utteranceId: Int,
+    ) {
         val wav = WavEncoder.encode(pcm)
-        Log.i(TAG, "STT_UPLOAD_STARTED wavBytes=${wav.size} generation=$generation")
+        Log.i(TAG, "STT_UPLOAD_STARTED wavBytes=${wav.size} generation=$generation utteranceId=$utteranceId")
         val startMs = System.currentTimeMillis()
 
-        transcriptionClient.transcribe(wav, language = "lt")
-            .onSuccess { transcript ->
-                // Check generation before delivering: if generationId has advanced
-                // since this coroutine was launched, the pipeline was muted or
-                // stopped while the HTTP request was in-flight.  Drop silently.
-                if (generationId != generation) {
-                    Log.d(
-                        TAG,
-                        "STT_RESULT_DISCARDED_STALE " +
-                        "captured=$generation current=$generationId",
-                    )
-                    return@onSuccess
-                }
-                val latencyMs = System.currentTimeMillis() - startMs
-                Log.i(
-                    TAG,
-                    "STT_UPLOAD_COMPLETED latencyMs=$latencyMs " +
-                    "transcriptLength=${transcript.length}",
-                )
-                Log.i(TAG, "STT_TRANSCRIPT text=\"$transcript\"")
-                onTranscriptReady(transcript)
-                Log.d(TAG, "STT_TRANSCRIPT_DELIVERED transcriptLength=${transcript.length}")
-            }
-            .onFailure { err ->
-                Log.e(TAG, "STT_UPLOAD_FAILED reason=${err.message}")
-            }
+        val result = transcriptionClient.transcribe(wav, language = "lt")
+
+        val transcript = result.getOrNull()
+        if (transcript != null) {
+            val latencyMs = System.currentTimeMillis() - startMs
+            Log.i(
+                TAG,
+                "STT_UPLOAD_COMPLETED latencyMs=$latencyMs " +
+                "transcriptLength=${transcript.length} " +
+                "generation=$generation utteranceId=$utteranceId",
+            )
+            Log.i(TAG, "STT_TRANSCRIPT text=\"$transcript\"")
+            // Offer to the delivery queue: handles ordering and stale-generation checks.
+            // Even if this generation is stale, the queue still advances past this ID
+            // so that any already-buffered higher-ID results can drain correctly.
+            deliveryQueue.offer(utteranceId, generation, transcript) { generationId }
+        } else {
+            Log.e(
+                TAG,
+                "STT_UPLOAD_FAILED reason=${result.exceptionOrNull()?.message} " +
+                "generation=$generation utteranceId=$utteranceId",
+            )
+            // Skip advances the queue past this ID without delivering.
+            deliveryQueue.skip(utteranceId) { generationId }
+        }
     }
 }
