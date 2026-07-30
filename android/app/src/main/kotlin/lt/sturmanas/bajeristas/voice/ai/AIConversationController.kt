@@ -225,6 +225,8 @@ class AIConversationController(
         if (!destroyed) {
             pipeline.resetVadAndSegmenter()
             transitionTo(postTtsTargetPhase(mode))
+            Log.i(TAG, "AI_IDLE_WAITING_FOR_NEW_SPEECH mode=$mode")
+            startFollowUpWindow()
         }
     }
 
@@ -234,6 +236,27 @@ class AIConversationController(
 
     private val muteCommands = setOf("uzsiciaup", "tylek", "baik", "ramiai", "issijunk")
     private val unmuteCommands = setOf("kalbek", "grizk", "bazarinam", "isijunk", "gali kalbeti")
+
+    // ── Turn tracking ─────────────────────────────────────────────────────
+    /**
+     * Monotonic counter: incremented for every transcript that reaches
+     * [onTranscriptReceived] regardless of whether it is accepted or dropped.
+     * Used to correlate USER_TURN_OPENED / TRANSCRIPT_DROPPED / USER_TURN_CLOSED
+     * log lines.
+     */
+    private var transcriptSeq = 0
+    /** Turn ID currently open; set when USER_TURN_OPENED fires. */
+    private var activeTurnId = -1
+
+    // ── Follow-up window ─────────────────────────────────────────────────
+    /**
+     * After Kentas finishes speaking, [ConversationMode] stays ACTIVE for this
+     * window so the user can reply without repeating the wake-word.  When the
+     * window expires without new accepted speech, mode transitions back to IDLE
+     * and a wake-word is required again.
+     */
+    private val FOLLOW_UP_WINDOW_MS = 8_000L
+    private var followUpWindowRunnable: Runnable? = null
 
     // ─── BUFFER MANAGER (Persistent) ─────────────────────────────────────
     private val utteranceBuffer = StringBuilder()
@@ -364,12 +387,24 @@ class AIConversationController(
             return
         }
 
-        // Defensive guard: pipeline may deliver stale callbacks after mute if a
-        // transcription was in-flight at the moment mute was requested.
-        if (phase == Phase.MUTED) {
-            Log.d(TAG, "CONV_TRANSCRIPT_IGNORED phase=MUTED text='$text'")
+        // ── Turn gate: drop transcripts while a turn is already active ──────
+        // THINKING = AI HTTP request in flight; SPEAKING = TTS playing.
+        // Both phases have the pipeline hardware-muted via transitionTo(), so
+        // any transcript arriving here was captured just before that mute.
+        // The mode-level guard inside processPacket() handles ConversationMode.MUTED
+        // independently so unmute commands ("Kentai grįžk") can still reach it.
+        val tid = ++transcriptSeq
+        if (isTurnBlocked(phase)) {
+            Log.i(TAG, "TRANSCRIPT_DROPPED reason=turn_already_active utteranceId=$tid state=$phase")
             return
         }
+
+        // User spoke — cancel the follow-up window so it is not left dangling
+        // while the new transcript is being processed.
+        cancelFollowUpWindow()
+
+        activeTurnId = tid
+        Log.i(TAG, "USER_TURN_OPENED utteranceId=$tid")
         processPacket(text, isFinal = true)
     }
 
@@ -521,6 +556,7 @@ class AIConversationController(
         if (muteCommands.any { norm.contains(it) } && (norm.contains("kent") || mode == ConversationMode.ACTIVE)) {
             Log.i(TAG, "CONV_EVENT type=MUTE_COMMAND")
             mode = ConversationMode.MUTED
+            cancelFollowUpWindow()
             transitionTo(Phase.MUTED)
             clearInterruptedResponse("mute_command")
             clearUtteranceBuffer("mute_command")
@@ -589,6 +625,17 @@ class AIConversationController(
                 return
             }
         } else {
+            // Wake-word gate: when no active conversation window (mode=IDLE), only
+            // forward speech that contains a wake-word.  Immediate commands (mute/
+            // unmute/stop) are intercepted in processPacket() before reaching here
+            // and are always allowed regardless of mode.
+            if (requiresWakeWord(mode) && !containsWakeWord(norm)) {
+                Log.d(TAG, "CONV_PACKET_NO_WAKE_WORD mode=IDLE text='$currentText'")
+                clearUtteranceBuffer("no_wake_word")
+                transitionTo(Phase.IDLE)
+                return
+            }
+
             // Wake-word-only: acknowledge and open session without calling AI.
             if (mode == ConversationMode.IDLE && isWakeWordOnly(norm)) {
                 Log.i(TAG, "CONV_SEMANTIC_COMPLETE result=WAKE_ONLY")
@@ -889,6 +936,7 @@ class AIConversationController(
         val elapsedSinceStt = if (transcriptReceivedAtMs > 0)
             aiRequestStartedAtMs - transcriptReceivedAtMs
         else -1L
+        Log.i(TAG, "USER_TURN_CLOSED utteranceId=$activeTurnId")
         Log.i(TAG, "AI_REQUEST_STARTED elapsedSinceSttMs=$elapsedSinceStt text='$text'")
         clearUtteranceBuffer("sent_to_ai")
         transitionTo(Phase.THINKING)
@@ -1171,6 +1219,7 @@ class AIConversationController(
     fun stop() {
         Log.i(TAG, "CONV_EVENT type=STOP_REQUESTED")
         clearInterruptedResponse("user_stop")
+        cancelFollowUpWindow()
         // Cancel the idle/commentary timer so it cannot fire after navigation exits.
         cancelInactivityTimer()
         stopAiSpeech()
@@ -1291,15 +1340,28 @@ class AIConversationController(
                 }
                 dist != Int.MAX_VALUE && dist > 500 -> {
                     // Navigating with a clear run ahead — road commentary.
-                    hasOpenerFired = true
-                    val comment = KentasChat.getNavComment(dist)
-                    Log.i(TAG, "ROAD_COMMENTARY_SCHEDULED speaking distM=$dist comment='$comment'")
-                    speak(comment)
+                    // Only speak if the user has an active conversation window;
+                    // do not push unsolicited AI speech in IDLE mode.
+                    if (mode != ConversationMode.ACTIVE) {
+                        Log.i(TAG, "ROAD_COMMENTARY_SKIPPED reason=not_active mode=$mode")
+                        handler.postDelayed(inactivityRunnable!!, 30000)
+                    } else {
+                        hasOpenerFired = true
+                        val comment = KentasChat.getNavComment(dist)
+                        Log.i(TAG, "ROAD_COMMENTARY_SCHEDULED speaking distM=$dist comment='$comment'")
+                        speak(comment)
+                    }
                 }
                 dist == Int.MAX_VALUE -> {
                     // Not navigating — conversation opener.
-                    hasOpenerFired = true
-                    speak(KentasChat.getOpener())
+                    // Only offer an opener when the user is already engaged.
+                    if (mode != ConversationMode.ACTIVE) {
+                        Log.i(TAG, "ROAD_COMMENTARY_SKIPPED reason=not_active mode=$mode")
+                        handler.postDelayed(inactivityRunnable!!, 30000)
+                    } else {
+                        hasOpenerFired = true
+                        speak(KentasChat.getOpener())
+                    }
                 }
                 else -> {
                     // Close to a maneuver (dist ≤ 500 m) — stay quiet, retry later.
@@ -1317,6 +1379,49 @@ class AIConversationController(
             inactivityRunnable?.let { handler.removeCallbacks(it) }
             inactivityRunnable = null
         }
+    }
+
+    /**
+     * Returns true if [normalizedText] contains any of the recognised wake-word
+     * variants for "Kentas".  Used to gate speech when [ConversationMode] is [IDLE].
+     */
+    private fun containsWakeWord(normalizedText: String): Boolean =
+        strongWakeWords.any { normalizedText.contains(it) } ||
+        normalizedText.contains("kent")
+
+    /**
+     * Opens a follow-up window after Kentas finishes speaking.
+     *
+     * While the window is open the user may reply without repeating the wake-word.
+     * If no speech arrives within [FOLLOW_UP_WINDOW_MS], [ConversationMode] transitions
+     * back to [ConversationMode.IDLE] and the next utterance must contain a wake-word.
+     *
+     * No-op when mode is not [ConversationMode.ACTIVE].
+     */
+    private fun startFollowUpWindow() {
+        cancelFollowUpWindow()
+        if (mode != ConversationMode.ACTIVE) return
+        val run = Runnable {
+            if (mode == ConversationMode.ACTIVE &&
+                phase != Phase.THINKING &&
+                phase != Phase.SPEAKING &&
+                phase != Phase.PAUSED_BY_NAVIGATION
+            ) {
+                Log.i(TAG, "CONV_FOLLOW_UP_WINDOW_EXPIRED mode=ACTIVE->IDLE")
+                mode = ConversationMode.IDLE
+            }
+        }
+        followUpWindowRunnable = run
+        handler.postDelayed(run, FOLLOW_UP_WINDOW_MS)
+    }
+
+    /**
+     * Cancel any pending follow-up window runnable.
+     * Safe to call when no window is scheduled.
+     */
+    private fun cancelFollowUpWindow() {
+        followUpWindowRunnable?.let { handler.removeCallbacks(it) }
+        followUpWindowRunnable = null
     }
 
     override fun onInit(status: Int) {
@@ -1350,6 +1455,7 @@ class AIConversationController(
     fun release() {
         destroyed = true
         clearInterruptedResponse("released")
+        cancelFollowUpWindow()
         voiceNavScope.cancel()
         pipeline.stop()
         watchdogHandler.removeCallbacksAndMessages(null)

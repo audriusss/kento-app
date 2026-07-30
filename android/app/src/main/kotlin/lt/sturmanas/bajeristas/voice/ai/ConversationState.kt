@@ -67,3 +67,33 @@ internal fun pipelineActionForPhase(phase: Phase): PipelineAction = when (phase)
     Phase.PAUSED_BY_NAVIGATION,
     -> PipelineAction.MUTE
 }
+
+/**
+ * Returns true when a new transcript must be dropped because a user turn is already active.
+ *
+ * [Phase.THINKING] means an AI HTTP request is in flight.
+ * [Phase.SPEAKING] means Kentas TTS is playing.
+ *
+ * In both phases the pipeline is hardware-muted by [pipelineActionForPhase], so any
+ * transcript that arrives here was captured just before the mute took effect.  Dropping
+ * it prevents a second AI request from being triggered by a residual in-flight delivery.
+ *
+ * This is a pure function with no Android dependencies; it is tested directly in
+ * `TurnGateTest`.
+ */
+internal fun isTurnBlocked(phase: Phase): Boolean =
+    phase == Phase.THINKING || phase == Phase.SPEAKING
+
+/**
+ * Returns true when an incoming transcript must contain a wake-word before it is
+ * forwarded to the AI.  Only applies when [ConversationMode] is [ConversationMode.IDLE]
+ * (no active conversation window).
+ *
+ * Immediate commands (mute/unmute/stop) are handled in processPacket() before this
+ * gate is consulted and are always allowed regardless of mode.
+ *
+ * This is a pure function with no Android dependencies; it is tested directly in
+ * `TurnGateTest`.
+ */
+internal fun requiresWakeWord(mode: ConversationMode): Boolean =
+    mode == ConversationMode.IDLE
