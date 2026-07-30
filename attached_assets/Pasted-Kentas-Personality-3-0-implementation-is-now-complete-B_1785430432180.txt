@@ -1,0 +1,283 @@
+Kentas Personality 3.0 implementation is now complete.
+
+Before pushing, perform a focused regression audit of all recent changes.
+
+Do NOT add new features.
+Do NOT redesign.
+Do NOT refactor working architecture.
+Do NOT change Google Navigation SDK integration unless a real bug requires it.
+
+==================================================
+AUDIT SCOPE
+==================================================
+
+Review all recent commits related to:
+
+- full cleanup when pressing "Baigti maršrutą"
+- automatic cleanup after ARRIVED
+- AI speech resume after navigation maneuver interruption
+- Kentas system prompt and personality
+- dynamic navigation phrase pools
+- phrase randomization and recent-phrase history
+- road commentary
+- idle commentary timing
+- destination voice input
+- StartScreen / NavigationScreen voice lifecycle
+
+==================================================
+1. BUILD AND STATIC CHECKS
+==================================================
+
+Run:
+
+./gradlew :app:compileDebugKotlin
+
+If available, also run:
+
+./gradlew :app:assembleDebug
+
+Fix every compile error and warning that indicates a real bug.
+
+Check for:
+
+- unresolved references
+- duplicate methods or constants
+- incorrect callback signatures
+- nullable callback crashes
+- unreachable branches
+- coroutine/lifecycle misuse
+- handlers or delayed callbacks surviving screen exit
+- unused state created by recent changes
+
+==================================================
+2. NAVIGATION END CLEANUP
+==================================================
+
+Audit both exit paths:
+
+A. User presses "Baigti maršrutą"
+B. Navigation reaches ARRIVED
+
+Both paths must reuse the same cleanup pipeline and result in:
+
+- navigation stopped
+- NavigationVoiceController stopped
+- active TTS stopped
+- active STT stopped
+- Kentas conversation stopped
+- delayed idle/commentary callbacks cancelled
+- interrupted speech state cleared
+- navigation state cleared
+- voice state reset
+- StartScreen shown
+- no Kentas speech after exit
+- no background listening after exit
+
+Verify that ARRIVED waits until the arrival phrase finishes before cleanup.
+
+Verify cleanup is idempotent and does not run twice.
+
+==================================================
+3. AI SPEECH RESUME AFTER MANEUVER
+==================================================
+
+Audit this sequence:
+
+1. Kentas is speaking a multi-sentence AI response.
+2. A navigation maneuver interrupts.
+3. Navigation instruction plays.
+4. Kentas resumes the unspoken remainder automatically.
+
+Check that:
+
+- the user does not need to repeat the question
+- already spoken text is not repeated
+- the full answer does not restart from the beginning
+- interrupted sentence state is not erased by stop()
+- multiple fast maneuvers do not duplicate queued AI speech
+- exit navigation cancels pending resume
+- mute commands cancel pending resume
+- resume does not happen after ARRIVED or manual navigation exit
+
+==================================================
+4. DYNAMIC NAVIGATION PHRASES
+==================================================
+
+Audit all phrase pools:
+
+- right
+- left
+- straight
+- roundabout
+- keep left
+- keep right
+- U-turn
+- rerouting
+- arrival
+- any sharp-turn variants
+
+Check that:
+
+- every pool is non-empty
+- every mapped maneuver has a safe fallback
+- no array/index crash is possible
+- the same phrase is not repeated twice in a row
+- recent phrase history is bounded and cannot grow forever
+- random selection does not block or mutate shared state unsafely
+- phrases are grammatically natural Lithuanian
+- directions are never reversed
+- distance-specific instructions still preserve the actual maneuver
+- roundabout exit numbers remain correct
+- no joke can replace critical maneuver information
+
+Remove phrases that are ambiguous, unsafe, or do not clearly tell the driver what to do.
+
+==================================================
+5. KENTAS PERSONALITY
+==================================================
+
+Audit SYSTEM_PROMPT and any related prompts.
+
+Kentas must be:
+
+- cheeky
+- confident
+- friendly
+- witty
+- short and natural
+- like a Lithuanian friend in the passenger seat
+
+But he must not:
+
+- insult the driver
+- bully the driver
+- use hateful or degrading language
+- encourage unsafe driving
+- distract during complex maneuvers
+- claim live road facts that are unavailable
+- speak like customer support
+- repeatedly use the same catchphrase
+
+Ensure personality instructions do not override:
+
+- navigation priority
+- mute commands
+- one-response mode
+- stop-navigation cleanup
+- safety rules
+- truthfulness about available traffic data
+
+==================================================
+6. ROAD COMMENTARY
+==================================================
+
+Audit commentary scheduling.
+
+Requirements:
+
+- only during active navigation
+- never after navigation exit
+- never on StartScreen
+- maximum approximately once every 2–5 minutes
+- no commentary within 500 meters of a maneuver or destination
+- no commentary while navigation TTS is active
+- no commentary while Kentas is answering the user
+- no commentary while STT is listening
+- no commentary while muted
+- no immediate commentary after another spoken message
+- delayed timers cancelled on stop, ARRIVED, reroute if needed, and lifecycle exit
+
+Verify that available SDK information is not exaggerated.
+
+Do not invent:
+
+- accidents
+- road closures
+- police
+- exact congestion reasons
+- alternate routes not exposed by the SDK
+
+==================================================
+7. VOICE MODE SEPARATION
+==================================================
+
+Confirm StartScreen and NavigationScreen remain separate:
+
+StartScreen:
+- microphone is destination-only
+- transcript goes to destination search
+- no Kentas conversation
+- no idle road comments
+- 1.8 second destination final grace still works
+- 10 second timeout still works
+
+NavigationScreen:
+- Kentas conversation works
+- navigation instructions have priority
+- stop/mute/resume behavior works
+
+Ensure Personality 3.0 changes did not modify or break destination voice input.
+
+==================================================
+8. LIFECYCLE AND RACE CONDITIONS
+==================================================
+
+Specifically inspect for race conditions involving:
+
+- TTS onDone arriving after cleanup
+- ARRIVED callback firing twice
+- screen transition while a handler callback is pending
+- stale STT transcript after destination session ended
+- navigation instruction arriving while AI resume is scheduled
+- idle commentary timer firing after navigation ended
+- manual stop and ARRIVED happening close together
+- controller stop() clearing state required for resume
+- callbacks referencing destroyed Activity or obsolete ViewModel state
+
+Use session/generation IDs or existing guards where necessary.
+Do not introduce a new architecture.
+
+==================================================
+9. LOGGING
+==================================================
+
+Make sure useful logs exist for testing:
+
+- NAVIGATION_FULL_CLEANUP_STARTED
+- NAVIGATION_FULL_CLEANUP_COMPLETED
+- ARRIVAL_SPEECH_STARTED
+- ARRIVAL_SPEECH_COMPLETED
+- ARRIVAL_CLEANUP_TRIGGERED
+- AI_INTERRUPTED_BY_NAV
+- AI_RESUME_AFTER_NAV
+- AI_RESUME_CANCELLED
+- NAV_PHRASE_SELECTED
+- ROAD_COMMENTARY_SCHEDULED
+- ROAD_COMMENTARY_SKIPPED
+- ROAD_COMMENTARY_CANCELLED
+
+Do not log secrets, API keys, full private conversation history, or sensitive user data.
+
+==================================================
+10. FINAL REPORT
+==================================================
+
+After the audit, provide:
+
+1. Build result
+2. Files inspected
+3. Bugs found
+4. Bugs fixed
+5. Any remaining risks
+6. Exact manual test checklist for a real test drive
+7. Final commit hash or hashes
+8. Confirmation whether the branch is safe to push
+
+Only create commits for actual fixes found during the audit.
+
+Suggested commit message if fixes are needed:
+
+Audit and stabilize Kentas Personality 3.0
+
+Do not push yet.
+Stop after the audit and report the result.
