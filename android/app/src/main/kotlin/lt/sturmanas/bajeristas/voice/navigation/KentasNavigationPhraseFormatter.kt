@@ -129,17 +129,17 @@ class KentasNavigationPhraseFormatter {
     private fun formatImmediate(maneuver: ManeuverType, variant: Int, exitNumber: Int?): String {
         return when (maneuver) {
             ManeuverType.STRAIGHT -> if (variant == 0)
-                "Važiuojam tiesiai."
+                "Tiesiai varom."
             else
                 "Laikykis tiesiai."
 
             ManeuverType.TURN_RIGHT -> if (variant == 0)
-                "Dabar sukam dešinėn."
+                "Va dabar dešinėn."
             else
                 "Dešinėn."
 
             ManeuverType.TURN_LEFT -> if (variant == 0)
-                "Dabar sukam kairėn."
+                "Va dabar kairėn."
             else
                 "Kairėn."
 
@@ -153,13 +153,13 @@ class KentasNavigationPhraseFormatter {
             else
                 "Švelniai kairėn."
 
-            ManeuverType.SHARP_RIGHT  -> "Aštrus posūkis dešinėn."
-            ManeuverType.SHARP_LEFT   -> "Aštrus posūkis kairėn."
+            ManeuverType.SHARP_RIGHT  -> "Staigiai dešinėn."
+            ManeuverType.SHARP_LEFT   -> "Staigiai kairėn."
 
             ManeuverType.UTURN -> if (variant == 0)
                 "Kai bus galima, apsisuk."
             else
-                "Dabar apsisuk."
+                "Apsisuk."
 
             ManeuverType.ROUNDABOUT -> {
                 val exit = exitOrdinal(exitNumber)

@@ -122,7 +122,7 @@ class TrafficEventMonitor(
             if (!wasRerouting) {
                 wasRerouting = true
                 Log.i(TAG, "REROUTING_STARTED")
-                speak("Maršrutas perskaičiuojamas.")
+                speak("Nieko tokio, randam kitą kelią.")
                 Log.i(TAG, "REROUTING_COMMENT_SPOKEN")
             }
             return
