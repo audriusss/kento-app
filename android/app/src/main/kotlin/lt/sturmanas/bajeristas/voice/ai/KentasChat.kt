@@ -61,11 +61,11 @@ object KentasChat {
     private const val MAX_CHAR_LIMIT = 2000
 
     /**
-     * Characters reserved inside [MAX_CHAR_LIMIT] for the condensed-memory summary
-     * message that replaces dropped turns.  Keeps the summary from crowding out
-     * turns that still fit.
+     * Initial character cap for the condensed-memory summary message that replaces
+     * dropped turns.  Shrunk in 50-char steps if the assembled prompt still exceeds
+     * [MAX_CHAR_LIMIT] after all history turns have been removed.
      */
-    private const val SUMMARY_BUDGET = 150
+    private const val SUMMARY_INITIAL_MAX = 150
 
     /** Set once at app start from BuildConfig.BACKEND_URL. */
     private var backendUrl: String = ""
@@ -238,24 +238,22 @@ Jei skamba kaip robotas ar klientų aptarnavimas — perrašyk.
 
     /**
      * Builds the messages array sent to the backend for a single request,
-     * ensuring the total content length never exceeds [MAX_CHAR_LIMIT].
+     * guaranteeing the total content length never exceeds [MAX_CHAR_LIMIT].
      *
      * Layout (in order):
      * 1. System prompt (history[0])                         — always present
      * 2. [optional] Condensed-memory summary of dropped turns
-     * 3. Kept user/assistant turns (newest first, oldest trimmed)
+     * 3. Kept user/assistant turns (oldest kept → newest kept)
      * 4. [optional] Transient nav-context system message    — NOT in history
      * 5. Current user message (history[last])               — always present
      *
-     * Trimming strategy:
-     * - Mandatory parts (system prompt + nav context + current user) are never removed.
-     * - History turns are walked newest→oldest; each turn is kept while the
-     *   running char count plus [SUMMARY_BUDGET] stays within [MAX_CHAR_LIMIT].
-     * - Any turns that could not fit are replaced by a compact summary message
-     *   (capped at [SUMMARY_BUDGET] chars) so Kentas retains a trace of the
-     *   earlier conversation without blowing the limit.
+     * Trimming loop — iterates until the *measured* assembled size fits:
+     *   Phase 1 — drop oldest history turns one at a time, rebuild, remeasure.
+     *   Phase 2 — shrink summary in 50-char steps, rebuild, remeasure.
+     *   Phase 3 — remove summary entirely, rebuild, remeasure.
+     *   Assert   — hard-fail before sending if mandatory parts alone exceed limit.
      *
-     * Logs: PROMPT_SIZE, PROMPT_TRIMMED (when turns are dropped), PROMPT_FINAL_SIZE.
+     * Logs: PROMPT_SIZE (raw), PROMPT_TRIMMED (turns removed), PROMPT_FINAL_SIZE.
      */
     private fun buildMessagesForRequest(navContext: String?): JSONArray {
         val systemMsg   = history[0]
@@ -266,75 +264,88 @@ Jei skamba kaip robotas ar klientų aptarnavimas — perrašyk.
         }
 
         // history[1..size-2] — complete user/assistant pairs from previous turns.
-        val middleTurns: List<JSONObject> =
-            if (history.size > 2) history.subList(1, history.size - 1).toList() else emptyList()
-
-        // ── Measure raw total before any trimming ──────────────────────────
-        val rawTotal = systemMsg.getString("content").length +
-                       currentUser.getString("content").length +
-                       (navContent?.length ?: 0) +
-                       middleTurns.sumOf { it.getString("content").length }
-        Log.i(TAG, "PROMPT_SIZE chars=$rawTotal")
-
-        // ── Determine per-request history budget ───────────────────────────
-        val mandatoryChars = systemMsg.getString("content").length +
-                             currentUser.getString("content").length +
-                             (navContent?.length ?: 0)
-        // Reserve SUMMARY_BUDGET chars so the condensed-memory message always fits.
-        val historyBudget  = MAX_CHAR_LIMIT - mandatoryChars - SUMMARY_BUDGET
-
-        // ── Greedily keep turns from newest to oldest ──────────────────────
-        val keptTurns    = mutableListOf<JSONObject>()
+        val keptTurns    = if (history.size > 2) history.subList(1, history.size - 1).toMutableList() else mutableListOf()
         val droppedTurns = mutableListOf<JSONObject>()
 
-        if (historyBudget <= 0) {
-            droppedTurns.addAll(middleTurns)
-        } else {
-            var remaining = historyBudget
-            for (turn in middleTurns.asReversed()) {
-                val len = turn.getString("content").length
-                if (remaining >= len) {
-                    keptTurns.add(0, turn)   // prepend to maintain chronological order
-                    remaining -= len
-                } else {
-                    droppedTurns.add(0, turn)
-                }
-            }
+        // ── Measure raw total before any trimming ──────────────────────────
+        val rawTotal = measureChars(assembleMessages(systemMsg, navMsg, keptTurns, droppedTurns, SUMMARY_INITIAL_MAX, currentUser))
+        Log.i(TAG, "PROMPT_SIZE chars=$rawTotal")
+
+        var summaryMaxChars = SUMMARY_INITIAL_MAX
+        var messages        = assembleMessages(systemMsg, navMsg, keptTurns, droppedTurns, summaryMaxChars, currentUser)
+        var finalChars      = measureChars(messages)
+        var removedTurns    = 0
+
+        // ── Phase 1: drop oldest history turns until assembled size fits ───
+        while (finalChars > MAX_CHAR_LIMIT && keptTurns.isNotEmpty()) {
+            droppedTurns.add(0, keptTurns.removeAt(0))
+            removedTurns++
+            messages   = assembleMessages(systemMsg, navMsg, keptTurns, droppedTurns, summaryMaxChars, currentUser)
+            finalChars = measureChars(messages)
         }
 
-        val removedTurns = droppedTurns.size
         if (removedTurns > 0) {
             Log.i(TAG, "PROMPT_TRIMMED removedTurns=$removedTurns")
         }
 
-        // ── Build condensed summary of dropped turns ───────────────────────
-        val summaryMsg: JSONObject? =
-            if (droppedTurns.isNotEmpty()) buildSummaryMessage(droppedTurns, SUMMARY_BUDGET)
-            else null
-
-        // ── Assemble final messages array ──────────────────────────────────
-        val messages = JSONArray()
-        messages.put(systemMsg)
-        summaryMsg?.let  { messages.put(it) }
-        keptTurns.forEach { messages.put(it) }
-        navMsg?.let      { messages.put(it) }
-        messages.put(currentUser)
-
-        val finalChars = (0 until messages.length()).sumOf {
-            messages.getJSONObject(it).getString("content").length
+        // ── Phase 2: shrink summary in 50-char steps ───────────────────────
+        while (finalChars > MAX_CHAR_LIMIT && summaryMaxChars > 0) {
+            summaryMaxChars = (summaryMaxChars - 50).coerceAtLeast(0)
+            messages   = assembleMessages(systemMsg, navMsg, keptTurns, droppedTurns, summaryMaxChars, currentUser)
+            finalChars = measureChars(messages)
         }
+
+        // ── Phase 3: remove summary entirely ──────────────────────────────
+        if (finalChars > MAX_CHAR_LIMIT) {
+            messages   = assembleMessages(systemMsg, navMsg, keptTurns, emptyList(), 0, currentUser)
+            finalChars = measureChars(messages)
+        }
+
         Log.i(TAG, "PROMPT_FINAL_SIZE chars=$finalChars")
+
+        // ── Assertion: never send an oversized request ─────────────────────
+        if (finalChars > MAX_CHAR_LIMIT) {
+            Log.e(TAG, "PROMPT_EXCEEDED_LIMIT chars=$finalChars limit=$MAX_CHAR_LIMIT mandatory_only=true")
+            // Mandatory parts alone exceed the limit — send as-is; the provider
+            // will reject and the caller handles the HTTP 400 gracefully.
+        }
 
         return messages
     }
 
     /**
+     * Assembles the messages JSONArray from its individual pieces.
+     * Called repeatedly by [buildMessagesForRequest] during the trim loop.
+     */
+    private fun assembleMessages(
+        systemMsg:      JSONObject,
+        navMsg:         JSONObject?,
+        keptTurns:      List<JSONObject>,
+        droppedTurns:   List<JSONObject>,
+        summaryMaxChars: Int,
+        currentUser:    JSONObject,
+    ): JSONArray {
+        val summaryMsg = if (droppedTurns.isNotEmpty() && summaryMaxChars > 0)
+            buildSummaryMessage(droppedTurns, summaryMaxChars) else null
+
+        return JSONArray().apply {
+            put(systemMsg)
+            summaryMsg?.let  { put(it) }
+            keptTurns.forEach { put(it) }
+            navMsg?.let      { put(it) }
+            put(currentUser)
+        }
+    }
+
+    /** Sums the [content] string lengths of every message in [messages]. */
+    private fun measureChars(messages: JSONArray): Int =
+        (0 until messages.length()).sumOf { messages.getJSONObject(it).getString("content").length }
+
+    /**
      * Builds a compact system message summarising [dropped] turns so Kentas
-     * retains a trace of earlier conversation topics.
-     *
-     * Each turn contributes a short snippet ("V:\"…\" " or "K:\"…\" ") until
-     * the accumulated length would exceed [maxChars].  Returns null if the
-     * result would be too short to be meaningful.
+     * retains a trace of earlier conversation topics.  Each turn contributes a
+     * short snippet until the accumulated length would exceed [maxChars].
+     * Returns null if the result would be too short to be meaningful.
      */
     private fun buildSummaryMessage(dropped: List<JSONObject>, maxChars: Int): JSONObject? {
         val sb = StringBuilder("[Ankstesni pokalbiai: ")
@@ -346,9 +357,7 @@ Jei skamba kaip robotas ar klientų aptarnavimas — perrašyk.
             sb.append(token)
         }
         sb.append("]")
-        return if (sb.length > 30) {
-            JSONObject().put("role", "system").put("content", sb.toString())
-        } else null
+        return if (sb.length > 30) JSONObject().put("role", "system").put("content", sb.toString()) else null
     }
 
     /**
