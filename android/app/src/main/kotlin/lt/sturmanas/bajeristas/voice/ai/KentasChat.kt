@@ -275,4 +275,33 @@ Jei skamba kaip robotas ar klientų aptarnavimas — perrašyk.
         )
         return openers.random()
     }
+
+    /**
+     * Returns a short navigation-context commentary phrase based on how far
+     * away the next maneuver is.  Used by the idle-inactivity timer in
+     * [AIConversationController] to give Kentas natural co-driver comments
+     * when the road is straight and nothing else is happening.
+     *
+     * Only real SDK data (distance) is referenced — no invented accidents or jams.
+     *
+     * @param distMeters Distance to the next maneuver in metres.
+     */
+    fun getNavComment(distMeters: Int): String = when {
+        distMeters >= 10_000 -> listOf(
+            "Dar nemažai važiuosim.",
+            "Kelias laisvas, kol kas ramu.",
+            "Dar ilgas kelias priekyje.",
+        ).random()
+        distMeters >= 3_000 -> listOf(
+            "Kol kas ramiai.",
+            "Dar ilgokai tiesiai.",
+            "Kelias laisvas.",
+            "Važiuojam normaliai.",
+        ).random()
+        else -> listOf(
+            "Kol kas ramiai.",
+            "Važiuojam normaliai.",
+            "Dar truputį tiesiai.",
+        ).random()
+    }
 }

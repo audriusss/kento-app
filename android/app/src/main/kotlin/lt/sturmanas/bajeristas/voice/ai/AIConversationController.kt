@@ -1188,11 +1188,25 @@ class AIConversationController(
         cancelInactivityTimer()
         inactivityRunnable = Runnable {
             val dist = getNextManeuverDist()
-            if (dist > 500 && phase == Phase.IDLE) {
-                hasOpenerFired = true
-                speak(KentasChat.getOpener())
-            } else {
-                handler.postDelayed(inactivityRunnable!!, 30000)
+            when {
+                phase != Phase.IDLE -> {
+                    // Not idle yet — retry later without speaking.
+                    handler.postDelayed(inactivityRunnable!!, 30000)
+                }
+                dist != Int.MAX_VALUE && dist > 500 -> {
+                    // Navigating with a clear run ahead — road commentary.
+                    hasOpenerFired = true
+                    speak(KentasChat.getNavComment(dist))
+                }
+                dist == Int.MAX_VALUE -> {
+                    // Not navigating — conversation opener.
+                    hasOpenerFired = true
+                    speak(KentasChat.getOpener())
+                }
+                else -> {
+                    // Close to a maneuver (dist ≤ 500 m) — stay quiet, retry later.
+                    handler.postDelayed(inactivityRunnable!!, 30000)
+                }
             }
         }
         handler.postDelayed(inactivityRunnable!!, 30000)
