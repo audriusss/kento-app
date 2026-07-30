@@ -1107,6 +1107,26 @@ class AIConversationController(
         onTtsTerminal("CANCELLED_BY_USER")
     }
 
+    /**
+     * Fully stops the [MicrophonePipeline] at end-of-navigation.
+     *
+     * Distinct from [stop], which only cuts TTS and cancels timers and is also
+     * called during mid-route nav-announcement pauses.  This method is called
+     * **only** from the full-navigation-cleanup path (manual stop and ARRIVED),
+     * ensuring no VAD or STT activity continues on StartScreen.
+     *
+     * [pipeline.stop] increments [generationId] internally, so any in-flight
+     * STT uploads whose captured generation is now stale will be discarded by
+     * the existing guard in [transcribeAndDeliver].
+     *
+     * The pipeline can be restarted by [startListening] when the user presses
+     * the StartScreen microphone button.
+     */
+    fun stopNavigationMicPipeline() {
+        Log.i(TAG, "MIC_PIPELINE_NAV_SESSION_STOPPED")
+        pipeline.stop()
+    }
+
     private fun stopAiSpeech() {
         tts?.stop()
         watchdogHandler.removeCallbacks(watchdogRunnable)

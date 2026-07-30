@@ -149,6 +149,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         navControllerRef?.stopNavigation()
         stopNavigationVoice()
         stopKentasSpeech()
+        // Stop the MicrophonePipeline so no VAD or STT activity continues on StartScreen.
+        // Must come after stopKentasSpeech() (which cuts TTS) so the pipeline is not
+        // stopped while TTS is still in mid-utterance.
+        aiController?.stopNavigationMicPipeline()
         _exitToStartScreen.value = true
         Log.i(TAG, "NAVIGATION_FULL_CLEANUP_COMPLETED")
     }
