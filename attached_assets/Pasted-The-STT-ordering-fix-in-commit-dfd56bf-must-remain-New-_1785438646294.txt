@@ -1,0 +1,67 @@
+The STT ordering fix in commit dfd56bf must remain.
+
+New regression:
+Kentas now keeps talking continuously, offers things, and starts repeated AI
+responses without the user intentionally starting a new turn.
+
+Likely cause:
+SttDeliveryQueue now correctly delivers every queued utterance in order, but
+multiple transcripts from the same listening period can reach
+AIConversationController and each one starts another AI request.
+
+Implement a strict one-user-turn / one-AI-response gate.
+
+Required behaviour:
+
+1. Only accept a transcript for AI when conversation state is IDLE.
+2. As soon as one transcript is accepted and AI_REQUEST_STARTED:
+   - close the current user turn;
+   - reject all additional transcripts captured before that request;
+   - do not queue them for another AI response.
+3. Any transcript arriving while state is THINKING or SPEAKING must be dropped
+   and logged:
+   TRANSCRIPT_DROPPED reason=turn_already_active
+4. After AI TTS completes, return to IDLE and wait for genuinely new speech.
+5. Do not automatically start another AI request from:
+   - previously buffered transcripts;
+   - silence timers;
+   - assistant response completion;
+   - navigation state updates;
+   - follow-up suggestion logic.
+6. Preserve STT ordering, generation checks and SttDeliveryQueue.
+7. Do not change VAD thresholds, microphone gain, STT model, navigation or TTS.
+8. Do not refactor the architecture.
+
+Wake-word / conversation rules:
+
+9. When no active conversation window exists, only accept speech containing
+   “Kentai”, “Kentas” or a supported command.
+10. After Kentas answers, allow one short follow-up window, but every accepted
+    user utterance still produces only one response.
+11. If the user says “Kentai užsičiaupk”, persist silent mode and do not produce
+    conversational AI speech until “Kentai grįžk” or “Kentai kalbėk”.
+12. Navigation instructions remain allowed during silent mode.
+
+Response-style rule:
+
+13. Update the system prompt minimally:
+    - answer the user’s statement;
+    - do not continually offer help, ideas or additional topics;
+    - do not end every response with a question;
+    - never initiate another message without new accepted user speech.
+
+Add focused logs:
+USER_TURN_OPENED utteranceId=X
+USER_TURN_CLOSED utteranceId=X
+TRANSCRIPT_DROPPED reason=turn_already_active utteranceId=X state=...
+AI_IDLE_WAITING_FOR_NEW_SPEECH
+
+Add tests:
+- two ordered transcripts arrive before the first AI request starts:
+  only the first starts AI;
+- transcript arrives while THINKING: dropped;
+- transcript arrives while SPEAKING: dropped;
+- after TTS completion, one genuinely new transcript is accepted;
+- assistant completion alone never starts another AI request.
+
+Separate commit.
