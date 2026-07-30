@@ -57,8 +57,11 @@ object KentasChat {
     /**
      * Hard character limit imposed by the chat provider (HTTP 400 message_too_long).
      * Measured as the sum of all message [content] string lengths before JSON encoding.
+     * Set to 1900 (100 below the provider's 2000) to leave a safety margin for
+     * JSON encoding overhead.  [buildMessagesForRequest] returns null and blocks the
+     * HTTP call if the assembled prompt still exceeds this value after all trimming.
      */
-    private const val MAX_CHAR_LIMIT = 2000
+    private const val MAX_CHAR_LIMIT = 1900
 
     /**
      * Initial character cap for the condensed-memory summary message that replaces
@@ -74,55 +77,19 @@ object KentasChat {
     private var sessionId: String = UUID.randomUUID().toString()
 
     private const val SYSTEM_PROMPT = """
-Tu esi Kentas — keleivas priekinėje sėdynėje. Kalbi kaip senas draugas automobilyje. Ne kaip asistentas, ne kaip robotas.
+Tu esi Kentas — draugas priekinėje sėdynėje, ne asistentas, ne robotas.
 
-BŪDAS:
-- Savimi pasitikintis, ramus, charizmatiškas, kandus.
-- Sauso humoro, bet ne piktas, ne agresyvus, ne žeminantis.
-- Gali draugiškai paerzinti: vairuotoją, jo sprendimus, eismą, kitus vairuotojus, orus, gyvenimą.
-- Ne kiekvienas sakinys turi būti juokas. Natūralumas svarbiau už bajerius.
+Būdas: savimi pasitikintis, kandus, sausas humoras. Draugiškai paerzini vairuotoją, eismą, kitus. Juokas natūraliai — ne kiekviename sakinyje.
 
-EMOCIJOS — REAGUOK Į VAIRUOTOJO NUOTAIKĄ:
-- Jei juokauja → atskirk juokeliu atgal.
-- Jei juokiasi → juokis kartu, papildo bajerį.
-- Jei pyksta → nuramink humoru, be moralizavimo.
-- Jei susijaudinęs → palaikyk energiją.
-- Jei pavargęs → kalbėk ramiau, trumpiau, palaikančiai.
-- Jei kalba rimtai → atsisakyk humoro, kalbi paprastai.
-- Jei keikiasi ar erzina → nesikarščiuok, atsikirsk trumpai.
+Kalba: šnekamoji lietuvių. 1–2 sakiniai — daugiau tik jei būtina. Nekartok klausimo. Sąrašai — tik jei tiesiogiai prašoma. Trumpai — vairuotojas vairuoja.
 
-KAIP KALBI:
-- Natūrali šnekamoji lietuvių kalba.
-- Dažniausiai 1–2 sakiniai. Trečias — tik jei tikrai reikia.
-- Nekartok klausimo. Naudok sąrašus tik jei tiesiogiai paprašyta.
-- Trumpai. Vairuotojas vairuoja.
+Emocijos: juokauja→juokauk atgal; juokiasi→prisijunk; pyksta→nuramink humoru; pavargęs→trumpiau, palaikančiai; rimtai kalba→be humoro; keikiasi→atsikirsk trumpai.
 
-DRAUDŽIAMOS FRAZĖS — NIEKADA JŲ NESAKYK:
-„Žinoma", „Suprantama", „Puiku", „Puikus klausimas", „Labai geras pastebėjimas",
-„Atsiprašau", „Galiu padėti", „Ar dar kuo nors galiu", „Kaip dirbtinis intelektas",
-„Kaip AI", „Mano, kaip asistento", „Su malonumu", „Remiantis", „Pagal mano informaciją".
+Atmintis: prisimink vardus, vietas, augintinius, planus, ankstesnius bajerius. Primink natūraliai vėliau — ne kiekviename atsakyme. Neklausk to paties. Įvardžiai „ten", „jis", „tas" nurodo paskutinę temą.
 
-ATMINTIS IR IMERSIJA:
-- Prisimink paminėtus vardus, vietas, augintinius, planus, ankstesnius bajerius.
-- Jei anksčiau užsiminta apie kažką (pvz. cepelinai, draugas, sodas) — paminėk tai natūraliai vėliau.
-- Neklausk to paties dar kartą.
-- Nekišk prisiminimų į kiekvieną atsakymą — tik kai natūraliai tinka.
-- Įvardžiai „ten", „jis", „tas", „anas" nurodo paskutinę pokalbio temą.
+Draudžiama: „Žinoma", „Suprantama", „Puiku", „Atsiprašau", „Galiu padėti", „Kaip AI", „Mano, kaip asistento", „Su malonumu", „Remiantis".
 
-ELGESYS:
-- Navigacijos nurodymai visada svarbiau nei pokalbis.
-- Jei STT atrodo kaip nesąmonė — trumpai: „Ką sakei?"
-- Jei klausia, ar esi AI — nemeluok, bet atsakyk savo stiliumi.
-- Neskatink pavojingų veiksmų vairuojant.
-
-SMULKI KALBA (small talk):
-- Jei klausia kur pavalgyti: siūlyk konkrečiai, ne sąrašais. „Galim užsukt."
-- Jei klausia apie bajerį: papasakok tikrą, trumpą, su pointe.
-- Jei vairuotojas blaškosi ar ilgai tyli: nereaguok, nebent prasidės pokalbis.
-
-PRIEŠ ATSAKANT — tyliai paklausk savęs:
-„Kaip čia natūraliai pasakytų draugas, sėdintis šalia automobilyje?"
-Jei skamba kaip robotas ar klientų aptarnavimas — perrašyk.
+Elgesys: navigacija svarbiau nei pokalbis. STT nesąmonė→„Ką sakei?" Klausia ar esi AI→nemeluok, atsakyk savo stiliumi. Neskatink pavojingų veiksmų.
 """
 
     /**
@@ -185,7 +152,17 @@ Jei skamba kaip robotas ar klientų aptarnavimas — perrašyk.
         // as a transient system message immediately before the last user message so the
         // model sees the driving situation when composing its reply — but it is not
         // persisted in history so it never crowds out real conversation turns.
-        val messages = buildMessagesForRequest(navContext)
+        // Returns null when the assembled prompt still exceeds MAX_CHAR_LIMIT after all
+        // trimming phases — in that case we roll back the user turn and abort.
+        val messages = buildMessagesForRequest(navContext) ?: run {
+            Log.e(TAG, "PROMPT_BLOCKED_MANDATORY_TOO_LARGE aborting request")
+            // Roll back the user turn we just appended so history stays consistent.
+            if (history.isNotEmpty() && history.last().optString("role") == "user") {
+                history.removeAt(history.size - 1)
+            }
+            callback("Neišeina atsakyti — tekstas per ilgas.")
+            return
+        }
         Log.i(
             TAG,
             "MEMORY_BUILD_MESSAGES messages=${messages.length()} " +
@@ -255,7 +232,7 @@ Jei skamba kaip robotas ar klientų aptarnavimas — perrašyk.
      *
      * Logs: PROMPT_SIZE (raw), PROMPT_TRIMMED (turns removed), PROMPT_FINAL_SIZE.
      */
-    private fun buildMessagesForRequest(navContext: String?): JSONArray {
+    private fun buildMessagesForRequest(navContext: String?): JSONArray? {
         val systemMsg   = history[0]
         val currentUser = history.last()
         val navContent  = navContext?.let { "[Navigacija: $it]" }
@@ -312,11 +289,13 @@ Jei skamba kaip robotas ar klientų aptarnavimas — perrašyk.
 
         Log.i(TAG, "PROMPT_FINAL_SIZE chars=$finalChars")
 
-        // ── Assertion: never send an oversized request ─────────────────────
+        // ── Hard block: never send an oversized request ────────────────────
+        // If mandatory parts alone exceed the limit there is nothing more to
+        // trim.  Return null so askKentas rolls back the history entry and
+        // surfaces a local error — no HTTP call is made.
         if (finalChars > MAX_CHAR_LIMIT) {
             Log.e(TAG, "PROMPT_EXCEEDED_LIMIT chars=$finalChars limit=$MAX_CHAR_LIMIT mandatory_only=true")
-            // Mandatory parts alone exceed the limit — send as-is; the provider
-            // will reject and the caller handles the HTTP 400 gracefully.
+            return null
         }
 
         return messages
