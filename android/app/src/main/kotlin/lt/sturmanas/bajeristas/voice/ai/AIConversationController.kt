@@ -15,6 +15,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import lt.sturmanas.bajeristas.navigation.LocationProvider
+import lt.sturmanas.bajeristas.navigation.ManeuverType
+import lt.sturmanas.bajeristas.navigation.NavigationState
 import lt.sturmanas.bajeristas.navigation.PlacesAutocompleteClient
 import lt.sturmanas.bajeristas.voice.pipeline.ContinuousMicrophonePipeline
 import lt.sturmanas.bajeristas.voice.pipeline.MicrophonePipeline
@@ -139,6 +141,13 @@ class AIConversationController(
      * Set by [MainViewModel] once the engine state is observable.
      */
     var isNavigationActive: (() -> Boolean)? = null
+
+    /**
+     * Supplies the full [NavigationState] snapshot for building a compact nav-context string.
+     * Set by [MainViewModel.startObserving] once the navigation controller is ready.
+     * When null the prompt builder falls back to distance-only context.
+     */
+    var getNavState: (() -> NavigationState)? = null
 
     /**
      * Called when the user cancels the active route by voice.
@@ -884,16 +893,10 @@ class AIConversationController(
         clearUtteranceBuffer("sent_to_ai")
         transitionTo(Phase.THINKING)
 
-        // Build a short navigation context string so the model knows the driving
-        // situation when composing its reply.  This is passed as a transient system
-        // message by KentasChat and is NOT stored in conversation history.
-        val navContext: String? = getNextManeuverDist().let { dist ->
-            when {
-                dist == Int.MAX_VALUE || dist <= 0 -> null
-                dist >= 1_000 -> "${"%.1f".format(dist / 1_000.0)} km iki kito posūkio"
-                else          -> "$dist m iki kito posūkio"
-            }
-        }
+        // Build a compact navigation context string for the AI prompt.
+        // All fields come from NavigationState when available; falls back to
+        // distance-only if getNavState is not yet wired.  Not stored in history.
+        val navContext: String? = buildNavContext()
 
         KentasChat.askKentas(text, navContext) { reply ->
             val elapsedFromRequest = System.currentTimeMillis() - aiRequestStartedAtMs
@@ -910,6 +913,73 @@ class AIConversationController(
         handler.removeCallbacks(continuationRunnable)
         handler.postDelayed(continuationRunnable, PipelineConfig.CONTINUATION_TIMEOUT_MS)
         Log.d(TAG, "CONV_CONTINUATION_TIMER_RESET")
+    }
+
+    /**
+     * Builds the compact navigation context string injected as a transient system
+     * message before every AI request.
+     *
+     * Format (space-separated, only non-empty fields included):
+     *   nav:on [road] [perskaičiuoja] [→maneuver dist] [ETA:Nmin]
+     *
+     * Examples:
+     *   "nav:on Vilniaus g. →dešinė 350m ETA:12min"
+     *   "nav:on perskaičiuoja"
+     *   "nav:on Kauno pl. →žiedas 2 1.2km ETA:4min"
+     *
+     * Worst-case length is ≈ 80 chars, keeping the nav section well within the
+     * prompt budget.  Falls back to distance-only when [getNavState] is not wired.
+     */
+    private fun buildNavContext(): String? {
+        val state = getNavState?.invoke() ?: run {
+            // getNavState not yet wired — distance-only fallback.
+            val dist = getNextManeuverDist()
+            return when {
+                dist == Int.MAX_VALUE || dist <= 0 -> null
+                dist >= 1_000 -> "${"%.1f".format(dist / 1_000.0)}km iki posūkio"
+                else          -> "${dist}m iki posūkio"
+            }
+        }
+        if (!state.isNavigating) return null
+
+        val parts = mutableListOf("nav:on")
+
+        if (state.currentRoadName.isNotBlank()) {
+            parts += state.currentRoadName.take(20)
+        }
+
+        if (state.isRerouting) {
+            parts += "perskaičiuoja"
+        }
+
+        val dist = state.distanceToNextManeuverMeters
+        if (dist != Int.MAX_VALUE && dist > 0 &&
+            state.maneuverType != ManeuverType.NONE &&
+            state.maneuverType != ManeuverType.UNKNOWN
+        ) {
+            val distStr = if (dist >= 1_000) "${"%.1f".format(dist / 1_000.0)}km" else "${dist}m"
+            val manStr = when (state.maneuverType) {
+                ManeuverType.TURN_RIGHT    -> "dešinė"
+                ManeuverType.TURN_LEFT     -> "kairė"
+                ManeuverType.STRAIGHT      -> "tiesiai"
+                ManeuverType.SLIGHT_RIGHT  -> "šv.dešinė"
+                ManeuverType.SLIGHT_LEFT   -> "šv.kairė"
+                ManeuverType.SHARP_RIGHT   -> "st.dešinė"
+                ManeuverType.SHARP_LEFT    -> "st.kairė"
+                ManeuverType.UTURN         -> "apsisukimas"
+                ManeuverType.ROUNDABOUT    -> "žiedas" + (state.exitNumber?.let { " $it" } ?: "")
+                ManeuverType.MOTORWAY_EXIT -> "išvažiavimas"
+                ManeuverType.MERGE         -> "įsijungimas"
+                ManeuverType.FORK          -> "išsišakojimas"
+                else                       -> null
+            }
+            if (manStr != null) parts += "→$manStr $distStr"
+        }
+
+        val etaSec = state.remainingDurationSeconds
+        if (etaSec > 60) parts += "ETA:${etaSec / 60}min"
+
+        return parts.joinToString(" ")
     }
 
     private fun normalizeText(text: String): String =

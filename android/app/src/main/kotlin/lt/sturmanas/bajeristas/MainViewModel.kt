@@ -180,6 +180,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             navigationController.state.value.phase != NavigationPhase.IDLE
         }
 
+        // Wire full NavigationState for compact nav-context prompt building.
+        aiController?.getNavState = { navigationController.state.value }
+
         // Wire voice route cancellation: stops guidance and voice; the UI returns to
         // StartScreen automatically via the LaunchedEffect in MainActivity that resets
         // isNavigating when the engine phase returns to IDLE.

@@ -267,7 +267,16 @@ Jei skamba kaip robotas ar klientų aptarnavimas — perrašyk.
         val keptTurns    = if (history.size > 2) history.subList(1, history.size - 1).toMutableList() else mutableListOf()
         val droppedTurns = mutableListOf<JSONObject>()
 
-        // ── Measure raw total before any trimming ──────────────────────────
+        // ── Log mandatory section sizes before any trimming ───────────────
+        val sysChars  = systemMsg.getString("content").length
+        val navChars  = navContent?.length ?: 0
+        val userChars = currentUser.getString("content").length
+        Log.i(TAG, "PROMPT_PART system=$sysChars")
+        Log.i(TAG, "PROMPT_PART navigation=$navChars")
+        Log.i(TAG, "PROMPT_PART user=$userChars")
+        Log.i(TAG, "PROMPT_TOTAL mandatory=${sysChars + navChars + userChars}")
+
+        // ── Measure raw total (mandatory + all history) before trimming ────
         val rawTotal = measureChars(assembleMessages(systemMsg, navMsg, keptTurns, droppedTurns, SUMMARY_INITIAL_MAX, currentUser))
         Log.i(TAG, "PROMPT_SIZE chars=$rawTotal")
 
