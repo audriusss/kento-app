@@ -27,8 +27,11 @@ class ConversationCoordinator {
 
     fun onNavigationSpeechStarted(utteranceId: String) {
         Log.i("ConversationCoord", "NAV_VOICE_STARTED id=$utteranceId")
+        // onNavigationStarted() (called via onStopListeningRequest) already calls
+        // stopAiSpeech() and saves interruptedSentences for the resume path.
+        // Calling onPauseRequest (→ controller.stop()) here would clear
+        // interruptedSentences AFTER they are saved, destroying the resume.
         onStopListeningRequest?.invoke(utteranceId)
-        onPauseRequest?.invoke()
     }
 
     fun onNavigationSpeechFinished(utteranceId: String) {
