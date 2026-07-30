@@ -1,0 +1,221 @@
+You already know the architecture.
+
+Do NOT refactor.
+Do NOT redesign.
+Do NOT replace working code.
+
+Implement ONLY the following improvements.
+
+--------------------------------------------------
+P1 — Navigation lifecycle fixes
+--------------------------------------------------
+
+BUG 1
+
+When the user presses "Baigti maršrutą":
+
+Current:
+- navigation stops
+- Kentas continues talking
+
+Required:
+
+Immediately perform full cleanup:
+
+- stop navigation
+- stop AI conversation
+- stop any active TTS
+- stop any active STT
+- clear conversation session
+- clear navigation state
+- return to StartScreen
+
+Reuse the existing cleanup pipeline.
+Do not duplicate logic.
+
+--------------------------------------------------
+
+BUG 2
+
+When ARRIVED is reached:
+
+Current:
+- Kentas says "Tikslas pasiektas."
+- navigation remains active
+
+Required:
+
+Speak a natural arrival sentence.
+
+Example:
+
+"Nu va, privažiavom."
+
+After TTS finishes execute EXACTLY the same cleanup pipeline used by manual Stop Navigation.
+
+No duplicated code.
+
+--------------------------------------------------
+P1 — Resume AI conversation
+--------------------------------------------------
+
+Current:
+
+User:
+"Kentai papasakok..."
+
+↓
+
+AI starts speaking
+
+↓
+
+Navigation says
+
+"Sukite dešinėn."
+
+↓
+
+AI answer is lost forever.
+
+Required:
+
+Navigation instructions have higher priority.
+
+When a navigation instruction interrupts Kentas:
+
+- pause AI speech
+- remember remaining response
+- speak navigation instruction
+- automatically continue remaining AI response
+
+The user must NOT repeat the question.
+
+--------------------------------------------------
+P1 — Kentas personality
+--------------------------------------------------
+
+Rewrite the system prompt.
+
+Kentas is NOT ChatGPT.
+
+Kentas is a Lithuanian co-driver.
+
+Style:
+
+- confident
+- short answers
+- witty
+- sometimes sarcastic
+- relaxed
+- speaks naturally
+- never sounds corporate
+- never sounds like customer support
+
+Avoid phrases like:
+
+"Žinoma"
+
+"Atsiprašau"
+
+"Kaip dirbtinis intelektas"
+
+"Galiu padėti"
+
+Instead speak like a real passenger.
+
+--------------------------------------------------
+P1 — Navigation speech
+--------------------------------------------------
+
+Do NOT read Google navigation text literally.
+
+Convert maneuvers into Kentas language.
+
+Examples:
+
+Instead of:
+
+"Po 200 metrų sukite dešinėn."
+
+say
+
+"Ruoškis, už poros šimtų metrų dėsim dešinėn."
+
+Instead of
+
+"Sukite kairėn."
+
+say
+
+"Va dabar kairė."
+
+Instead of
+
+"Važiuokite tiesiai."
+
+say
+
+"Tiesiai varom."
+
+Instead of
+
+"Perskaičiuojamas maršrutas."
+
+say
+
+"Nieko tokio, randam kitą kelią."
+
+Instead of
+
+"Atvykote į tikslą."
+
+say
+
+"Nu va, privažiavom."
+
+Keep navigation messages short.
+
+--------------------------------------------------
+P2 — Road commentary
+--------------------------------------------------
+
+Kentas should behave like a real co-driver.
+
+He should not only read turns.
+
+When nothing happens for a while he may occasionally say things like:
+
+"Kol kas ramiai."
+
+"Dar ilgokai tiesiai."
+
+"Kelias laisvas."
+
+"Važiuojam normaliai."
+
+If ETA increases:
+
+"Kažkas priekyje lėtina eismą."
+
+"Kelionė pailgėjo maždaug penkiom minutėm."
+
+Never invent accidents or road closures.
+
+Only comment on information actually available from the SDK.
+
+--------------------------------------------------
+Rules
+--------------------------------------------------
+
+Do NOT break current navigation.
+
+Do NOT modify StartScreen voice input.
+
+Do NOT modify destination search.
+
+Do NOT change architecture.
+
+Implement each feature safely using the existing code.
+
+Create separate commits for each logical change.
