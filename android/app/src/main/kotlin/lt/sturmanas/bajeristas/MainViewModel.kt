@@ -172,19 +172,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Stops any in-flight Kentas TTS immediately and returns the AI conversation
-     * to a listening-ready state. Call this alongside [stopNavigationVoice] whenever
-     * navigation is manually stopped so Kentas does not continue speaking after the
-     * route is cancelled.
+     * Stops any in-flight Kentas TTS immediately and clears the conversation session.
+     *
+     * Called on both manual route stop and arrival cleanup so the next trip starts
+     * with a clean slate.  Calls [AIConversationController.stop] directly (no
+     * handler.post) so TTS is cut synchronously before any screen transition.
      *
      * Delegates to [AIConversationController.stop] which:
      *  1. Calls tts.stop() to cut playback mid-sentence.
      *  2. Cancels the TTS watchdog.
-     *  3. Schedules the post-TTS mic-unmute cooldown so the pipeline stays active.
+     *  3. Clears any interrupted-response state.
      */
     fun stopKentasSpeech() {
         Log.i(TAG, "MANUAL_NAV_STOP_SPEECH_STOPPED")
-        handler.post { aiController?.stop() }
+        aiController?.stop()
+        KentasChat.clearMemory()
     }
 
     /**
