@@ -165,6 +165,7 @@ private fun SturmanasApp(
     val engineError             by viewModel.engineError.collectAsStateWithLifecycle()
     val aiStatus                by viewModel.aiStatus.collectAsStateWithLifecycle()
     val isDestinationListening  by viewModel.isDestinationListening.collectAsStateWithLifecycle()
+    val exitToStartScreen       by viewModel.exitToStartScreen.collectAsStateWithLifecycle()
 
     // isNavigationScreenVisible is the sole gate for which screen is shown.
     // It is NOT the same as "is a route active" — the user may be on NavigationScreen
@@ -178,6 +179,15 @@ private fun SturmanasApp(
     //             Voice route cancel does NOT exit NavigationScreen.
     var isNavigationScreenVisible by remember { mutableStateOf(false) }
     var startScreenError by remember { mutableStateOf<String?>(null) }
+
+    // Arrival cleanup: after "Nu va, privažiavom." TTS finishes, the ViewModel fires
+    // exitToStartScreen so we return to StartScreen via the same path as the manual button.
+    LaunchedEffect(exitToStartScreen) {
+        if (exitToStartScreen) {
+            isNavigationScreenVisible = false
+            viewModel.consumeExitToStartScreen()
+        }
+    }
 
     LaunchedEffect(navState.phase) {
         when (navState.phase) {

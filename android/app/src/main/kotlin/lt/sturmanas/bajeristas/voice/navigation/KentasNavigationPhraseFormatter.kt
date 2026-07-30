@@ -179,7 +179,7 @@ class KentasNavigationPhraseFormatter {
     // ── ARRIVED ───────────────────────────────────────────────────────────
 
     private fun formatArrived(variant: Int): String = if (variant == 0)
-        "Atvažiavom. Tikslas pasiektas."
+        "Nu va, privažiavom."
     else
         "Štai ir vietoj. Gali atsegti nervus."
 

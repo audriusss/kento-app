@@ -4,6 +4,8 @@ import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
+import android.os.Handler
+import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
@@ -30,12 +32,24 @@ import java.util.Locale
  */
 class NavigationVoiceController(private val context: Context) : TextToSpeech.OnInitListener {
 
+    private val mainHandler = Handler(Looper.getMainLooper())
+
     interface NavigationSpeechListener {
         fun onNavigationSpeechStarted(utteranceId: String)
         fun onNavigationSpeechFinished(utteranceId: String)
     }
 
     var listener: NavigationSpeechListener? = null
+
+    /**
+     * Called on the main thread after the arrival TTS utterance finishes (onDone/onStop).
+     * Used by [MainViewModel] to trigger the full navigation cleanup pipeline so navigation
+     * state, nav voice, and AI speech are all stopped before returning to StartScreen.
+     */
+    var onArrivalSpeechCompleted: (() -> Unit)? = null
+
+    /** Utterance ID of the active arrival announcement; null at all other times. */
+    private var arrivalUtteranceId: String? = null
 
     companion object {
         private const val TAG = "KentasNavVoice"
@@ -234,7 +248,12 @@ class NavigationVoiceController(private val context: Context) : TextToSpeech.OnI
         )
         Log.i(TAG, "NAV_VOICE_ARRIVED phrase='$phrase'")
         stages.add(KentasNavigationPhraseFormatter.SpeechStage.ARRIVED)
-        speakText(phrase, KentasNavigationPhraseFormatter.SpeechStage.ARRIVED)
+
+        // Use a dedicated ID prefix so onDone can identify the arrival utterance
+        // and fire onArrivalSpeechCompleted after the phrase finishes.
+        val aId = "nav_arrived_${System.currentTimeMillis()}"
+        arrivalUtteranceId = aId
+        speakText(phrase, KentasNavigationPhraseFormatter.SpeechStage.ARRIVED, idOverride = aId)
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────
@@ -267,6 +286,7 @@ class NavigationVoiceController(private val context: Context) : TextToSpeech.OnI
     private fun speakText(
         text: String,
         stage: KentasNavigationPhraseFormatter.SpeechStage,
+        idOverride: String? = null,
     ) {
         val queueMode = if (stage == KentasNavigationPhraseFormatter.SpeechStage.IMMEDIATE)
             TextToSpeech.QUEUE_FLUSH
@@ -275,7 +295,7 @@ class NavigationVoiceController(private val context: Context) : TextToSpeech.OnI
 
         requestFocus()
 
-        val utteranceId = "nav_${System.currentTimeMillis()}_${(0..999).random()}"
+        val utteranceId = idOverride ?: "nav_${System.currentTimeMillis()}_${(0..999).random()}"
         Log.i(
             TAG,
             "NAV_VOICE_SPEAK id=$utteranceId mode=${if (queueMode == TextToSpeech.QUEUE_FLUSH) "FLUSH" else "ADD"}",
@@ -355,6 +375,12 @@ class NavigationVoiceController(private val context: Context) : TextToSpeech.OnI
                     override fun onDone(utteranceId: String?) {
                         Log.i(TAG, "NAV_UTTERANCE_DONE id=$utteranceId")
                         utteranceId?.let { listener?.onNavigationSpeechFinished(it) }
+                        // Fire arrival callback after the arrival phrase finishes so
+                        // the full cleanup pipeline (stop nav + voice + AI) can run.
+                        if (utteranceId != null && utteranceId == arrivalUtteranceId) {
+                            arrivalUtteranceId = null
+                            mainHandler.post { onArrivalSpeechCompleted?.invoke() }
+                        }
                     }
 
                     override fun onError(utteranceId: String?) {

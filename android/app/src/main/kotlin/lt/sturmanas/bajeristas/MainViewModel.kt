@@ -43,6 +43,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isDestinationListening = MutableStateFlow(false)
     val isDestinationListening: StateFlow<Boolean> = _isDestinationListening.asStateFlow()
 
+    /**
+     * Set to true by [performFullNavigationCleanup] after arrival so [SturmanasApp]
+     * can set isNavigationScreenVisible = false on the next composition.
+     * Reset by [consumeExitToStartScreen] immediately after the UI reacts.
+     */
+    private val _exitToStartScreen = MutableStateFlow(false)
+    val exitToStartScreen: StateFlow<Boolean> = _exitToStartScreen.asStateFlow()
+
+    /** Reference stored in [startObserving] so arrival cleanup can call stopNavigation. */
+    private var navControllerRef: NavigationController? = null
+
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
     private val _aiStatus = MutableStateFlow("IDLE")
     val aiStatus: StateFlow<String> = _aiStatus.asStateFlow()
@@ -93,6 +104,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
         aiController = controller
         
+        // After the arrival phrase ("Nu va, privažiavom.") finishes, run the same
+        // full cleanup pipeline used by the manual "Baigti navigaciją" button.
+        voiceController.onArrivalSpeechCompleted = {
+            Log.i(TAG, "ARRIVAL_TTS_COMPLETED triggering full cleanup")
+            handler.post { performFullNavigationCleanup() }
+        }
+
         conversationCoordinator.setTriggers(
             onPause = { controller.stop() },
             onResume = { /* Engine handles resume */ },
@@ -119,7 +137,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * Entry point for the navigation controller to be injected.
      * Starts observing navigation state for voice triggers.
      */
+    /** Resets the one-shot exit flag after [SturmanasApp] has acted on it. */
+    fun consumeExitToStartScreen() {
+        _exitToStartScreen.value = false
+    }
+
+    /**
+     * Runs the full cleanup pipeline shared by the manual "Baigti navigaciją" button
+     * and automatic arrival cleanup: stops navigation, nav voice, AI speech, and
+     * signals [SturmanasApp] to return to StartScreen.
+     */
+    private fun performFullNavigationCleanup() {
+        Log.i(TAG, "FULL_NAV_CLEANUP_STARTED")
+        navControllerRef?.stopNavigation()
+        stopNavigationVoice()
+        stopKentasSpeech()
+        _exitToStartScreen.value = true
+    }
+
     fun startObserving(navigationController: NavigationController) {
+        navControllerRef = navigationController
         Log.i(TAG, "NAV_VOICE_OBSERVER_ATTACHED")
 
         // Wire voice-destination navigation: Kentas can now start navigation by voice.
