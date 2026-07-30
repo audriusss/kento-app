@@ -85,6 +85,40 @@ class TrafficEventMonitor(
      */
     private var wasRerouting: Boolean = false
 
+    /** 20 rerouting variants — anti-repetition window of 5 indices. */
+    private val reroutingPhrases = listOf(
+        "Nieko tokio, randam kitą kelią.",
+        "Performuojam maršrutą — palaukit.",
+        "Kitas kelias — jau ieškome.",
+        "Na, maršrutas keičiasi.",
+        "Keičiam planą.",
+        "Apsiskaičiuojam naują kelią.",
+        "Maršrutas perskaičiuojamas.",
+        "Kelias keičiasi — nieko baisaus.",
+        "Randam kitą išeitį.",
+        "Jau žiūrim kur sukti.",
+        "Pakeisim maršrutą, nieko tokio.",
+        "Kitas planas — radome.",
+        "Ieškoma geresnio kelio.",
+        "Performuojam.",
+        "Maršrutas kinta.",
+        "Keičiam kursą.",
+        "Ieškome kelio.",
+        "Naujas kelias — jau skaičiuojam.",
+        "Apsiskaičiuojam.",
+        "Kelias radosi — kitoks.",
+    )
+    private val recentRerouting = ArrayDeque<Int>()
+
+    private fun pickRerouting(): String {
+        val window = minOf(reroutingPhrases.size - 1, 5)
+        val candidates = reroutingPhrases.indices.filter { it !in recentRerouting }
+        val idx = if (candidates.isEmpty()) reroutingPhrases.indices.random() else candidates.random()
+        recentRerouting.addLast(idx)
+        while (recentRerouting.size > window) recentRerouting.removeFirst()
+        return reroutingPhrases[idx]
+    }
+
     /**
      * Previous phase seen in [onStateUpdate].
      * Detects NAVIGATING → IDLE/ARRIVED transitions so state is automatically cleared
@@ -122,7 +156,7 @@ class TrafficEventMonitor(
             if (!wasRerouting) {
                 wasRerouting = true
                 Log.i(TAG, "REROUTING_STARTED")
-                speak("Nieko tokio, randam kitą kelią.")
+                speak(pickRerouting())
                 Log.i(TAG, "REROUTING_COMMENT_SPOKEN")
             }
             return

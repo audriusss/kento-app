@@ -65,34 +65,48 @@ object KentasChat {
 Tu esi Kentas — keleivas priekinėje sėdynėje. Kalbi kaip senas draugas automobilyje. Ne kaip asistentas, ne kaip robotas.
 
 BŪDAS:
-- Savimi pasitikintis, ramus, trumpai atsikerti.
-- Sauso ir kandaus humoro, bet ne piktas ir ne agresyvus.
+- Savimi pasitikintis, ramus, charizmatiškas, kandus.
+- Sauso humoro, bet ne piktas, ne agresyvus, ne žeminantis.
 - Gali draugiškai paerzinti: vairuotoją, jo sprendimus, eismą, kitus vairuotojus, orus, gyvenimą.
-- Jei žmogus kalba rimtai — prisitaik ir kalbėk paprasčiau, be juokų.
-- Jei keikiasi ar erzina — nesikarščiuok, atsikirsk trumpai.
+- Ne kiekvienas sakinys turi būti juokas. Natūralumas svarbiau už bajerius.
+
+EMOCIJOS — REAGUOK Į VAIRUOTOJO NUOTAIKĄ:
+- Jei juokauja → atskirk juokeliu atgal.
+- Jei juokiasi → juokis kartu, papildo bajerį.
+- Jei pyksta → nuramink humoru, be moralizavimo.
+- Jei susijaudinęs → palaikyk energiją.
+- Jei pavargęs → kalbėk ramiau, trumpiau, palaikančiai.
+- Jei kalba rimtai → atsisakyk humoro, kalbi paprastai.
+- Jei keikiasi ar erzina → nesikarščiuok, atsikirsk trumpai.
 
 KAIP KALBI:
-- Natūrali šnekamoji lietuvių kalba. Trumpai.
+- Natūrali šnekamoji lietuvių kalba.
 - Dažniausiai 1–2 sakiniai. Trečias — tik jei tikrai reikia.
-- Nekartok klausimo. Naudok sąrašus ar markdown tik jei paprašyta.
-- Ne kiekvienas sakinys turi būti juokas. Natūralumas svarbiau.
+- Nekartok klausimo. Naudok sąrašus tik jei tiesiogiai paprašyta.
+- Trumpai. Vairuotojas vairuoja.
 
 DRAUDŽIAMOS FRAZĖS — NIEKADA JŲ NESAKYK:
 „Žinoma", „Suprantama", „Puiku", „Puikus klausimas", „Labai geras pastebėjimas",
 „Atsiprašau", „Galiu padėti", „Ar dar kuo nors galiu", „Kaip dirbtinis intelektas",
-„Kaip AI", „Mano, kaip asistento", „Su malonumu".
+„Kaip AI", „Mano, kaip asistento", „Su malonumu", „Remiantis", „Pagal mano informaciją".
 
-ATMINTIS:
+ATMINTIS IR IMERSIJA:
 - Prisimink paminėtus vardus, vietas, augintinius, planus, ankstesnius bajerius.
+- Jei anksčiau užsiminta apie kažką (pvz. cepelinai, draugas, sodas) — paminėk tai natūraliai vėliau.
 - Neklausk to paties dar kartą.
+- Nekišk prisiminimų į kiekvieną atsakymą — tik kai natūraliai tinka.
 - Įvardžiai „ten", „jis", „tas", „anas" nurodo paskutinę pokalbio temą.
-- Nekišk prisiminimų į kiekvieną atsakymą.
 
 ELGESYS:
 - Navigacijos nurodymai visada svarbiau nei pokalbis.
 - Jei STT atrodo kaip nesąmonė — trumpai: „Ką sakei?"
 - Jei klausia, ar esi AI — nemeluok, bet atsakyk savo stiliumi.
 - Neskatink pavojingų veiksmų vairuojant.
+
+SMULKI KALBA (small talk):
+- Jei klausia kur pavalgyti: siūlyk konkrečiai, ne sąrašais. „Galim užsukt."
+- Jei klausia apie bajerį: papasakok tikrą, trumpą, su pointe.
+- Jei vairuotojas blaškosi ar ilgai tyli: nereaguok, nebent prasidės pokalbis.
 
 PRIEŠ ATSAKANT — tyliai paklausk savęs:
 „Kaip čia natūraliai pasakytų draugas, sėdintis šalia automobilyje?"
@@ -265,43 +279,113 @@ Jei skamba kaip robotas ar klientų aptarnavimas — perrašyk.
     /** Alias kept for call sites that used the old name. Delegates to [clearMemory]. */
     fun resetHistory() = clearMemory()
 
-    fun getOpener(): String {
-        val openers = listOf(
-            "Ko tyli kaip per laidotuves? Vairuok ramiai.",
-            "Gal nori, kad papasakočiau kokį nors bajerį?",
-            "Vairuok, nesidairyk, bet galim ir paplepėti.",
-            "Ei, neužmik už vairo, dar manęs prireiks.",
-            "Kelias lygus, laikas yra — klausk ko nori.",
-        )
-        return openers.random()
+    // ── Anti-repetition windows for local phrase banks ────────────────────
+
+    private val recentOpeners    = ArrayDeque<Int>()
+    private val recentNavLong    = ArrayDeque<Int>()   // ≥ 10 km
+    private val recentNavMed     = ArrayDeque<Int>()   // 3–10 km
+    private val recentNavShort   = ArrayDeque<Int>()   // < 3 km
+
+    private fun pickLocal(phrases: List<String>, recent: ArrayDeque<Int>): String {
+        val window = minOf(phrases.size - 1, 6)
+        val candidates = phrases.indices.filter { it !in recent }
+        val idx = if (candidates.isEmpty()) phrases.indices.random() else candidates.random()
+        recent.addLast(idx)
+        while (recent.size > window) recent.removeFirst()
+        return phrases[idx]
     }
+
+    fun getOpener(): String = pickLocal(listOf(
+        "Ko tyli kaip per laidotuves? Vairuok ramiai.",
+        "Gal nori, kad papasakočiau kokį nors bajerį?",
+        "Vairuok, nesidairyk, bet galim ir paplepėti.",
+        "Ei, neužmik už vairo, dar manęs prireiks.",
+        "Kelias lygus, laikas yra — klausk ko nori.",
+        "Gal kažkas įdomaus nutiko? Papasakok.",
+        "Klausk ką nori — laiko turim.",
+        "Ar tyla reiškia, kad viskas gerai?",
+        "Labai tyli — ar viskas tvarkoje?",
+        "Nėra ko paplepėti, ar prostai sėdim?",
+        "Laikas lekia — gal ką aptariam?",
+        "Gali kalbėt, neuždrausta.",
+        "Kažkur tyliai, kažkur garsiai.",
+        "Galim plepėti — aš niekur neskubu.",
+        "Klausyk, jei ką — esu čia.",
+    ), recentOpeners)
 
     /**
      * Returns a short navigation-context commentary phrase based on how far
-     * away the next maneuver is.  Used by the idle-inactivity timer in
-     * [AIConversationController] to give Kentas natural co-driver comments
-     * when the road is straight and nothing else is happening.
+     * away the next maneuver is.  Called by the idle-inactivity timer in
+     * [AIConversationController] when the driver is navigating but hasn't
+     * spoken for a while.  50+ total phrases, anti-repetition per distance tier.
      *
      * Only real SDK data (distance) is referenced — no invented accidents or jams.
      *
      * @param distMeters Distance to the next maneuver in metres.
      */
     fun getNavComment(distMeters: Int): String = when {
-        distMeters >= 10_000 -> listOf(
+
+        distMeters >= 10_000 -> pickLocal(listOf(
             "Dar nemažai važiuosim.",
             "Kelias laisvas, kol kas ramu.",
             "Dar ilgas kelias priekyje.",
-        ).random()
-        distMeters >= 3_000 -> listOf(
+            "Lekiam — dar toli.",
+            "Dar gerokai tiesiai.",
+            "Tiesus kelias priekyje — nieko neįdomaus.",
+            "Dar nemažai kilometrų.",
+            "Ramu šiandien.",
+            "Kelias draugiškas.",
+            "Jokių staigmenų kol kas.",
+            "Dar ilgokai važiuosim.",
+            "Lekiam kaip reikia.",
+            "Kol kas jokių komplikacijų.",
+            "Kelias eina normaliai.",
+            "Dar ilgas tiesus ruožas.",
+            "Viso labo — ilgas kelias.",
+            "Nieko baisaus, ramiai.",
+            "Lekiam — dar biškį.",
+        ), recentNavLong)
+
+        distMeters >= 3_000 -> pickLocal(listOf(
             "Kol kas ramiai.",
             "Dar ilgokai tiesiai.",
             "Kelias laisvas.",
             "Važiuojam normaliai.",
-        ).random()
-        else -> listOf(
+            "Kelias šiandien neblogas.",
+            "Ramiai riedam.",
+            "Kol kas viskas pagal planą.",
+            "Šiandien kelias draugiškas.",
+            "Kol kas jokių siurprizų.",
+            "Važiuojam kaip žmonės.",
+            "Kol kas nieko įdomaus.",
+            "Kelias eina gerai.",
+            "Ramu kol kas.",
+            "Lekiam be problemų.",
+            "Viskas pagal planą.",
+            "Kelias šiandien nekankina.",
+            "Nieko ypatingo.",
+            "Riedam normaliai.",
+            "Kol kas viskas.",
+            "Lekiam kaip reikia.",
+        ), recentNavMed)
+
+        else -> pickLocal(listOf(
             "Kol kas ramiai.",
             "Važiuojam normaliai.",
             "Dar truputį tiesiai.",
-        ).random()
+            "Dar biškį.",
+            "Kelias tiesus dar.",
+            "Kol kas nieko.",
+            "Važiuojam.",
+            "Dar šiek tiek tiesiai.",
+            "Ramu kol kas.",
+            "Lekiam.",
+            "Dar biškį tiesiai.",
+            "Viskas gerai.",
+            "Kelias eina.",
+            "Dar truputį.",
+            "Nieko įvyksta.",
+            "Riedam.",
+        ), recentNavShort)
     }
 }
