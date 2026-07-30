@@ -48,12 +48,24 @@ object KentasChat {
      * Rolling buffer: system prompt (index 0) + up to [MAX_HISTORY] user/assistant
      * pairs = at most (MAX_HISTORY * 2) + 1 entries.
      *
-     * 10 pairs ≈ 5–10 minutes of typical conversation at normal speaking pace.
-     * Older turns are dropped from index 1 (preserving the system prompt at [0])
-     * when the buffer exceeds capacity.
+     * 6 pairs is the in-memory cap; the per-request prompt trimmer ([buildMessagesForRequest])
+     * may further reduce what is actually sent to stay within [MAX_CHAR_LIMIT].
      */
     private val history = mutableListOf<JSONObject>()
-    private const val MAX_HISTORY = 10
+    private const val MAX_HISTORY = 6
+
+    /**
+     * Hard character limit imposed by the chat provider (HTTP 400 message_too_long).
+     * Measured as the sum of all message [content] string lengths before JSON encoding.
+     */
+    private const val MAX_CHAR_LIMIT = 2000
+
+    /**
+     * Characters reserved inside [MAX_CHAR_LIMIT] for the condensed-memory summary
+     * message that replaces dropped turns.  Keeps the summary from crowding out
+     * turns that still fit.
+     */
+    private const val SUMMARY_BUDGET = 150
 
     /** Set once at app start from BuildConfig.BACKEND_URL. */
     private var backendUrl: String = ""
@@ -176,7 +188,7 @@ Jei skamba kaip robotas ar klientų aptarnavimas — perrašyk.
         val messages = buildMessagesForRequest(navContext)
         Log.i(
             TAG,
-            "MEMORY_BUILD_PROMPT messages=${messages.length()} " +
+            "MEMORY_BUILD_MESSAGES messages=${messages.length()} " +
             "turns=${(history.size - 1) / 2} navContext=${navContext != null}",
         )
 
@@ -225,41 +237,118 @@ Jei skamba kaip robotas ar klientų aptarnavimas — perrašyk.
     }
 
     /**
-     * Builds the messages array sent to the backend for a single request.
+     * Builds the messages array sent to the backend for a single request,
+     * ensuring the total content length never exceeds [MAX_CHAR_LIMIT].
      *
      * Layout (in order):
-     * 1. System prompt (history[0])
-     * 2. Past user/assistant turns (history[1..n-1])
-     * 3. [optional] Transient nav-context system message — NOT in history
-     * 4. Current user message (history[n], just appended)
+     * 1. System prompt (history[0])                         — always present
+     * 2. [optional] Condensed-memory summary of dropped turns
+     * 3. Kept user/assistant turns (newest first, oldest trimmed)
+     * 4. [optional] Transient nav-context system message    — NOT in history
+     * 5. Current user message (history[last])               — always present
      *
-     * The transient nav message is inserted between the last history turn and
-     * the current user message so the model sees the driving situation freshly
-     * for each reply without the context accumulating across turns.
+     * Trimming strategy:
+     * - Mandatory parts (system prompt + nav context + current user) are never removed.
+     * - History turns are walked newest→oldest; each turn is kept while the
+     *   running char count plus [SUMMARY_BUDGET] stays within [MAX_CHAR_LIMIT].
+     * - Any turns that could not fit are replaced by a compact summary message
+     *   (capped at [SUMMARY_BUDGET] chars) so Kentas retains a trace of the
+     *   earlier conversation without blowing the limit.
+     *
+     * Logs: PROMPT_SIZE, PROMPT_TRIMMED (when turns are dropped), PROMPT_FINAL_SIZE.
      */
     private fun buildMessagesForRequest(navContext: String?): JSONArray {
-        val messages = JSONArray()
-
-        if (navContext == null || history.size < 2) {
-            // No nav context or only the system prompt — copy history as-is.
-            for (entry in history) messages.put(entry)
-            return messages
+        val systemMsg   = history[0]
+        val currentUser = history.last()
+        val navContent  = navContext?.let { "[Navigacija: $it]" }
+        val navMsg      = navContent?.let {
+            JSONObject().put("role", "system").put("content", it)
         }
 
-        // Copy system prompt + all turns except the last user message.
-        for (i in 0 until history.size - 1) messages.put(history[i])
+        // history[1..size-2] — complete user/assistant pairs from previous turns.
+        val middleTurns: List<JSONObject> =
+            if (history.size > 2) history.subList(1, history.size - 1).toList() else emptyList()
 
-        // Inject transient nav context right before the current user message.
-        messages.put(
-            JSONObject()
-                .put("role", "system")
-                .put("content", "[Navigacija: $navContext]"),
-        )
+        // ── Measure raw total before any trimming ──────────────────────────
+        val rawTotal = systemMsg.getString("content").length +
+                       currentUser.getString("content").length +
+                       (navContent?.length ?: 0) +
+                       middleTurns.sumOf { it.getString("content").length }
+        Log.i(TAG, "PROMPT_SIZE chars=$rawTotal")
 
-        // Append the current user message last.
-        messages.put(history[history.size - 1])
+        // ── Determine per-request history budget ───────────────────────────
+        val mandatoryChars = systemMsg.getString("content").length +
+                             currentUser.getString("content").length +
+                             (navContent?.length ?: 0)
+        // Reserve SUMMARY_BUDGET chars so the condensed-memory message always fits.
+        val historyBudget  = MAX_CHAR_LIMIT - mandatoryChars - SUMMARY_BUDGET
+
+        // ── Greedily keep turns from newest to oldest ──────────────────────
+        val keptTurns    = mutableListOf<JSONObject>()
+        val droppedTurns = mutableListOf<JSONObject>()
+
+        if (historyBudget <= 0) {
+            droppedTurns.addAll(middleTurns)
+        } else {
+            var remaining = historyBudget
+            for (turn in middleTurns.asReversed()) {
+                val len = turn.getString("content").length
+                if (remaining >= len) {
+                    keptTurns.add(0, turn)   // prepend to maintain chronological order
+                    remaining -= len
+                } else {
+                    droppedTurns.add(0, turn)
+                }
+            }
+        }
+
+        val removedTurns = droppedTurns.size
+        if (removedTurns > 0) {
+            Log.i(TAG, "PROMPT_TRIMMED removedTurns=$removedTurns")
+        }
+
+        // ── Build condensed summary of dropped turns ───────────────────────
+        val summaryMsg: JSONObject? =
+            if (droppedTurns.isNotEmpty()) buildSummaryMessage(droppedTurns, SUMMARY_BUDGET)
+            else null
+
+        // ── Assemble final messages array ──────────────────────────────────
+        val messages = JSONArray()
+        messages.put(systemMsg)
+        summaryMsg?.let  { messages.put(it) }
+        keptTurns.forEach { messages.put(it) }
+        navMsg?.let      { messages.put(it) }
+        messages.put(currentUser)
+
+        val finalChars = (0 until messages.length()).sumOf {
+            messages.getJSONObject(it).getString("content").length
+        }
+        Log.i(TAG, "PROMPT_FINAL_SIZE chars=$finalChars")
 
         return messages
+    }
+
+    /**
+     * Builds a compact system message summarising [dropped] turns so Kentas
+     * retains a trace of earlier conversation topics.
+     *
+     * Each turn contributes a short snippet ("V:\"…\" " or "K:\"…\" ") until
+     * the accumulated length would exceed [maxChars].  Returns null if the
+     * result would be too short to be meaningful.
+     */
+    private fun buildSummaryMessage(dropped: List<JSONObject>, maxChars: Int): JSONObject? {
+        val sb = StringBuilder("[Ankstesni pokalbiai: ")
+        for (turn in dropped) {
+            val role    = if (turn.optString("role") == "user") "V" else "K"
+            val snippet = turn.optString("content", "").take(28).replace('\n', ' ').trimEnd()
+            val token   = "$role:\"$snippet\" "
+            if (sb.length + token.length + 1 > maxChars) break
+            sb.append(token)
+        }
+        sb.append("]")
+        return if (sb.length > 30) {
+            JSONObject().put("role", "system").put("content", sb.toString())
+        } else null
     }
 
     /**
