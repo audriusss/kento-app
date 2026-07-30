@@ -230,6 +230,7 @@ class NavigationVoiceController(private val context: Context) : TextToSpeech.OnI
         }
 
         Log.i(TAG, "NAV_VOICE_ANNOUNCING stage=$stage phrase='$phrase' dist=$dist")
+        Log.i(TAG, "NAV_PHRASE_SELECTED maneuver=$maneuver stage=$stage phrase='$phrase'")
         stages.add(stage)
         speakText(phrase, stage)
     }
@@ -247,6 +248,7 @@ class NavigationVoiceController(private val context: Context) : TextToSpeech.OnI
             variantIndex = lastVariantIndex++,
         )
         Log.i(TAG, "NAV_VOICE_ARRIVED phrase='$phrase'")
+        Log.i(TAG, "ARRIVAL_SPEECH_STARTED phrase='$phrase'")
         stages.add(KentasNavigationPhraseFormatter.SpeechStage.ARRIVED)
 
         // Use a dedicated ID prefix so onDone can identify the arrival utterance

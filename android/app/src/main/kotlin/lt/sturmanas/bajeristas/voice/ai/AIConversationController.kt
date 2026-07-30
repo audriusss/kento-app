@@ -946,27 +946,29 @@ class AIConversationController(
         if (depth == 1) {
             // Safe mute order for navigation TTS (mirrors AI TTS order):
             // 1. Log intent
-            // 2. transitionTo → pipeline.mute() + increments generationId
-            // 3. resetVadAndSegmenter() — clear Silero/segmenter state
+            // 2. Save pre-pause phase BEFORE transitionTo() changes it
+            // 3. transitionTo → pipeline.mute() + increments generationId
+            // 4. resetVadAndSegmenter() — clear Silero/segmenter state
             Log.i(TAG, "MIC_PIPELINE_MUTED reason=NAVIGATION")
-            prePausedPhase = phase
-            transitionTo(Phase.PAUSED_BY_NAVIGATION)  // calls pipeline.mute()
-            // Reset VAD state at navigation start so any audio captured just
-            // before the mute cannot bleed into post-navigation listening.
-            pipeline.resetVadAndSegmenter()
-            clearUtteranceBuffer("nav_interrupt")
+            prePausedPhase = phase   // snapshot BEFORE transitionTo changes phase
 
-            // Save interrupted AI response BEFORE stopping TTS so we can resume later.
-            // Only save if we were actively speaking a chunked AI response.
-            if (phase == Phase.SPEAKING && sentences.isNotEmpty()) {
+            // Save interrupted AI response BEFORE transitionTo() and stopAiSpeech()
+            // so the sentence list and index are still valid.
+            // Must use the pre-pause snapshot, NOT the post-transition phase.
+            if (prePausedPhase == Phase.SPEAKING && sentences.isNotEmpty()) {
                 interruptedSentences = sentences
                 interruptedFromIndex = currentIndex
                 interruptedResponseGeneration = currentResponseGeneration
                 isNavInterruptResumePending = true
                 isInterrupted = true   // stops playNextAiSentence() if onDone fires after this
-                Log.i(TAG, "AI_RESPONSE_INTERRUPTED_BY_NAV fromIdx=$currentIndex remaining=${sentences.size - currentIndex}")
+                Log.i(TAG, "AI_INTERRUPTED_BY_NAV fromIdx=$currentIndex remaining=${sentences.size - currentIndex} gen=$currentResponseGeneration")
             }
 
+            transitionTo(Phase.PAUSED_BY_NAVIGATION)  // calls pipeline.mute()
+            // Reset VAD state at navigation start so any audio captured just
+            // before the mute cannot bleed into post-navigation listening.
+            pipeline.resetVadAndSegmenter()
+            clearUtteranceBuffer("nav_interrupt")
             stopAiSpeech()
         }
 
@@ -1010,7 +1012,7 @@ class AIConversationController(
 
         if (isNavInterruptResumePending) {
             // An AI response was interrupted — resume it instead of opening the mic.
-            Log.i(TAG, "AI_RESPONSE_RESUME_PENDING fromIdx=$interruptedFromIndex remaining=${interruptedSentences.size - interruptedFromIndex}")
+            Log.i(TAG, "AI_RESUME_AFTER_NAV fromIdx=$interruptedFromIndex remaining=${interruptedSentences.size - interruptedFromIndex}")
             resumeInterruptedAiResponse()
             return
         }
@@ -1035,13 +1037,13 @@ class AIConversationController(
      */
     private fun resumeInterruptedAiResponse() {
         if (!isNavInterruptResumePending) {
-            Log.d(TAG, "AI_RESPONSE_RESUME_CANCELLED reason=not_pending")
+            Log.d(TAG, "AI_RESUME_CANCELLED reason=not_pending")
             pipeline.resetVadAndSegmenter()
             transitionTo(postTtsTargetPhase(mode))
             return
         }
         if (interruptedResponseGeneration != currentResponseGeneration) {
-            Log.i(TAG, "AI_RESPONSE_RESUME_CANCELLED reason=stale_generation saved=$interruptedResponseGeneration current=$currentResponseGeneration")
+            Log.i(TAG, "AI_RESUME_CANCELLED reason=stale_generation saved=$interruptedResponseGeneration current=$currentResponseGeneration")
             isNavInterruptResumePending = false
             pipeline.resetVadAndSegmenter()
             transitionTo(postTtsTargetPhase(mode))
@@ -1050,14 +1052,14 @@ class AIConversationController(
         val resumeSentences = interruptedSentences
         val fromIndex = interruptedFromIndex
         if (resumeSentences.isEmpty() || fromIndex >= resumeSentences.size) {
-            Log.i(TAG, "AI_RESPONSE_RESUME_CANCELLED reason=no_remaining_sentences")
+            Log.i(TAG, "AI_RESUME_CANCELLED reason=no_remaining_sentences")
             isNavInterruptResumePending = false
             pipeline.resetVadAndSegmenter()
             transitionTo(postTtsTargetPhase(mode))
             return
         }
         isNavInterruptResumePending = false
-        Log.i(TAG, "AI_RESPONSE_RESUMED fromIdx=$fromIndex remaining=${resumeSentences.size - fromIndex}")
+        Log.i(TAG, "AI_RESUME_AFTER_NAV fromIdx=$fromIndex sentences=${resumeSentences.size}")
         resumeAiSpeechFrom(resumeSentences, fromIndex)
     }
 
@@ -1088,7 +1090,7 @@ class AIConversationController(
      */
     private fun clearInterruptedResponse(reason: String) {
         if (isNavInterruptResumePending) {
-            Log.i(TAG, "AI_RESPONSE_RESUME_CANCELLED reason=$reason")
+            Log.i(TAG, "AI_RESUME_CANCELLED reason=$reason")
         }
         isNavInterruptResumePending = false
         interruptedSentences = emptyList()
@@ -1099,6 +1101,8 @@ class AIConversationController(
     fun stop() {
         Log.i(TAG, "CONV_EVENT type=STOP_REQUESTED")
         clearInterruptedResponse("user_stop")
+        // Cancel the idle/commentary timer so it cannot fire after navigation exits.
+        cancelInactivityTimer()
         stopAiSpeech()
         onTtsTerminal("CANCELLED_BY_USER")
     }
@@ -1186,17 +1190,21 @@ class AIConversationController(
     fun resetIdleTimer() {
         hasOpenerFired = false
         cancelInactivityTimer()
+        Log.i(TAG, "ROAD_COMMENTARY_SCHEDULED delayMs=30000")
         inactivityRunnable = Runnable {
             val dist = getNextManeuverDist()
             when {
                 phase != Phase.IDLE -> {
-                    // Not idle yet — retry later without speaking.
+                    // Not idle yet (TTS/thinking/nav) — retry later without speaking.
+                    Log.i(TAG, "ROAD_COMMENTARY_SKIPPED reason=phase_not_idle phase=$phase")
                     handler.postDelayed(inactivityRunnable!!, 30000)
                 }
                 dist != Int.MAX_VALUE && dist > 500 -> {
                     // Navigating with a clear run ahead — road commentary.
                     hasOpenerFired = true
-                    speak(KentasChat.getNavComment(dist))
+                    val comment = KentasChat.getNavComment(dist)
+                    Log.i(TAG, "ROAD_COMMENTARY_SCHEDULED speaking distM=$dist comment='$comment'")
+                    speak(comment)
                 }
                 dist == Int.MAX_VALUE -> {
                     // Not navigating — conversation opener.
@@ -1205,6 +1213,7 @@ class AIConversationController(
                 }
                 else -> {
                     // Close to a maneuver (dist ≤ 500 m) — stay quiet, retry later.
+                    Log.i(TAG, "ROAD_COMMENTARY_SKIPPED reason=near_maneuver distM=$dist")
                     handler.postDelayed(inactivityRunnable!!, 30000)
                 }
             }
@@ -1213,8 +1222,11 @@ class AIConversationController(
     }
 
     private fun cancelInactivityTimer() {
-        inactivityRunnable?.let { handler.removeCallbacks(it) }
-        inactivityRunnable = null
+        if (inactivityRunnable != null) {
+            Log.i(TAG, "ROAD_COMMENTARY_CANCELLED")
+            inactivityRunnable?.let { handler.removeCallbacks(it) }
+            inactivityRunnable = null
+        }
     }
 
     override fun onInit(status: Int) {

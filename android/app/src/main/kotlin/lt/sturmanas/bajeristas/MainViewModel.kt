@@ -107,7 +107,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // After the arrival phrase ("Nu va, privažiavom.") finishes, run the same
         // full cleanup pipeline used by the manual "Baigti navigaciją" button.
         voiceController.onArrivalSpeechCompleted = {
-            Log.i(TAG, "ARRIVAL_TTS_COMPLETED triggering full cleanup")
+            Log.i(TAG, "ARRIVAL_SPEECH_COMPLETED")
+            Log.i(TAG, "ARRIVAL_CLEANUP_TRIGGERED")
             handler.post { performFullNavigationCleanup() }
         }
 
@@ -133,10 +134,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /**
-     * Entry point for the navigation controller to be injected.
-     * Starts observing navigation state for voice triggers.
-     */
     /** Resets the one-shot exit flag after [SturmanasApp] has acted on it. */
     fun consumeExitToStartScreen() {
         _exitToStartScreen.value = false
@@ -148,11 +145,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * signals [SturmanasApp] to return to StartScreen.
      */
     private fun performFullNavigationCleanup() {
-        Log.i(TAG, "FULL_NAV_CLEANUP_STARTED")
+        Log.i(TAG, "NAVIGATION_FULL_CLEANUP_STARTED")
         navControllerRef?.stopNavigation()
         stopNavigationVoice()
         stopKentasSpeech()
         _exitToStartScreen.value = true
+        Log.i(TAG, "NAVIGATION_FULL_CLEANUP_COMPLETED")
     }
 
     fun startObserving(navigationController: NavigationController) {
