@@ -151,7 +151,7 @@ class ContinuousMicrophonePipeline(
         generationId++                                    // discard any in-flight transcripts
         captureJob?.cancel()
         scope.coroutineContext.cancelChildren()
-        Log.i(TAG, "MIC_PIPELINE_STOPPED generation=$generationId")
+        Log.i(TAG, "MIC_PIPELINE_STOPPED reason=NAVIGATION_EXIT generation=$generationId")
     }
 
     /**

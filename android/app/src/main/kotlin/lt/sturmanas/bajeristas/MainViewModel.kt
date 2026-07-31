@@ -228,6 +228,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun stopKentasSpeech() {
         Log.i(TAG, "MANUAL_NAV_STOP_SPEECH_STOPPED")
         aiController?.stop()
+        // Ensure the microphone pipeline is stopped so Kentas does not listen on StartScreen.
+        aiController?.stopNavigationMicPipeline()
         KentasChat.clearMemory()
     }
 

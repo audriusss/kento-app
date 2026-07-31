@@ -421,6 +421,7 @@ class AIConversationController(
      */
     fun startListening() {
         if (destroyed) return
+        Log.i(TAG, "KENTAS_SESSION_STARTED reason=NAVIGATION_STARTED")
         // Do not unmute during TTS or navigation audio; let transitionTo() remain the
         // sole authority for pipeline control during those phases.
         if (pipelineActionForPhase(phase) == PipelineAction.MUTE) return
@@ -1241,8 +1242,22 @@ class AIConversationController(
      * the StartScreen microphone button.
      */
     fun stopNavigationMicPipeline() {
+        Log.i(TAG, "KENTAS_SESSION_STOP_REQUESTED reason=NAVIGATION_EXIT")
+        
+        // Cancel all pending callbacks that could reactivate the mic or process stale transcripts.
+        handler.removeCallbacks(postTtsCooldownRunnable)
+        handler.removeCallbacks(navResumeRunnable)
+        handler.removeCallbacks(navResumeWatchdogRunnable)
+        handler.removeCallbacks(continuationRunnable)
+        inactivityRunnable?.let { handler.removeCallbacks(it) }
+        watchdogHandler.removeCallbacks(watchdogRunnable)
+        
+        destGraceRunnable?.let { handler.removeCallbacks(it) }
+        destTimeoutRunnable?.let { handler.removeCallbacks(it) }
+
         Log.i(TAG, "MIC_PIPELINE_NAV_SESSION_STOPPED")
         pipeline.stop()
+        Log.i(TAG, "KENTAS_SESSION_STOPPED reason=NAVIGATION_EXIT")
     }
 
     private fun stopAiSpeech() {
