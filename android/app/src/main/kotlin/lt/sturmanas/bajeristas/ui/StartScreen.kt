@@ -59,7 +59,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.google.android.libraries.places.api.model.AutocompletePrediction
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import lt.sturmanas.bajeristas.R
 import lt.sturmanas.bajeristas.navigation.PlacesAutocompleteClient
 import lt.sturmanas.bajeristas.ui.theme.NearBlack
@@ -89,6 +88,7 @@ import lt.sturmanas.bajeristas.ui.theme.SurfaceVariantPetrol
  */
 @Composable
 fun StartScreen(
+    viewModel: lt.sturmanas.bajeristas.MainViewModel,
     errorMessage: String? = null,
     engineReady: Boolean = true,
     /** True while the destination STT session is actively recording. */
@@ -105,7 +105,6 @@ fun StartScreen(
     var suggestions by remember { mutableStateOf<List<AutocompletePrediction>>(emptyList()) }
 
     val context  = LocalContext.current
-    val scope    = rememberCoroutineScope()
     val keyboard = LocalSoftwareKeyboardController.current
 
     // ── Debounced autocomplete — UNCHANGED ───────────────────────────────────
@@ -124,14 +123,13 @@ fun StartScreen(
         destination  = displayText
         suggestions  = emptyList()
         keyboard?.hide()
-        scope.launch {
-            val coords = PlacesAutocompleteClient.resolveCoordinates(context, prediction.placeId)
-            if (coords != null) {
-                onStartNavigation("${coords.first},${coords.second}")
-            } else {
-                onStartNavigation(displayText)
-            }
-        }
+        
+        viewModel.resolveCoordinates(
+            context      = context,
+            placeId      = prediction.placeId,
+            fallbackName = displayText,
+            onResult     = { resolved -> onStartNavigation(resolved) }
+        )
     }
 
     // ── Mic pulse animation ───────────────────────────────────────────────────

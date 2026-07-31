@@ -47,7 +47,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.google.android.libraries.places.api.model.AutocompletePrediction
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import lt.sturmanas.bajeristas.navigation.ManeuverType
 import lt.sturmanas.bajeristas.navigation.NavigationController
 import lt.sturmanas.bajeristas.navigation.NavigationPhase
@@ -69,6 +68,7 @@ private data class PendingReroute(
 
 @Composable
 fun NavigationScreen(
+    viewModel: lt.sturmanas.bajeristas.MainViewModel,
     navigationState: NavigationState,
     navigationController: NavigationController,
     onStopNavigation: () -> Unit,
@@ -82,7 +82,6 @@ fun NavigationScreen(
     val navView = remember(engine) { engine.createNavigationView(ctx) }
 
     // ── Floating search state — fully local, does not affect voice / AI flow ──
-    val scope    = rememberCoroutineScope()
     val keyboard = LocalSoftwareKeyboardController.current
     var searchExpanded   by remember { mutableStateOf(false) }
     var searchQuery      by remember { mutableStateOf("") }
@@ -190,22 +189,18 @@ fun NavigationScreen(
                         suggestions       = searchSuggestions,
                         onSuggestionSelected = { prediction ->
                             // Resolve coordinates before showing confirmation dialog.
-                            scope.launch {
-                                val coords = PlacesAutocompleteClient.resolveCoordinates(
-                                    ctx, prediction.placeId,
-                                )
-                                val coordsString = if (coords != null) {
-                                    "${coords.first},${coords.second}"
-                                } else {
-                                    // Places fetch failed — fall back to name-based geocoding.
-                                    prediction.getPrimaryText(null).toString()
+                            viewModel.resolveCoordinates(
+                                context      = ctx,
+                                placeId      = prediction.placeId,
+                                fallbackName = prediction.getPrimaryText(null).toString(),
+                                onResult     = { coordsString ->
+                                    val displayName = prediction.getPrimaryText(null).toString()
+                                    Log.i(NAV_SCREEN_TAG,
+                                        "NAV_FLOATING_PLACE_SELECTED place='$displayName'")
+                                    pendingReroute    = PendingReroute(displayName, coordsString)
+                                    searchSuggestions = emptyList()
                                 }
-                                val displayName = prediction.getPrimaryText(null).toString()
-                                Log.i(NAV_SCREEN_TAG,
-                                    "NAV_FLOATING_PLACE_SELECTED place='$displayName'")
-                                pendingReroute    = PendingReroute(displayName, coordsString)
-                                searchSuggestions = emptyList()
-                            }
+                            )
                         },
                         onClear = {
                             searchQuery       = ""

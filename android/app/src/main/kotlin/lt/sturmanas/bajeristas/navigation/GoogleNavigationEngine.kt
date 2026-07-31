@@ -234,18 +234,31 @@ class GoogleNavigationEngine : NavigationEngine {
         navigator?.setAudioGuidance(Navigator.AudioGuidance.SILENT)
     }
 
-    override fun onStart()  { navigationView?.onStart() }
-    override fun onResume() { navigationView?.onResume() }
-    override fun onPause()  { navigationView?.onPause() }
-    override fun onStop()   { navigationView?.onStop() }
+    override fun onStart()  { 
+        Log.i(TAG, "ENGINE_ON_START isViewNull=${navigationView == null}")
+        navigationView?.onStart() 
+    }
+    override fun onResume() { 
+        Log.i(TAG, "ENGINE_ON_RESUME isViewNull=${navigationView == null}")
+        navigationView?.onResume() 
+    }
+    override fun onPause()  { 
+        Log.i(TAG, "ENGINE_ON_PAUSE isViewNull=${navigationView == null}")
+        navigationView?.onPause() 
+    }
+    override fun onStop()   { 
+        Log.i(TAG, "ENGINE_ON_STOP isViewNull=${navigationView == null}")
+        navigationView?.onStop() 
+    }
 
     override fun onViewDestroy() {
-        Log.d(TAG, "onViewDestroy: isNull=${navigationView == null}")
+        Log.i(TAG, "onViewDestroy: isNull=${navigationView == null}")
         navigationView?.onDestroy()
         navigationView = null
     }
 
     override fun onDestroy() {
+        Log.i(TAG, "ENGINE_ON_DESTROY")
         sessionActive = false
         navInfoJob?.cancel()
         navInfoJob = null

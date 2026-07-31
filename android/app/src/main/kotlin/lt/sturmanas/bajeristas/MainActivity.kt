@@ -208,6 +208,7 @@ private fun SturmanasApp(
 
     if (!isNavigationScreenVisible) {
         StartScreen(
+            viewModel              = viewModel,
             errorMessage           = startScreenError ?: engineError,
             engineReady            = engineReady,
             isDestinationListening = isDestinationListening,
@@ -232,6 +233,7 @@ private fun SturmanasApp(
         )
     } else {
         NavigationScreen(
+            viewModel            = viewModel,
             navigationState      = navState,
             navigationController = navigationController,
             onStopNavigation     = {

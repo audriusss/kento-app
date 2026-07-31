@@ -16,6 +16,8 @@ import lt.sturmanas.bajeristas.voice.navigation.NavigationVoiceController
 import lt.sturmanas.bajeristas.voice.navigation.TrafficEventMonitor
 import lt.sturmanas.bajeristas.voice.ai.KentasChat
 import lt.sturmanas.bajeristas.voice.pipeline.OpenAiTranscriptionClient
+import lt.sturmanas.bajeristas.navigation.PlacesAutocompleteClient
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -54,6 +56,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Reference stored in [startObserving] so arrival cleanup can call stopNavigation. */
     private var navControllerRef: NavigationController? = null
 
+    private var currentResolutionJob: Job? = null
+
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
     private val _aiStatus = MutableStateFlow("IDLE")
     val aiStatus: StateFlow<String> = _aiStatus.asStateFlow()
@@ -74,7 +78,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         retryLocationUpdates()
-        Log.d(TAG, "MainViewModel initialised")
+        Log.i(TAG, "VIEWMODEL_INIT engineReady=${_engineReady.value} aiControllerExist=${aiController != null}")
     }
 
     fun initAI(context: Context) {
@@ -162,7 +166,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun startObserving(navigationController: NavigationController) {
         navControllerRef = navigationController
-        Log.i(TAG, "NAV_VOICE_OBSERVER_ATTACHED")
+        Log.i(TAG, "NAV_VOICE_OBSERVER_ATTACHED phase=${navigationController.state.value.phase}")
 
         // Wire voice-destination navigation: Kentas can now start navigation by voice.
         // The callback receives a pre-resolved "lat,lng" string from PlacesAutocompleteClient
@@ -289,6 +293,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         Log.i(TAG, "STARTSCREEN_VOICE_ENDED reason=stopped_externally")
         _isDestinationListening.value = false
         handler.post { aiController?.stopDestinationInput() }
+    }
+
+    /**
+     * Resolves a Place ID to coordinates in viewModelScope to ensure it survives
+     * screen recreation and backgrounds.
+     */
+    fun resolveCoordinates(
+        context: Context,
+        placeId: String,
+        fallbackName: String,
+        onResult: (String) -> Unit
+    ) {
+        currentResolutionJob?.cancel()
+        currentResolutionJob = viewModelScope.launch {
+            try {
+                val coords = PlacesAutocompleteClient.resolveCoordinates(context, placeId)
+                if (coords != null) {
+                    onResult("${coords.first},${coords.second}")
+                } else {
+                    onResult(fallbackName)
+                }
+            } finally {
+                Log.i(TAG, "ROUTE_LOADING_CLEARED")
+            }
+        }
     }
 
     fun setEngineReady(ready: Boolean) {

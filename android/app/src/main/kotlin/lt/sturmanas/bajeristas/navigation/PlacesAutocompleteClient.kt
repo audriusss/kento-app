@@ -50,6 +50,9 @@ object PlacesAutocompleteClient {
     private const val TAG = "PlacesAutoClient"
     private const val MAX_SUGGESTIONS = 5
 
+    @Volatile
+    private var cachedClient: com.google.android.libraries.places.api.net.PlacesClient? = null
+
     /** Rectangular bias half-size in degrees (~55 km lat, ~35 km lng in Lithuania). */
     private const val BIAS_DELTA_DEG = 0.5
 
@@ -69,9 +72,16 @@ object PlacesAutocompleteClient {
     fun initialize(context: Context): Boolean {
         val key = BuildConfig.GOOGLE_MAPS_API_KEY
         if (key.isBlank()) return false
+        
+        val appContext = context.applicationContext
         if (!Places.isInitialized()) {
-            Places.initializeWithNewPlacesApiEnabled(context.applicationContext, key)
+            Places.initializeWithNewPlacesApiEnabled(appContext, key)
             Log.d(TAG, "Places SDK initialised")
+        }
+        
+        if (cachedClient == null) {
+            cachedClient = Places.createClient(appContext)
+            Log.i(TAG, "PLACES_CLIENT_CREATED")
         }
         return true
     }
@@ -96,8 +106,9 @@ object PlacesAutocompleteClient {
         if (query.isBlank()) return emptyList()
         if (!initialize(context)) return emptyList()
 
+        Log.i(TAG, "PLACES_REQUEST_START type=getSuggestions query='$query'")
         return try {
-            val client = Places.createClient(context)
+            val client = cachedClient!!
             val builder = FindAutocompletePredictionsRequest.builder()
                 .setQuery(query)
                 .setCountries(listOf("LT"))
@@ -112,10 +123,15 @@ object PlacesAutocompleteClient {
             }
 
             val response = client.findAutocompletePredictions(builder.build()).awaitResult()
+            Log.i(TAG, "PLACES_REQUEST_SUCCESS type=getSuggestions")
             response.autocompletePredictions.take(maxResults)
         } catch (e: Exception) {
-            Log.w(TAG, "getSuggestions failed for '$query': ${e.message}")
+            if (e !is kotlinx.coroutines.CancellationException) {
+                Log.w(TAG, "getSuggestions failed for '$query': ${e.message}")
+            }
             emptyList()
+        } finally {
+            Log.i(TAG, "PLACES_REQUEST_FINISHED type=getSuggestions")
         }
     }
 
@@ -144,7 +160,6 @@ object PlacesAutocompleteClient {
      *
      * Requires location — if coordinates are null, returns empty list immediately.
      */
-    @Suppress("DEPRECATION")
     suspend fun searchNearbyByType(
         context: Context,
         latitude: Double,
@@ -154,8 +169,9 @@ object PlacesAutocompleteClient {
     ): List<VoiceDestinationChoice> {
         if (!initialize(context)) return emptyList()
 
+        Log.i(TAG, "PLACES_REQUEST_START type=searchNearbyByType type='$placeType'")
         return try {
-            val client = Places.createClient(context)
+            val client = cachedClient!!
             val center = LatLng(latitude, longitude)
             val bounds = CircularBounds.newInstance(center, NEARBY_RADIUS_M)
             val fields = listOf(Place.Field.ID, Place.Field.NAME, Place.Field.ADDRESS)
@@ -166,11 +182,15 @@ object PlacesAutocompleteClient {
                 .build()
 
             val response = client.searchNearby(request).awaitResult()
-            Log.d(TAG, "searchNearbyByType type='$placeType' count=${response.places.size}")
+            Log.i(TAG, "PLACES_REQUEST_SUCCESS type=searchNearbyByType count=${response.places.size}")
             response.places.take(maxResults).map { it.toVoiceDestinationChoice() }
         } catch (e: Exception) {
-            Log.w(TAG, "searchNearbyByType failed type='$placeType': ${e.message}")
+            if (e !is kotlinx.coroutines.CancellationException) {
+                Log.w(TAG, "searchNearbyByType failed type='$placeType': ${e.message}")
+            }
             emptyList()
+        } finally {
+            Log.i(TAG, "PLACES_REQUEST_FINISHED type=searchNearbyByType")
         }
     }
 
@@ -181,7 +201,6 @@ object PlacesAutocompleteClient {
      *
      * Returns up to [maxResults] results or an empty list on any error.
      */
-    @Suppress("DEPRECATION")
     suspend fun searchByTextNearby(
         context: Context,
         textQuery: String,
@@ -191,8 +210,9 @@ object PlacesAutocompleteClient {
     ): List<VoiceDestinationChoice> {
         if (!initialize(context)) return emptyList()
 
+        Log.i(TAG, "PLACES_REQUEST_START type=searchByTextNearby query='$textQuery'")
         return try {
-            val client = Places.createClient(context)
+            val client = cachedClient!!
             val fields = listOf(Place.Field.ID, Place.Field.NAME, Place.Field.ADDRESS)
 
             val builder = SearchByTextRequest.builder(textQuery, fields)
@@ -205,11 +225,15 @@ object PlacesAutocompleteClient {
             }
 
             val response = client.searchByText(builder.build()).awaitResult()
-            Log.d(TAG, "searchByTextNearby query='$textQuery' count=${response.places.size}")
+            Log.i(TAG, "PLACES_REQUEST_SUCCESS type=searchByTextNearby count=${response.places.size}")
             response.places.take(maxResults).map { it.toVoiceDestinationChoice() }
         } catch (e: Exception) {
-            Log.w(TAG, "searchByTextNearby failed query='$textQuery': ${e.message}")
+            if (e !is kotlinx.coroutines.CancellationException) {
+                Log.w(TAG, "searchByTextNearby failed query='$textQuery': ${e.message}")
+            }
             emptyList()
+        } finally {
+            Log.i(TAG, "PLACES_REQUEST_FINISHED type=searchByTextNearby")
         }
     }
 
@@ -224,18 +248,25 @@ object PlacesAutocompleteClient {
         placeId: String,
     ): Pair<Double, Double>? {
         if (!initialize(context)) return null
+        
+        Log.i(TAG, "PLACES_REQUEST_START type=resolveCoordinates id='$placeId'")
         return try {
-            val client = Places.createClient(context)
+            val client = cachedClient!!
             @Suppress("DEPRECATION")
             val fields = listOf(Place.Field.LAT_LNG)
             val request = FetchPlaceRequest.newInstance(placeId, fields)
             val response = client.fetchPlace(request).awaitResult()
             @Suppress("DEPRECATION")
             val latLng = response.place.latLng ?: return null
+            Log.i(TAG, "PLACES_REQUEST_SUCCESS type=resolveCoordinates")
             latLng.latitude to latLng.longitude
         } catch (e: Exception) {
-            Log.w(TAG, "resolveCoordinates failed for placeId='$placeId': ${e.message}")
+            if (e !is kotlinx.coroutines.CancellationException) {
+                Log.w(TAG, "resolveCoordinates failed for placeId='$placeId': ${e.message}")
+            }
             null
+        } finally {
+            Log.i(TAG, "PLACES_REQUEST_FINISHED type=resolveCoordinates")
         }
     }
 
@@ -270,6 +301,9 @@ object PlacesAutocompleteClient {
         }
         addOnFailureListener { exception ->
             if (cont.isActive) cont.resumeWithException(exception)
+        }
+        cont.invokeOnCancellation {
+            Log.i(TAG, "PLACES_REQUEST_CANCELLED")
         }
     }
 }
