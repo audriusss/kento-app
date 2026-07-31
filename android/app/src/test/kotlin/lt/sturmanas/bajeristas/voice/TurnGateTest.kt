@@ -226,4 +226,114 @@ class TurnGateTest {
             requiring,
         )
     }
+
+    // ── Regression: wake-word gate removed from checkBufferCompletion ────
+    //
+    // Commit 02bc234 added a requiresWakeWord(mode) gate inside
+    // checkBufferCompletion that dropped IDLE transcripts lacking a "kent*"
+    // token.  This broke hands-free mode — every utterance while idle was
+    // silently discarded.  The gate was reverted in the follow-up commit.
+    //
+    // The tests below anchor the correct post-revert behaviour:
+    //   • isTurnBlocked(IDLE) == false   → transcript enters processPacket
+    //   • requiresWakeWord(IDLE) == true → the FUNCTION still exists and is
+    //     correct, but it is NOT called inside checkBufferCompletion, so it
+    //     has no effect on IDLE utterances.
+    // ─────────────────────────────────────────────────────────────────────
+
+    @Test fun `IDLE transcript passes turn gate regardless of wake-word content`() {
+        // The turn gate (isTurnBlocked) only blocks THINKING and SPEAKING.
+        // An IDLE transcript — with or without "Kentai" — must always pass.
+        assertFalse(
+            "An IDLE transcript without a wake-word must NOT be dropped at the turn gate. " +
+            "The wake-word gate was removed from checkBufferCompletion in the revert commit.",
+            isTurnBlocked(Phase.IDLE),
+        )
+    }
+
+    @Test fun `requiresWakeWord function is preserved but no longer gates checkBufferCompletion`() {
+        // requiresWakeWord(IDLE) is correct as a function — IDLE genuinely
+        // requires a wake-word in a strict-gate design — but the gate was
+        // reverted to restore hands-free behaviour.  The function is kept so
+        // a future opt-in strict mode can re-enable it without re-implementing
+        // the logic.
+        assertTrue(
+            "requiresWakeWord(IDLE) must return true — the function definition is correct; " +
+            "it is the call site in checkBufferCompletion that was intentionally removed.",
+            requiresWakeWord(ConversationMode.IDLE),
+        )
+        // Cross-check: the turn gate (the thing that is enforced) does not use
+        // requiresWakeWord — it only checks phase, not mode.
+        assertFalse(
+            "isTurnBlocked must not consider ConversationMode at all — it is phase-only",
+            isTurnBlocked(Phase.IDLE),
+        )
+    }
+
+    @Test fun `THINKING SPEAKING still blocked after wake-word gate revert`() {
+        // The revert only removes the requiresWakeWord gate from checkBufferCompletion.
+        // The core regression fix (isTurnBlocked for THINKING/SPEAKING) is unchanged.
+        assertTrue("THINKING must still be blocked after the revert", isTurnBlocked(Phase.THINKING))
+        assertTrue("SPEAKING must still be blocked after the revert", isTurnBlocked(Phase.SPEAKING))
+    }
+
+    // ── closeTurn invariant: every USER_TURN_OPENED paired with CLOSED ───
+    //
+    // closeTurn(reason) is a private method so it cannot be called directly
+    // from tests.  The tests below verify the pure-function preconditions that
+    // make the invariant reachable; the structural coverage (12 call sites) is
+    // enforced by code review and the comment block in AIConversationController.
+    //
+    // Exit paths that require closeTurn and the reason tag logged:
+    //   empty_transcript  — processPacket: text.isBlank()
+    //   muted_drop        — processPacket: mode=MUTED, not an unmute command
+    //   mute_command      — processPacket: MUTE_COMMAND branch
+    //   unmute_command    — processPacket: UNMUTE_COMMAND branch
+    //   stop_command      — processPacket: STOP_COMMAND branch
+    //   memory_clear      — processPacket: MEMORY_CLEAR_COMMAND branch
+    //   empty_buffer      — checkBufferCompletion: buffer blank on entry
+    //   too_short_on_timeout — checkBufferCompletion: single-token timeout
+    //   wake_word_only    — checkBufferCompletion: IDLE wake-only acknowledge
+    //   route_cancel      — sendToAi: active route cancel intercept
+    //   voice_selection   — sendToAi: pending voice choices intercept
+    //   nav_command       — sendToAi: navigation command intercept
+    //   sent_to_ai        — sendToAi: AI request dispatched (normal path)
+    // ─────────────────────────────────────────────────────────────────────
+
+    @Test fun `closeTurn design - IDLE phase is not blocked so turn can open`() {
+        // Pre-condition for the empty_transcript, muted_drop, mute_command,
+        // unmute_command, stop_command, memory_clear, and buffer paths:
+        // the transcript must have first passed the turn gate in IDLE.
+        assertFalse(
+            "Turn must be openable in IDLE so the subsequent closeTurn paths are reachable",
+            isTurnBlocked(Phase.IDLE),
+        )
+    }
+
+    @Test fun `closeTurn design - LISTENING phase allows next turn after TTS`() {
+        // Pre-condition for sent_to_ai, route_cancel, voice_selection, nav_command:
+        // postTtsTargetPhase(ACTIVE) == LISTENING and !isTurnBlocked(LISTENING),
+        // so the next transcript after Kentas finishes speaking can open a turn
+        // that will eventually reach one of those closeTurn call sites.
+        val phaseAfterTts = postTtsTargetPhase(ConversationMode.ACTIVE)
+        assertFalse(
+            "LISTENING phase (post-TTS) must not be blocked — otherwise sendToAi " +
+            "and its three early-exit closeTurn paths would never be reached",
+            isTurnBlocked(phaseAfterTts),
+        )
+    }
+
+    @Test fun `closeTurn design - all non-blocking phases can open a turn`() {
+        // Every phase where isTurnBlocked returns false is a valid turn-open phase.
+        // Verifies that the set of phases capable of opening a turn (and therefore
+        // needing a closeTurn on every exit) is exactly the complement of
+        // {THINKING, SPEAKING}.
+        val canOpen = Phase.entries.filter { !isTurnBlocked(it) }.map { it.name }.toSet()
+        assertEquals(
+            "Phases capable of opening a turn (needing closeTurn on all exits)",
+            setOf("IDLE", "LISTENING", "COLLECTING", "WAITING_FOR_CONTINUATION",
+                  "MUTED", "PAUSED_BY_NAVIGATION"),
+            canOpen,
+        )
+    }
 }

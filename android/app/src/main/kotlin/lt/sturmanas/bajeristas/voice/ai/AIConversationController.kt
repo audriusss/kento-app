@@ -536,7 +536,7 @@ class AIConversationController(
     // ─── CONVERSATION LOGIC ───────────────────────────────────────────────
 
     private fun processPacket(text: String, isFinal: Boolean) {
-        if (text.isBlank()) return
+        if (text.isBlank()) { closeTurn("empty_transcript"); return }
 
         // Hard guard: if the user has explicitly muted the assistant, drop all transcripts
         // (including in-flight callbacks that arrived after mute was applied).
@@ -545,6 +545,7 @@ class AIConversationController(
             val norm = normalizeText(text)
             if (!unmuteCommands.any { norm.contains(it) }) {
                 Log.d(TAG, "CONV_PACKET_IGNORED mode=MUTED text='$text'")
+                closeTurn("muted_drop")
                 return
             }
         }
@@ -561,6 +562,7 @@ class AIConversationController(
             clearInterruptedResponse("mute_command")
             clearUtteranceBuffer("mute_command")
             speak("Gerai kapitone. Patylėsiu. Tik navigacija liks.")
+            closeTurn("mute_command")
             return
         }
 
@@ -570,12 +572,14 @@ class AIConversationController(
             transitionTo(Phase.LISTENING)
             clearUtteranceBuffer("unmute_command")
             speak("Grįžau, kapitone.")
+            closeTurn("unmute_command")
             return
         }
 
         if (norm.contains("stop") || norm.contains("sustok") || norm.contains("gana")) {
             Log.i(TAG, "CONV_EVENT type=STOP_COMMAND")
             clearUtteranceBuffer("stop_command")
+            closeTurn("stop_command")
             stop()
             return
         }
@@ -587,6 +591,7 @@ class AIConversationController(
             KentasChat.clearMemory()
             clearUtteranceBuffer("memory_clear")
             speak("Gerai, pamiršau viską. Pradedame iš naujo.")
+            closeTurn("memory_clear")
             return
         }
 
@@ -601,7 +606,7 @@ class AIConversationController(
 
     private fun checkBufferCompletion(isTimeout: Boolean) {
         val currentText = utteranceBuffer.toString().trim()
-        if (currentText.isBlank()) return
+        if (currentText.isBlank()) { closeTurn("empty_buffer"); return }
 
         val norm = normalizeText(currentText)
         val elapsedSinceStt = if (transcriptReceivedAtMs > 0)
@@ -622,26 +627,17 @@ class AIConversationController(
                     clearUtteranceBuffer("too_short_on_timeout")
                     transitionTo(Phase.IDLE)
                 }
+                closeTurn("too_short_on_timeout")
                 return
             }
         } else {
-            // Wake-word gate: when no active conversation window (mode=IDLE), only
-            // forward speech that contains a wake-word.  Immediate commands (mute/
-            // unmute/stop) are intercepted in processPacket() before reaching here
-            // and are always allowed regardless of mode.
-            if (requiresWakeWord(mode) && !containsWakeWord(norm)) {
-                Log.d(TAG, "CONV_PACKET_NO_WAKE_WORD mode=IDLE text='$currentText'")
-                clearUtteranceBuffer("no_wake_word")
-                transitionTo(Phase.IDLE)
-                return
-            }
-
             // Wake-word-only: acknowledge and open session without calling AI.
             if (mode == ConversationMode.IDLE && isWakeWordOnly(norm)) {
                 Log.i(TAG, "CONV_SEMANTIC_COMPLETE result=WAKE_ONLY")
                 clearUtteranceBuffer("wake_only")
                 mode = ConversationMode.ACTIVE
                 speak("Klausau.")
+                closeTurn("wake_word_only")
                 return
             }
 
@@ -877,6 +873,7 @@ class AIConversationController(
         if (VoiceDestinationDetector.isRouteCancelCommand(norm) ||
             (navActive && VoiceDestinationDetector.isCancellationCommand(norm))) {
             if (navActive) {
+                closeTurn("route_cancel")
                 handleRouteCancellation()
                 return
             }
@@ -890,6 +887,7 @@ class AIConversationController(
         val pending = pendingVoiceChoices
         if (pending != null) {
             clearUtteranceBuffer("voice_selection")
+            closeTurn("voice_selection")
             // Cancellation is checked FIRST — before any other gate.
             if (VoiceDestinationDetector.isCancellationCommand(norm)) {
                 handleVoiceCancellation()
@@ -928,6 +926,7 @@ class AIConversationController(
         // ── Navigation command intercept ──────────────────────────────────────
         // Guard: only when a navigation callback is wired (engine is ready).
         if (onNavigateToDestination != null && VoiceDestinationDetector.isNavigationCommand(norm)) {
+            closeTurn("nav_command")
             handleVoiceNavigation(text, norm)
             return
         }
@@ -936,7 +935,7 @@ class AIConversationController(
         val elapsedSinceStt = if (transcriptReceivedAtMs > 0)
             aiRequestStartedAtMs - transcriptReceivedAtMs
         else -1L
-        Log.i(TAG, "USER_TURN_CLOSED utteranceId=$activeTurnId")
+        closeTurn("sent_to_ai")
         Log.i(TAG, "AI_REQUEST_STARTED elapsedSinceSttMs=$elapsedSinceStt text='$text'")
         clearUtteranceBuffer("sent_to_ai")
         transitionTo(Phase.THINKING)
@@ -1422,6 +1421,24 @@ class AIConversationController(
     private fun cancelFollowUpWindow() {
         followUpWindowRunnable?.let { handler.removeCallbacks(it) }
         followUpWindowRunnable = null
+    }
+
+    /**
+     * Closes the currently open user turn, logging the reason.
+     *
+     * A turn is opened in [onTranscriptReceived] when [isTurnBlocked] returns false
+     * and [USER_TURN_OPENED] is logged.  Every exit path that follows an open turn
+     * must call [closeTurn] exactly once so the invariant
+     * "USER_TURN_OPENED is always paired with USER_TURN_CLOSED" holds.
+     *
+     * Safe to call when no turn is open (activeTurnId == -1); in that case it
+     * is a no-op so double-close situations (e.g. a command closes the turn then
+     * an empty-buffer guard fires) are harmless.
+     */
+    private fun closeTurn(reason: String) {
+        if (activeTurnId < 0) return
+        Log.i(TAG, "USER_TURN_CLOSED utteranceId=$activeTurnId reason=$reason")
+        activeTurnId = -1
     }
 
     override fun onInit(status: Int) {
