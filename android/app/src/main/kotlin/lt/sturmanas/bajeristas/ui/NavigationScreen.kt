@@ -310,6 +310,48 @@ fun NavigationScreen(
                     }
                 }
             }
+
+            // ── Arrival Confirmation Overlay ──────────────────────────────
+            if (navigationState.hasArrived) {
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .padding(24.dp)
+                        .fillMaxWidth(0.85f),
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f),
+                    shadowElevation = 8.dp,
+                ) {
+                    Column(
+                        modifier = Modifier.padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(20.dp),
+                    ) {
+                        Text(
+                            text  = "✅ Atvykote į tikslą",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                        Button(
+                            onClick  = onStopNavigation,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(52.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.primary,
+                            ),
+                        ) {
+                            Text(
+                                text  = "Baigti navigaciją",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+                    }
+                }
+            }
         }
 
         // ── Bottom controls — maneuver info + stop button ─────────────────────

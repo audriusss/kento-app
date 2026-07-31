@@ -108,8 +108,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // full cleanup pipeline used by the manual "Baigti navigaciją" button.
         voiceController.onArrivalSpeechCompleted = {
             Log.i(TAG, "ARRIVAL_SPEECH_COMPLETED")
-            Log.i(TAG, "ARRIVAL_CLEANUP_TRIGGERED")
-            handler.post { performFullNavigationCleanup() }
+            Log.i(TAG, "ARRIVAL_CLEANUP_POSTPONED")
+            // After arrival speech finishes, we stop Kentas monologues but stay on the map screen.
+            // Full navigation cleanup (including exit to StartScreen) is now triggered
+            // ONLY when the user manually taps "Baigti navigaciją" in the UI.
+            handler.post { aiController?.stop() }
         }
 
         conversationCoordinator.setTriggers(

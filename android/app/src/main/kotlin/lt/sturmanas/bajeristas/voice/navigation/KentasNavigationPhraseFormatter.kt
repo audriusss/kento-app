@@ -407,6 +407,7 @@ class KentasNavigationPhraseFormatter {
     // ── ARRIVED ───────────────────────────────────────────────────────────
 
     private fun formatArrived(): String = pickPhrase("ARRIVED", listOf(
+        "Kapitone, atvykome į tikslą.",
         "Nu va, privažiavom.",
         "Esam vietoj.",
         "Va čia ir reikėjo.",
