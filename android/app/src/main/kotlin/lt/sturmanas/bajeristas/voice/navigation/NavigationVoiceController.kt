@@ -12,7 +12,7 @@ import android.util.Log
 import lt.sturmanas.bajeristas.navigation.ManeuverType
 import lt.sturmanas.bajeristas.navigation.NavigationPhase
 import lt.sturmanas.bajeristas.navigation.NavigationState
-import java.util.Locale
+import lt.sturmanas.bajeristas.voice.TtsDefaults
 
 /**
  * Manages spoken navigation instructions using Android TextToSpeech.
@@ -306,7 +306,8 @@ class NavigationVoiceController(private val context: Context) : TextToSpeech.OnI
         // Notify engine BEFORE queuing so the mic mute gate is up before audio starts.
         listener?.onNavigationSpeechStarted(utteranceId)
 
-        val res = tts?.speak(text, queueMode, null, utteranceId)
+        val normalized = TtsDefaults.normalizeForTts(text)
+        val res = tts?.speak(normalized, queueMode, null, utteranceId)
         if (res != TextToSpeech.SUCCESS) {
             Log.e(TAG, "NAV_VOICE_SPEAK_FAILED result=$res id=$utteranceId")
             listener?.onNavigationSpeechFinished(utteranceId)
@@ -352,7 +353,9 @@ class NavigationVoiceController(private val context: Context) : TextToSpeech.OnI
         if (status == TextToSpeech.SUCCESS) {
             tts?.setAudioAttributes(navAudioAttributes)
 
-            val locale = Locale("lt", "LT")
+            val locale = TtsDefaults.LOCALE
+            tts?.setPitch(TtsDefaults.PITCH)
+            tts?.setSpeechRate(TtsDefaults.SPEECH_RATE)
             val setLangResult = tts?.setLanguage(locale)
 
             if (setLangResult == TextToSpeech.LANG_MISSING_DATA ||

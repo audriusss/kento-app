@@ -22,6 +22,7 @@ import lt.sturmanas.bajeristas.voice.pipeline.ContinuousMicrophonePipeline
 import lt.sturmanas.bajeristas.voice.pipeline.MicrophonePipeline
 import lt.sturmanas.bajeristas.voice.pipeline.PipelineConfig
 import lt.sturmanas.bajeristas.voice.pipeline.TranscriptionClient
+import lt.sturmanas.bajeristas.voice.TtsDefaults
 import java.util.Locale
 import java.util.UUID
 
@@ -1284,7 +1285,7 @@ class AIConversationController(
 
         aiTtsTerminalHandled = false
         currentAiUtteranceId = UUID.randomUUID().toString().substring(0, 8)
-        sentences = text.split(Regex("(?<=[.!?])\\s+")).filter { it.isNotBlank() }
+        sentences = TtsDefaults.splitForSpeaking(text)
         currentIndex = 0
         isInterrupted = false
 
@@ -1458,7 +1459,9 @@ class AIConversationController(
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
-            tts?.setLanguage(Locale("lt", "LT"))
+            tts?.setLanguage(TtsDefaults.LOCALE)
+            tts?.setPitch(TtsDefaults.PITCH)
+            tts?.setSpeechRate(TtsDefaults.SPEECH_RATE)
             tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                 override fun onStart(utteranceId: String?) {
                     Log.i(TAG, "AI_TTS_ON_START id=$utteranceId")

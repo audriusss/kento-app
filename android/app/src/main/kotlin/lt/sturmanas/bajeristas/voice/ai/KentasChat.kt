@@ -95,7 +95,7 @@ Atsakyk tiesiogiai į tai, kas pasakyta. Nesiūlyk temų, pagalbos ar tolesnių 
 """
 
     /**
-     * Initialise with the backend base URL (e.g. "https://your-backend.replit.app/api-server").
+     * Initialise with the backend base URL (e.g. "https://api.raskvezeja.lt").
      * Must be called before [askKentas].  Safe to call multiple times; only the first
      * non-blank value is applied.
      */

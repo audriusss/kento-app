@@ -16,7 +16,7 @@ val googleMapsApiKey: String = localProperties.getProperty("GOOGLE_MAPS_API_KEY"
 // Backend base URL — all privileged AI calls are proxied through this server.
 // The OpenAI API key MUST NOT be placed here; it belongs only in the backend's
 // OPENAI_API_KEY environment variable.
-// Example: https://your-backend.replit.app/api-server
+// Example: https://api.raskvezeja.lt
 val backendUrl: String = localProperties.getProperty("BACKEND_URL", "")
 
 android {

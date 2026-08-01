@@ -10,8 +10,8 @@ sdk.dir=/path/to/android/sdk
 ## Šturmanas Bajeristas backend URL
 ## All privileged AI calls (transcription, chat) are proxied through this server.
 ## The OpenAI API key must NOT go here — it belongs only in the server's environment.
-## Development:  https://<your-replit-dev-domain>/api-server
-## Production:   https://<your-deployment-url>/api-server
+## Development:  https://api.raskvezeja.lt
+## Production:   https://api.raskvezeja.lt
 BACKEND_URL=
 
 ## Google Maps / Navigation SDK + Places Autocomplete API key
